@@ -394,6 +394,11 @@ Future<void> _selectFiles(WidgetTester tester, List<String> names) async {
 
 Finder _barAction(String label) => find.widgetWithText(TextButton, label);
 
+Future<void> _openFilter(WidgetTester tester) async {
+  await tester.tap(find.widgetWithText(TextButton, 'Filter'));
+  await tester.pump();
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(Uint8List(0));
@@ -435,6 +440,7 @@ void main() {
     await tester.tap(find.byTooltip('Close'));
     await tester.pumpAndSettle();
 
+    await _openFilter(tester);
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
       'BIG',
@@ -447,8 +453,13 @@ void main() {
     await _pumpBrowser(tester, container);
     expect(_listedNames(tester, names), ['big.log']);
     expect(find.widgetWithText(TextField, 'BIG'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+      isFalse,
+    );
     await tester.tap(find.byTooltip('Clear filter'));
     await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsNothing);
     expect(_listedNames(tester, names), ['src', 'big.log', 'small.txt']);
 
     // Another host keeps its own defaults.
@@ -462,6 +473,7 @@ void main() {
     final sftp = _HostSftp(files: {'$_home/notes.txt': 1});
     await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
 
+    await _openFilter(tester);
     await tester.enterText(find.byKey(const ValueKey('sftpFilterField')), 'zz');
     await tester.pumpAndSettle();
     expect(find.text('no matches'), findsOneWidget);
@@ -480,6 +492,7 @@ void main() {
       ..saved[1] = const SftpBrowserViewSettings(showHidden: false);
     await _pumpBrowser(tester, _container(sftp, store: store));
 
+    await _openFilter(tester);
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
       '.env',
@@ -841,6 +854,7 @@ void main() {
     );
     final store = _MemoryViewStore();
     await _pumpBrowser(tester, _container(sftp, store: store));
+    await _openFilter(tester);
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
       'notes',
@@ -916,6 +930,7 @@ void main() {
       ..filterReadGate = Completer<void>();
     await _pumpBrowser(tester, _container(sftp, store: store));
 
+    await _openFilter(tester);
     final field = find.byKey(const ValueKey('sftpFilterField'));
     await tester.enterText(field, 'log');
     await tester.pump();
@@ -1450,6 +1465,7 @@ void main() {
     // While it runs, open a folder holding the same name and filter it out.
     await tester.tap(find.text('docs'));
     await tester.pump(const Duration(milliseconds: 500));
+    await _openFilter(tester);
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
       'zzz',

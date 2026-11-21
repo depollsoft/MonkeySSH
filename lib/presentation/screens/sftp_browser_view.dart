@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widget_previews.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
@@ -687,7 +688,28 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
   late final FocusNode _focusNode = FocusNode(
     debugLabel: 'sftp-filter-field',
     onKeyEvent: _handleKeyEvent,
-  );
+  )..addListener(_onFilterFocusChanged);
+  bool _filterRequested = false;
+
+  void _openFilter() {
+    setState(() => _filterRequested = true);
+    _focusNode.requestFocus();
+  }
+
+  void _onFilterFocusChanged() {
+    if (!_focusNode.hasFocus && _filterRequested) {
+      setState(() => _filterRequested = false);
+    }
+  }
+
+  void _closeFilter() {
+    setState(() => _filterRequested = false);
+    _focusNode.unfocus();
+    if (widget.filterController.text.isNotEmpty) {
+      widget.filterController.clear();
+      widget.onFilterChanged('');
+    }
+  }
 
   @override
   void dispose() {
@@ -700,12 +722,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
       return KeyEventResult.ignored;
     }
     if (event.logicalKey == LogicalKeyboardKey.escape) {
-      if (widget.filterController.text.isNotEmpty) {
-        widget.filterController.clear();
-        widget.onFilterChanged('');
-      } else {
-        _focusNode.unfocus();
-      }
+      _closeFilter();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -742,6 +759,27 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                     builder: (context, value, _) {
                       final hasText = value.text.isNotEmpty;
                       final hasQuery = value.text.trim().isNotEmpty;
+                      if (!_filterRequested && !hasQuery) {
+                        return Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: TextButton.icon(
+                            onPressed: _openFilter,
+                            style: TextButton.styleFrom(
+                              foregroundColor: muted,
+                              minimumSize: const Size(44, 44),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                            ),
+                            icon: const Icon(Icons.search, size: 18),
+                            label: const Text(
+                              'Filter',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        );
+                      }
                       final showCount =
                           hasQuery &&
                           !compact &&
@@ -812,60 +850,55 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                               minWidth: 36,
                               minHeight: 36,
                             ),
-                            suffixIcon: hasText
-                                ? Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (showCount)
-                                        Semantics(
-                                          container: true,
-                                          liveRegion: true,
-                                          label:
-                                              '${widget.matchCount} of ${widget.totalCount} items match',
-                                          child: ExcludeSemantics(
-                                            child: Padding(
-                                              padding: const EdgeInsets.only(
-                                                left: 4,
-                                                right: 2,
-                                              ),
-                                              child: Text(
-                                                '${widget.matchCount}/${widget.totalCount}',
-                                                key: const ValueKey(
-                                                  'sftpFilterMatchCount',
-                                                ),
-                                                style: FluttyTheme.monoStyle
-                                                    .copyWith(
-                                                      fontSize: 11.5,
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                      color: zeroMatches
-                                                          ? scheme.error
-                                                          : muted,
-                                                    ),
-                                              ),
-                                            ),
+                            suffixIcon: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (showCount)
+                                  Semantics(
+                                    container: true,
+                                    liveRegion: true,
+                                    label:
+                                        '${widget.matchCount} of ${widget.totalCount} items match',
+                                    child: ExcludeSemantics(
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(
+                                          left: 4,
+                                          right: 2,
+                                        ),
+                                        child: Text(
+                                          '${widget.matchCount}/${widget.totalCount}',
+                                          key: const ValueKey(
+                                            'sftpFilterMatchCount',
+                                          ),
+                                          style: FluttyTheme.monoStyle.copyWith(
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w600,
+                                            color: zeroMatches
+                                                ? scheme.error
+                                                : muted,
                                           ),
                                         ),
-                                      IconButton(
-                                        tooltip: 'Clear filter',
-                                        constraints: const BoxConstraints(
-                                          minWidth: 36,
-                                          minHeight: 36,
-                                        ),
-                                        padding: EdgeInsets.zero,
-                                        icon: Icon(
-                                          Icons.close,
-                                          size: 17,
-                                          color: muted,
-                                        ),
-                                        onPressed: () {
-                                          widget.filterController.clear();
-                                          widget.onFilterChanged('');
-                                        },
                                       ),
-                                    ],
-                                  )
-                                : null,
+                                    ),
+                                  ),
+                                IconButton(
+                                  tooltip: hasText
+                                      ? 'Clear filter'
+                                      : 'Close filter',
+                                  constraints: const BoxConstraints(
+                                    minWidth: 36,
+                                    minHeight: 36,
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  icon: Icon(
+                                    Icons.close,
+                                    size: 17,
+                                    color: muted,
+                                  ),
+                                  onPressed: _closeFilter,
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       );
@@ -910,6 +943,41 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
       ),
     );
   }
+}
+
+/// Interactive preview of the filter button and expanded field.
+@Preview(name: 'SFTP filter toolbar', size: Size(390, 100))
+Widget sftpFilterToolbarPreview() => MaterialApp(
+  theme: FluttyTheme.dark,
+  home: const Scaffold(body: _SftpFilterToolbarPreview()),
+);
+
+class _SftpFilterToolbarPreview extends StatefulWidget {
+  const _SftpFilterToolbarPreview();
+
+  @override
+  State<_SftpFilterToolbarPreview> createState() =>
+      _SftpFilterToolbarPreviewState();
+}
+
+class _SftpFilterToolbarPreviewState extends State<_SftpFilterToolbarPreview> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SftpBrowserToolbar(
+    filterController: _controller,
+    onFilterChanged: (_) {},
+    settings: const SftpBrowserViewSettings(),
+    onShowViewOptions: () => unawaited(
+      showSftpBrowserViewOptions(context, const SftpBrowserViewSettings()),
+    ),
+  );
 }
 
 class _SortViewPill extends StatelessWidget {

@@ -1265,6 +1265,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                       )
                     : null;
                 return SftpBrowserToolbar(
+                  key: ValueKey(_currentPath),
                   filterController: _filterController,
                   onFilterChanged: _onFilterChanged,
                   settings: _viewSettings,

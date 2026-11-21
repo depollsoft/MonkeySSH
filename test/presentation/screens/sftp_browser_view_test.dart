@@ -292,4 +292,44 @@ void main() {
     expect(find.byIcon(Icons.tune), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('filter opens focused and collapses when dismissed empty', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SftpBrowserToolbar(
+            filterController: controller,
+            onFilterChanged: (_) {},
+            settings: const SftpBrowserViewSettings(),
+            onShowViewOptions: () {},
+          ),
+        ),
+      ),
+    );
+    final field = find.byKey(const ValueKey('sftpFilterField'));
+    final filter = find.widgetWithText(TextButton, 'Filter');
+    expect(field, findsNothing);
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    expect(field, findsNothing);
+
+    await tester.tap(filter);
+    await tester.pumpAndSettle();
+    await tester.enterText(field, 'log');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    expect(field, findsOneWidget);
+    await tester.tap(find.byTooltip('Clear filter'));
+    await tester.pumpAndSettle();
+    expect(field, findsNothing);
+    expect(controller.text, isEmpty);
+  });
 }
