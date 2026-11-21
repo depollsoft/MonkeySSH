@@ -115,7 +115,7 @@ Future<InMemorySftpClient> _openNotesInEditor(
   );
   await tester.pumpAndSettle();
   if (browserFilter != null) {
-    await tester.tap(find.widgetWithText(TextButton, 'Filter'));
+    await tester.tap(find.byTooltip('Show filter bar'));
     await tester.pump();
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),

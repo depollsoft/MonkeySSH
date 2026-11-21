@@ -261,6 +261,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   Future<void> _viewSettingsSaveQueue = Future<void>.value();
   bool _filterChangedLocally = false;
   final TextEditingController _filterController = TextEditingController();
+  final _filterFocus = FocusNode(debugLabel: 'sftp-filter-field');
+  final _filterToggleFocus = FocusNode(debugLabel: 'sftp-filter-toggle');
+  bool _showFilterToolbar = false;
+  bool get _filterToolbarVisible =>
+      _showFilterToolbar || _filterQuery.trim().isNotEmpty;
   String _filterQuery = '';
   String? _filterDirectory;
   SftpBrowserFilter? _rememberedFilter;
@@ -331,6 +336,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     _breadcrumbScrollController.dispose();
     _fileListScrollController.dispose();
     _filterController.dispose();
+    _filterFocus.dispose();
+    _filterToggleFocus.dispose();
     _sftp = null;
     super.dispose();
   }
@@ -1227,6 +1234,16 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           ),
           actions: [
             IconButton(
+              focusNode: _filterToggleFocus,
+              isSelected: _filterToolbarVisible,
+              icon: const Icon(Icons.search),
+              selectedIcon: const Icon(Icons.search_off),
+              tooltip: _filterToolbarVisible
+                  ? 'Hide filter bar'
+                  : 'Show filter bar',
+              onPressed: _toggleFilterToolbar,
+            ),
+            IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: () {
                 _clearHighlightedFile();
@@ -1255,35 +1272,38 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           children: [
             _buildLocationShortcuts(),
             _buildBreadcrumbs(),
-            Builder(
-              builder: (context) {
-                final filterCounts = !_isLoading && _error == null
-                    ? countSftpFilterMatches(
-                        _files,
-                        _viewSettings,
-                        _filterQuery,
-                      )
-                    : null;
-                return SftpBrowserToolbar(
-                  key: ValueKey(_currentPath),
-                  filterController: _filterController,
-                  onFilterChanged: _onFilterChanged,
-                  settings: _viewSettings,
-                  onShowViewOptions: () => unawaited(_showViewOptions()),
-                  onToggleSortDirection: () =>
-                      unawaited(_toggleSortDirection()),
-                  onStartSelection:
-                      _isSelectionMode ||
-                          _isBatchSelecting ||
-                          _movingFiles != null ||
-                          _batchRunning
-                      ? null
-                      : _startBatchSelection,
-                  matchCount: filterCounts?.matched,
-                  totalCount: filterCounts?.total,
-                );
-              },
-            ),
+            if (_filterToolbarVisible)
+              Builder(
+                builder: (context) {
+                  final filterCounts = !_isLoading && _error == null
+                      ? countSftpFilterMatches(
+                          _files,
+                          _viewSettings,
+                          _filterQuery,
+                        )
+                      : null;
+                  return SftpBrowserToolbar(
+                    key: ValueKey(_currentPath),
+                    filterController: _filterController,
+                    filterFocus: _filterFocus,
+                    onCloseFilter: _hideFilterToolbar,
+                    onFilterChanged: _onFilterChanged,
+                    settings: _viewSettings,
+                    onShowViewOptions: () => unawaited(_showViewOptions()),
+                    onToggleSortDirection: () =>
+                        unawaited(_toggleSortDirection()),
+                    onStartSelection:
+                        _isSelectionMode ||
+                            _isBatchSelecting ||
+                            _movingFiles != null ||
+                            _batchRunning
+                        ? null
+                        : _startBatchSelection,
+                    matchCount: filterCounts?.matched,
+                    totalCount: filterCounts?.total,
+                  );
+                },
+              ),
             Expanded(child: _buildFileList()),
           ],
         ),
@@ -1602,7 +1622,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                     : 'Nothing in this folder matches "$query".',
                 primaryLabel: 'Clear filter',
                 primaryIcon: Icons.filter_list_off,
-                onPrimary: _clearFilter,
+                onPrimary: _hideFilterToolbar,
                 secondaryActions: [
                   if (hiddenMatched > 0)
                     BrandEmptyAction(

@@ -636,10 +636,12 @@ class _ViewChoicePill extends StatelessWidget {
 
 /// Compact filter field, live sort/view pill and selection trigger shown above
 /// the SFTP file list.
-class SftpBrowserToolbar extends StatefulWidget {
+class SftpBrowserToolbar extends StatelessWidget {
   /// Creates the toolbar.
   const SftpBrowserToolbar({
     required this.filterController,
+    required this.filterFocus,
+    required this.onCloseFilter,
     required this.onFilterChanged,
     required this.settings,
     required this.onShowViewOptions,
@@ -652,6 +654,12 @@ class SftpBrowserToolbar extends StatefulWidget {
 
   /// Holds the filter text.
   final TextEditingController filterController;
+
+  /// Focus for the filter input, owned by the browser.
+  final FocusNode filterFocus;
+
+  /// Clears the filter and hides the toolbar.
+  final VoidCallback onCloseFilter;
 
   /// Called with the new filter text as the user types or clears it.
   final ValueChanged<String> onFilterChanged;
@@ -675,57 +683,12 @@ class SftpBrowserToolbar extends StatefulWidget {
   /// Total eligible entries in the current directory, or null while loading.
   final int? totalCount;
 
-  @override
-  State<SftpBrowserToolbar> createState() => _SftpBrowserToolbarState();
-}
-
-const _toolbarControlHeight = 48.0;
-const _toolbarControlRadius = BorderRadius.all(
-  Radius.circular(FluttyTheme.radiusSm),
-);
-
-class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
-  late final FocusNode _focusNode = FocusNode(
-    debugLabel: 'sftp-filter-field',
-    onKeyEvent: _handleKeyEvent,
-  )..addListener(_onFilterFocusChanged);
-  final _filterButtonFocus = FocusNode(debugLabel: 'sftp-filter-button');
-  bool _filterRequested = false;
-
-  void _openFilter() {
-    setState(() => _filterRequested = true);
-    _focusNode.requestFocus();
-  }
-
-  void _onFilterFocusChanged() {
-    if (!_focusNode.hasFocus && _filterRequested) {
-      setState(() => _filterRequested = false);
-    }
-  }
-
-  void _closeFilter() {
-    setState(() => _filterRequested = false);
-    _focusNode.unfocus();
-    _filterButtonFocus.requestFocus();
-    if (widget.filterController.text.isNotEmpty) {
-      widget.filterController.clear();
-      widget.onFilterChanged('');
-    }
-  }
-
-  @override
-  void dispose() {
-    _focusNode.dispose();
-    _filterButtonFocus.dispose();
-    super.dispose();
-  }
-
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     if (event.logicalKey == LogicalKeyboardKey.escape) {
-      _closeFilter();
+      onCloseFilter();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -737,7 +700,6 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
     final scheme = theme.colorScheme;
     final muted = _mutedTextColor(theme);
     final inputFill = _inputSurfaceColor(theme);
-    final settings = widget.settings;
     final sortDescription = describeSftpSort(settings);
     final viewTooltip = settings.showHidden
         ? 'Sort and view: $sortDescription'
@@ -759,54 +721,20 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
               children: [
                 Expanded(
                   child: ValueListenableBuilder<TextEditingValue>(
-                    valueListenable: widget.filterController,
+                    valueListenable: filterController,
                     builder: (context, value, _) {
                       final hasText = value.text.isNotEmpty;
                       final hasQuery = value.text.trim().isNotEmpty;
-                      if (!_filterRequested && !hasQuery) {
-                        return Align(
-                          alignment: AlignmentDirectional.centerStart,
-                          child: TextButton.icon(
-                            focusNode: _filterButtonFocus,
-                            onPressed: _openFilter,
-                            style: TextButton.styleFrom(
-                              foregroundColor: muted,
-                              backgroundColor: inputFill,
-                              minimumSize: const Size(
-                                48,
-                                _toolbarControlHeight,
-                              ),
-                              shape: const RoundedRectangleBorder(
-                                borderRadius: _toolbarControlRadius,
-                              ),
-                              side: BorderSide(color: scheme.outline),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
-                              ),
-                            ),
-                            icon: const Icon(Icons.search, size: 18),
-                            label: const Text(
-                              'Filter',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        );
-                      }
                       final hasCount =
-                          hasQuery &&
-                          widget.matchCount != null &&
-                          widget.totalCount != null;
+                          hasQuery && matchCount != null && totalCount != null;
                       final count = hasCount
                           ? Semantics(
                               container: true,
                               liveRegion: true,
-                              label:
-                                  '${widget.matchCount} of ${widget.totalCount} items match',
+                              label: '$matchCount of $totalCount items match',
                               child: ExcludeSemantics(
                                 child: Text(
-                                  '${widget.matchCount}/${widget.totalCount}',
+                                  '$matchCount/$totalCount',
                                   key: const ValueKey('sftpFilterMatchCount'),
                                   style: FluttyTheme.monoStyle.copyWith(
                                     fontSize: 11.5,
@@ -820,90 +748,101 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                       final restingBorderColor = hasQuery
                           ? scheme.primary.withValues(alpha: 0.7)
                           : scheme.outline;
-                      return Semantics(
-                        label: 'Filter names in this folder',
-                        child: TextField(
-                          key: const ValueKey('sftpFilterField'),
-                          controller: widget.filterController,
-                          focusNode: _focusNode,
-                          onChanged: widget.onFilterChanged,
-                          textInputAction: TextInputAction.search,
-                          autocorrect: false,
-                          enableSuggestions: false,
-                          style: FluttyTheme.monoStyle.copyWith(
-                            fontSize: 13.5,
-                            color: scheme.onSurface,
-                          ),
-                          decoration: InputDecoration(
-                            isDense: true,
-                            filled: true,
-                            fillColor: inputFill,
-                            hintText: 'Filter names',
-                            hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                      return Focus(
+                        canRequestFocus: false,
+                        onKeyEvent: _handleKeyEvent,
+                        child: Semantics(
+                          label: 'Filter names in this folder',
+                          child: TextField(
+                            key: const ValueKey('sftpFilterField'),
+                            controller: filterController,
+                            focusNode: filterFocus,
+                            onSubmitted: (_) {
+                              if (!hasQuery) onCloseFilter();
+                            },
+                            onChanged: onFilterChanged,
+                            textInputAction: TextInputAction.search,
+                            autocorrect: false,
+                            enableSuggestions: false,
+                            style: FluttyTheme.monoStyle.copyWith(
                               fontSize: 13.5,
-                              color: muted,
+                              color: scheme.onSurface,
                             ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            border: OutlineInputBorder(
-                              borderRadius: _toolbarControlRadius,
-                              borderSide: BorderSide(color: restingBorderColor),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: _toolbarControlRadius,
-                              borderSide: BorderSide(color: restingBorderColor),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: _toolbarControlRadius,
-                              borderSide: BorderSide(
-                                color: scheme.primary,
-                                width: 1.5,
+                            decoration: InputDecoration(
+                              isDense: true,
+                              filled: true,
+                              fillColor: inputFill,
+                              hintText: 'Filter names',
+                              hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                                fontSize: 13.5,
+                                color: muted,
                               ),
-                            ),
-                            prefixIcon: Icon(
-                              Icons.search,
-                              size: 18,
-                              color: hasQuery ? scheme.primary : muted,
-                            ),
-                            prefixIconConstraints: const BoxConstraints(
-                              minWidth: 40,
-                              minHeight: _toolbarControlHeight,
-                            ),
-                            suffixIconConstraints: const BoxConstraints(
-                              minWidth: 44,
-                              minHeight: _toolbarControlHeight,
-                            ),
-                            helper: compact ? count : null,
-                            suffixIcon: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (!compact && count != null)
-                                  Padding(
-                                    padding: const EdgeInsetsDirectional.only(
-                                      start: 4,
-                                      end: 2,
-                                    ),
-                                    child: count,
-                                  ),
-                                IconButton(
-                                  tooltip: hasText
-                                      ? 'Clear filter'
-                                      : 'Close filter',
-                                  constraints: const BoxConstraints.tightFor(
-                                    width: 44,
-                                    height: _toolbarControlHeight,
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                  icon: Icon(
-                                    Icons.close,
-                                    size: 17,
-                                    color: muted,
-                                  ),
-                                  onPressed: _closeFilter,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: _toolbarControlRadius,
+                                borderSide: BorderSide(
+                                  color: restingBorderColor,
                                 ),
-                              ],
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: _toolbarControlRadius,
+                                borderSide: BorderSide(
+                                  color: restingBorderColor,
+                                ),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: _toolbarControlRadius,
+                                borderSide: BorderSide(
+                                  color: scheme.primary,
+                                  width: 1.5,
+                                ),
+                              ),
+                              prefixIcon: Icon(
+                                Icons.search,
+                                size: 18,
+                                color: hasQuery ? scheme.primary : muted,
+                              ),
+                              prefixIconConstraints: const BoxConstraints(
+                                minWidth: 40,
+                                minHeight: _toolbarControlHeight,
+                              ),
+                              suffixIconConstraints: const BoxConstraints(
+                                minWidth: 44,
+                                minHeight: _toolbarControlHeight,
+                              ),
+                              helper: compact ? count : null,
+                              suffixIcon: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (!compact && count != null)
+                                    Padding(
+                                      padding: const EdgeInsetsDirectional.only(
+                                        start: 4,
+                                        end: 2,
+                                      ),
+                                      child: count,
+                                    ),
+                                  IconButton(
+                                    tooltip: hasText
+                                        ? 'Clear filter'
+                                        : 'Close filter',
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 44,
+                                      height: _toolbarControlHeight,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                    icon: Icon(
+                                      Icons.close,
+                                      size: 17,
+                                      color: muted,
+                                    ),
+                                    onPressed: onCloseFilter,
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -917,19 +856,19 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                   settings: settings,
                   tooltip: viewTooltip,
                   compact: compact,
-                  onTap: widget.onShowViewOptions,
-                  onLongPress: widget.onToggleSortDirection == null
+                  onTap: onShowViewOptions,
+                  onLongPress: onToggleSortDirection == null
                       ? null
                       : () {
                           unawaited(HapticFeedback.selectionClick());
-                          widget.onToggleSortDirection!();
+                          onToggleSortDirection!();
                         },
                 ),
-                if (widget.onStartSelection != null) ...[
+                if (onStartSelection != null) ...[
                   const SizedBox(width: 4),
                   IconButton(
                     tooltip: 'Select files',
-                    onPressed: widget.onStartSelection,
+                    onPressed: onStartSelection,
                     constraints: const BoxConstraints.tightFor(
                       width: 44,
                       height: _toolbarControlHeight,
@@ -951,7 +890,12 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
   }
 }
 
-/// Interactive preview of the filter button and expanded field.
+const _toolbarControlHeight = 48.0;
+const _toolbarControlRadius = BorderRadius.all(
+  Radius.circular(FluttyTheme.radiusSm),
+);
+
+/// Interactive preview of the expanded filter toolbar.
 @Preview(name: 'SFTP filter toolbar', size: Size(390, 100))
 Widget sftpFilterToolbarPreview() => MaterialApp(
   theme: FluttyTheme.dark,
@@ -968,16 +912,20 @@ class _SftpFilterToolbarPreview extends StatefulWidget {
 
 class _SftpFilterToolbarPreviewState extends State<_SftpFilterToolbarPreview> {
   final _controller = TextEditingController();
+  final _focus = FocusNode();
 
   @override
   void dispose() {
     _controller.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => SftpBrowserToolbar(
     filterController: _controller,
+    filterFocus: _focus,
+    onCloseFilter: _controller.clear,
     onFilterChanged: (_) {},
     settings: const SftpBrowserViewSettings(),
     onShowViewOptions: () => unawaited(

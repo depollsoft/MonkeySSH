@@ -384,6 +384,9 @@ List<String> _listedNames(WidgetTester tester, Iterable<String> candidates) {
 }
 
 Future<void> _selectFiles(WidgetTester tester, List<String> names) async {
+  if (find.byTooltip('Show filter bar').evaluate().isNotEmpty) {
+    await _openFilter(tester);
+  }
   await tester.tap(find.byTooltip('Select files'));
   await tester.pumpAndSettle();
   for (final name in names) {
@@ -395,13 +398,42 @@ Future<void> _selectFiles(WidgetTester tester, List<String> names) async {
 Finder _barAction(String label) => find.widgetWithText(TextButton, label);
 
 Future<void> _openFilter(WidgetTester tester) async {
-  await tester.tap(find.widgetWithText(TextButton, 'Filter'));
+  await tester.tap(find.byTooltip('Show filter bar'));
   await tester.pump();
 }
 
 void main() {
   setUpAll(() {
     registerFallbackValue(Uint8List(0));
+  });
+
+  testWidgets('filter toggle removes the whole row and reclaims its height', (
+    tester,
+  ) async {
+    final store = _MemoryViewStore();
+    final sftp = _HostSftp(
+      files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
+    );
+    await _pumpBrowser(tester, _container(sftp, store: store));
+    final field = find.byKey(const ValueKey('sftpFilterField'));
+    final sort = find.byKey(const ValueKey('sftpSortViewButton'));
+    final notes = find.text('notes.txt');
+    final listTop = tester.getTopLeft(notes).dy;
+    expect(find.byType(SftpBrowserToolbar), findsNothing);
+
+    await _openFilter(tester);
+    expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+    expect(tester.getRect(field).height, tester.getRect(sort).height);
+    expect(tester.getTopLeft(notes).dy, greaterThan(listTop));
+
+    await tester.enterText(field, 'log');
+    await tester.pump();
+    expect(notes, findsNothing);
+    await tester.tap(find.byTooltip('Hide filter bar'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SftpBrowserToolbar), findsNothing);
+    expect(tester.getTopLeft(notes).dy, listTop);
+    expect(store.filters, isEmpty);
   });
 
   testWidgets('sort, hidden-file and filter settings persist per host', (
@@ -417,6 +449,7 @@ void main() {
     await _pumpBrowser(tester, container);
     expect(_listedNames(tester, names), names);
 
+    await _openFilter(tester);
     await tester.tap(find.byKey(const ValueKey('sftpSortViewButton')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Size'));
@@ -442,7 +475,6 @@ void main() {
     await tester.tap(find.byTooltip('Close'));
     await tester.pumpAndSettle();
 
-    await _openFilter(tester);
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
       'BIG',
@@ -519,6 +551,7 @@ void main() {
     await _pumpBrowser(tester, _container(sftp, store: store));
     expect(_listedNames(tester, ['a.txt', 'z.txt']), ['a.txt', 'z.txt']);
 
+    await _openFilter(tester);
     await tester.longPress(find.byKey(const ValueKey('sftpSortViewButton')));
     await tester.pumpAndSettle();
     expect(_listedNames(tester, ['a.txt', 'z.txt']), ['z.txt', 'a.txt']);

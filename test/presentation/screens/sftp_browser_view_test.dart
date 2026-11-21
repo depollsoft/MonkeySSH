@@ -230,7 +230,9 @@ void main() {
       ValueChanged<String>? onFilterChanged,
     }) async {
       final controller = TextEditingController(text: query);
+      final focus = FocusNode();
       addTearDown(controller.dispose);
+      addTearDown(focus.dispose);
       await tester.pumpWidget(
         MaterialApp(
           theme: FluttyTheme.dark,
@@ -239,6 +241,11 @@ void main() {
               width: width,
               child: SftpBrowserToolbar(
                 filterController: controller,
+                filterFocus: focus,
+                onCloseFilter: () {
+                  controller.clear();
+                  onFilterChanged?.call('');
+                },
                 onFilterChanged: onFilterChanged ?? (_) {},
                 settings: settings,
                 onShowViewOptions: () {},
@@ -315,50 +322,5 @@ void main() {
       isTrue,
     );
     semantics.dispose();
-  });
-
-  testWidgets('filter opens focused and collapses when dismissed empty', (
-    tester,
-  ) async {
-    final controller = TextEditingController();
-    addTearDown(controller.dispose);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SftpBrowserToolbar(
-            filterController: controller,
-            onFilterChanged: (_) {},
-            settings: const SftpBrowserViewSettings(),
-            onShowViewOptions: () {},
-          ),
-        ),
-      ),
-    );
-    final field = find.byKey(const ValueKey('sftpFilterField'));
-    final filter = find.widgetWithText(TextButton, 'Filter');
-    final sort = find.byKey(const ValueKey('sftpSortViewButton'));
-    expect(field, findsNothing);
-    final sortBounds = tester.getRect(sort);
-    expect(tester.getRect(filter).height, sortBounds.height);
-    await tester.tap(filter);
-    await tester.pumpAndSettle();
-    expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
-    expect(tester.getRect(field).height, sortBounds.height);
-    expect(tester.getRect(sort), sortBounds);
-
-    await tester.testTextInput.receiveAction(TextInputAction.search);
-    await tester.pumpAndSettle();
-    expect(field, findsNothing);
-
-    await tester.tap(filter);
-    await tester.pumpAndSettle();
-    await tester.enterText(field, 'log');
-    await tester.testTextInput.receiveAction(TextInputAction.search);
-    await tester.pumpAndSettle();
-    expect(field, findsOneWidget);
-    await tester.tap(find.byTooltip('Clear filter'));
-    await tester.pumpAndSettle();
-    expect(field, findsNothing);
-    expect(controller.text, isEmpty);
   });
 }

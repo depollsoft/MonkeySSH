@@ -120,6 +120,10 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   /// restarts. Runs inside setState.
   void _syncFilterWithDirectory(String path) {
     if (_filterDirectory == path) return;
+    if (_filterDirectory != null) {
+      _showFilterToolbar = false;
+      _filterFocus.unfocus();
+    }
     // Leaving the folder a filter was applied to forgets it; a filter saved
     // for a folder not opened yet (the browser restarts at its start folder)
     // waits until that folder is opened.
@@ -159,7 +163,24 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     _onFilterChanged('');
   }
 
+  void _toggleFilterToolbar() {
+    if (_filterToolbarVisible) {
+      _hideFilterToolbar();
+    } else {
+      _update(() => _showFilterToolbar = true);
+      _filterFocus.requestFocus();
+    }
+  }
+
+  void _hideFilterToolbar() {
+    _update(() => _showFilterToolbar = false);
+    _filterFocus.unfocus();
+    if (_filterController.text.isNotEmpty) _clearFilter();
+    _filterToggleFocus.requestFocus();
+  }
+
   void _startBatchSelection([SftpName? file]) {
+    _filterFocus.unfocus();
     _clearHighlightedFile();
     _update(() {
       _isBatchSelecting = true;
