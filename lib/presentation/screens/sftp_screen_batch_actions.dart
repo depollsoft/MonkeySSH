@@ -85,23 +85,20 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     _viewSettings.copyWith(descending: !_viewSettings.descending),
   );
 
-  /// Shows [next] now and saves it for this host, serialized so rapid sheet
-  /// taps never persist out of order.
-  Future<void> _applyViewSettings(SftpBrowserViewSettings next) {
+  /// Shows [next] now and submits the save to the shared settings store.
+  Future<void> _applyViewSettings(SftpBrowserViewSettings next) async {
     _viewSettingsChangedLocally = true;
     _update(() => _viewSettings = next);
     final store = ref.read(sftpBrowserViewStoreProvider);
-    return _viewSettingsSaveQueue = _viewSettingsSaveQueue.then((_) async {
-      try {
-        await store.save(widget.hostId, next);
-      } on Exception catch (error) {
-        DiagnosticsLogService.instance.warning(
-          'sftp.view',
-          'save_failed',
-          fields: {'errorType': error.runtimeType},
-        );
-      }
-    });
+    try {
+      await store.save(widget.hostId, next);
+    } on Exception catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'sftp.view',
+        'save_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
   }
 
   void _onFilterChanged(String query) {
@@ -175,7 +172,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   void _hideFilterToolbar() {
     _update(() => _showFilterToolbar = false);
     _filterFocus.unfocus();
-    if (_filterController.text.isNotEmpty) _clearFilter();
+    _clearFilter();
     _filterToggleFocus.requestFocus();
   }
 

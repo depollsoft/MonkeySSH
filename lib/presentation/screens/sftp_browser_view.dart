@@ -294,7 +294,7 @@ abstract interface class SftpBrowserViewStore {
   /// Loads the settings saved for [hostId], or the defaults.
   Future<SftpBrowserViewSettings> load(int hostId);
 
-  /// Saves [settings] for [hostId].
+  /// Saves [settings] for [hostId] in submission order.
   Future<void> save(int hostId, SftpBrowserViewSettings settings);
 
   /// Loads the filter last typed for [hostId], with its folder.
@@ -365,16 +365,12 @@ final sftpBrowserViewStoreProvider = Provider<SftpBrowserViewStore>(
   (ref) => SettingsSftpBrowserViewStore(ref.watch(settingsServiceProvider)),
 );
 
-/// Shows sort and hidden-file choices.
-///
-/// When [onChanged] is provided, every tap applies immediately so the file list
-/// updates live behind the sheet. Returns the final settings if they changed,
-/// or null when dismissed unchanged.
-Future<SftpBrowserViewSettings?> showSftpBrowserViewOptions(
+/// Shows sort and hidden-file choices and applies changes as they are made.
+Future<void> showSftpBrowserViewOptions(
   BuildContext context,
   SftpBrowserViewSettings settings, {
-  ValueChanged<SftpBrowserViewSettings>? onChanged,
-}) => showModalBottomSheet<SftpBrowserViewSettings>(
+  required ValueChanged<SftpBrowserViewSettings> onChanged,
+}) => showModalBottomSheet<void>(
   context: context,
   showDragHandle: true,
   // Sized to its options, scrolling only when the screen is too short.
@@ -384,10 +380,13 @@ Future<SftpBrowserViewSettings?> showSftpBrowserViewOptions(
 );
 
 class _SftpBrowserViewOptionsSheet extends StatefulWidget {
-  const _SftpBrowserViewOptionsSheet({required this.initial, this.onChanged});
+  const _SftpBrowserViewOptionsSheet({
+    required this.initial,
+    required this.onChanged,
+  });
 
   final SftpBrowserViewSettings initial;
-  final ValueChanged<SftpBrowserViewSettings>? onChanged;
+  final ValueChanged<SftpBrowserViewSettings> onChanged;
 
   @override
   State<_SftpBrowserViewOptionsSheet> createState() =>
@@ -401,11 +400,8 @@ class _SftpBrowserViewOptionsSheetState
   void _update(SftpBrowserViewSettings next) {
     if (next == _settings) return;
     setState(() => _settings = next);
-    widget.onChanged?.call(next);
+    widget.onChanged(next);
   }
-
-  void _close() =>
-      Navigator.of(context).pop(_settings == widget.initial ? null : _settings);
 
   @override
   Widget build(BuildContext context) {
@@ -436,7 +432,7 @@ class _SftpBrowserViewOptionsSheetState
                   ),
                   IconButton(
                     tooltip: 'Close',
-                    onPressed: _close,
+                    onPressed: () => Navigator.of(context).pop(),
                     constraints: const BoxConstraints.tightFor(
                       width: 44,
                       height: 44,
@@ -913,6 +909,7 @@ class _SftpFilterToolbarPreview extends StatefulWidget {
 class _SftpFilterToolbarPreviewState extends State<_SftpFilterToolbarPreview> {
   final _controller = TextEditingController();
   final _focus = FocusNode();
+  var _settings = const SftpBrowserViewSettings();
 
   @override
   void dispose() {
@@ -927,9 +924,13 @@ class _SftpFilterToolbarPreviewState extends State<_SftpFilterToolbarPreview> {
     filterFocus: _focus,
     onCloseFilter: _controller.clear,
     onFilterChanged: (_) {},
-    settings: const SftpBrowserViewSettings(),
+    settings: _settings,
     onShowViewOptions: () => unawaited(
-      showSftpBrowserViewOptions(context, const SftpBrowserViewSettings()),
+      showSftpBrowserViewOptions(
+        context,
+        _settings,
+        onChanged: (next) => setState(() => _settings = next),
+      ),
     ),
   );
 }

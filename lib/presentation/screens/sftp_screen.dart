@@ -258,7 +258,6 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   List<RemoteFileSelection> _selectedFiles = const [];
   SftpBrowserViewSettings _viewSettings = const SftpBrowserViewSettings();
   bool _viewSettingsChangedLocally = false;
-  Future<void> _viewSettingsSaveQueue = Future<void>.value();
   bool _filterChangedLocally = false;
   final TextEditingController _filterController = TextEditingController();
   final _filterFocus = FocusNode(debugLabel: 'sftp-filter-field');

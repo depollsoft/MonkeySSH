@@ -980,6 +980,28 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('closing an empty bar cancels pending filter restoration', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
+    );
+    final store = _MemoryViewStore()
+      ..filters[1] = (directory: _home, query: 'notes')
+      ..filterReadGate = Completer<void>();
+    await _pumpBrowser(tester, _container(sftp, store: store));
+    await _openFilter(tester);
+    await tester.tap(find.byTooltip('Hide filter bar'));
+    await tester.pump();
+    store.filterReadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SftpBrowserToolbar), findsNothing);
+    expect(find.text('notes.txt'), findsOneWidget);
+    expect(find.text('build.log'), findsOneWidget);
+    expect(store.filters, isEmpty);
+  });
+
   testWidgets('a filter saved for another folder waits for that folder', (
     tester,
   ) async {

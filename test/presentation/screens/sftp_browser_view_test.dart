@@ -162,6 +162,23 @@ void main() {
       expect(await store.load(3), const SftpBrowserViewSettings());
     });
 
+    test(
+      'shared transactions keep overlapping saves in submission order',
+      () async {
+        final otherStore = SettingsSftpBrowserViewStore(SettingsService(db));
+        const latest = SftpBrowserViewSettings(showHidden: false);
+        await Future.wait([
+          store.save(1, const SftpBrowserViewSettings(descending: true)),
+          store.save(
+            1,
+            const SftpBrowserViewSettings(sortField: SftpSortField.size),
+          ),
+          otherStore.save(1, latest),
+        ]);
+        expect(await store.load(1), latest);
+      },
+    );
+
     test('keeps the filter per host with its folder', () async {
       await store.saveFilter(1, (directory: '/srv', query: 'log'));
       await store.saveFilter(2, (directory: '/tmp', query: 'x'));
