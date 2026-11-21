@@ -443,9 +443,15 @@ test('Antigravity includes every group and excludes unknown or disabled amounts'
   const r = antigravityUsage({summary: {groups: [{displayName: 'Fast', buckets: [
     {displayName: 'Weekly', remainingFraction: 0, resetTime: '2026-10-01T00:00:00Z'},
     {displayName: 'Daily', remainingFraction: 1}, {remainingFraction: .5, disabled: true}, {},
-  ]}, {displayName: 'Pro', buckets: [{remainingFraction: .25}]}]}});
+  ]}, {displayName: 'Pro', buckets: [{remainingFraction: .25}]}]}, buckets: [
+    {displayName: 'Duplicate', remainingFraction: .5},
+  ]});
   assert.deepEqual(r.windows.map(w => w.usedPercent), [100, 0, 75]);
   assert.equal(r.windows[0].resetsAt, '2026-10-01T00:00:00.000Z');
+  assert.equal(antigravityUsage({buckets: [
+    {displayName: 'Weekly Limit', remainingFraction: .5},
+    {displayName: 'Disabled', remainingFraction: .5, disabled: true},
+  ]}).windows.map(w => `${w.label}:${w.usedPercent}`).join(','), 'Weekly Limit:50');
   assert.equal(antigravityUsage({buckets: [{modelId: 'gemini', remainingFraction: .5}]}).windows[0].usedPercent, 50);
 });
 
@@ -610,9 +616,10 @@ test('Windows stdin bootstrap accepts a fragmented payload without command expan
 test('Antigravity uses the quota-summary request schema and falls back on older CLIs', async () => {
   const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
   const methods = [];
-  const result = await antigravity([12345], async (url, options) => {
+  const result = await antigravity([{port: 12345, csrf: 'CSRF_TOKEN'}], async (url, options) => {
     methods.push(url.split('/').pop());
     assert.equal(options.local, true);
+    assert.equal(options.headers['x-codeium-csrf-token'], 'CSRF_TOKEN');
     if (methods.length === 1) {
       assert.deepEqual(options.body, {forceRefresh: true});
       throw new Error('unavailable');
@@ -624,6 +631,127 @@ test('Antigravity uses the quota-summary request schema and falls back on older 
   assert.deepEqual(methods, ['RetrieveUserQuotaSummary', 'GetUserStatus']);
   assert.equal(result.windows[0].usedPercent, 25);
   assert.ok(!JSON.stringify(result).includes('SECRET'));
+});
+
+test('Antigravity parses headless CLI /usage JSON and gates version >= 1.1.11', () => {
+  const {antigravitySupportsHeadlessUsage, antigravityUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+
+  assert.equal(antigravitySupportsHeadlessUsage('1.1.10'), false);
+  assert.equal(antigravitySupportsHeadlessUsage('1.0.99'), false);
+  assert.equal(antigravitySupportsHeadlessUsage(''), false);
+  assert.equal(antigravitySupportsHeadlessUsage('1.1.11'), true);
+  assert.equal(antigravitySupportsHeadlessUsage('1.5.14\n'), true);
+  assert.equal(antigravitySupportsHeadlessUsage('agy 2.0.0'), true);
+
+  const parsed = antigravityUsage({
+    conversation_id: '',
+    status: 'SUCCESS',
+    command: {
+      name: 'usage',
+      data: {
+        description: 'SECRET',
+        groups: [
+          {
+            name: 'Gemini Models',
+            buckets: [
+              {id: 'gemini-weekly', name: 'Weekly Limit Remaining', remaining_fraction: 0.75, reset_time: '2026-11-28T15:36:54Z'},
+              {id: 'gemini-5h', name: 'Five Hour Limit Remaining', remaining_fraction: 1, reset_time: '2026-11-21T20:36:54Z'},
+              {id: 'disabled', name: 'Hidden', remaining_fraction: 0.5, disabled: true},
+            ],
+          },
+          {
+            name: 'Claude and GPT models',
+            buckets: [
+              {id: '3p-weekly', name: 'Weekly Limit Remaining', remaining_fraction: 0, reset_time: '2026-11-28T15:36:54Z'},
+            ],
+          },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(parsed.windows, [
+    {label: 'Gemini Models · Weekly Limit Remaining', usedPercent: 25, resetsAt: '2026-11-28T15:36:54.000Z'},
+    {label: 'Gemini Models · Five Hour Limit Remaining', usedPercent: 0, resetsAt: '2026-11-21T20:36:54.000Z'},
+    {label: 'Claude and GPT models · Weekly Limit Remaining', usedPercent: 100, resetsAt: '2026-11-28T15:36:54.000Z'},
+  ]);
+  assert.ok(!JSON.stringify(parsed).includes('SECRET'));
+});
+
+test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops early when signed out', {skip: process.platform === 'win32'}, async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {antigravity, antigravityCli} = require('../../assets/scripts/agent_usage_probe.cjs');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-agy-cli-'));
+  try {
+    const makeFakeAgy = (name, body) => {
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, `#!/usr/bin/env node\n${body}\n`, {mode: 0o700});
+      return file;
+    };
+
+    // Older CLI (< 1.1.11) must never be called with `-p /usage` (it would send a prompt).
+    const oldMarker = path.join(dir, 'old-invoked');
+    const oldAgy = makeFakeAgy('agy-old', `
+      if (process.argv.includes('--version')) { console.log('1.1.10'); process.exit(0); }
+      require('fs').writeFileSync(${JSON.stringify(oldMarker)}, 'PROMPTED');
+      process.exit(1);
+    `);
+    assert.equal(await antigravityCli(oldAgy), null);
+    assert.equal(fs.existsSync(oldMarker), false);
+    await assert.rejects(antigravity(oldAgy, {ports: []}), /needsRunning/);
+
+    // Modern CLI returns structured /usage data without scanning local ports.
+    const modernAgy = makeFakeAgy('agy-modern', `
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      if (process.argv.slice(2).join(' ') !== '-p /usage --output-format json') process.exit(9);
+      console.log(JSON.stringify({
+        status: 'SUCCESS',
+        command: {name: 'usage', data: {groups: [{name: 'Gemini Models', buckets: [
+          {name: 'Weekly Limit Remaining', remaining_fraction: 0.5, reset_time: '2026-11-28T15:00:00Z'},
+        ]}]}},
+      }));
+    `);
+    const result = await antigravity(modernAgy, {
+      ports: () => { throw new Error('local scan should not run when CLI succeeds'); },
+    });
+    assert.deepEqual(result.windows, [
+      {label: 'Gemini Models · Weekly Limit Remaining', usedPercent: 50, resetsAt: '2026-11-28T15:00:00.000Z'},
+    ]);
+
+    // Signed-out CLI writes auth prompt to stderr and hangs; probe kills it immediately.
+    const unauthedAgy = makeFakeAgy('agy-unauthed', `
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      process.stderr.write('Authentication required. Please visit the URL to log in:\\n  https://example.test/auth\\n');
+      setTimeout(() => {}, 60000);
+    `);
+    const t0 = Date.now();
+    await assert.rejects(antigravity(unauthedAgy, {
+      ports: () => { throw new Error('should not fall back on signInRequired'); },
+    }), /signInRequired/);
+    assert.ok(Date.now() - t0 < 5000);
+
+    // GEMINI_API_KEY mode exits with code 2 and points to AI Studio.
+    const apiKeyAgy = makeFakeAgy('agy-apikey', `
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      process.stderr.write('/usage is unavailable with GEMINI_API_KEY; see https://aistudio.google.com/usage\\n');
+      process.exit(2);
+    `);
+    assert.deepEqual(await antigravity(apiKeyAgy, {
+      ports: () => { throw new Error('should not fall back on notReported'); },
+    }), {windows: [], status: 'notReported'});
+
+    // HTTP 429 on stderr reports rateLimited without falling back.
+    const throttledAgy = makeFakeAgy('agy-429', `
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      process.stderr.write('AGY_ERROR: {"code":429,"status":"RESOURCE_EXHAUSTED"}\\n');
+      process.exit(3);
+    `);
+    await assert.rejects(antigravity(throttledAgy, {
+      ports: () => { throw new Error('should not fall back on rateLimited'); },
+    }), /rateLimited/);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
 });
 
 
