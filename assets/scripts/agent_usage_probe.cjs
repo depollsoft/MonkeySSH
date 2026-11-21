@@ -89,14 +89,15 @@ function spawnAgent(executable, args, stdio = ['pipe', 'pipe', 'ignore']) {
     // PowerShell also treats smart apostrophes as delimiters. Doubling preserves
     // the original character when the literal is parsed, including in paths.
     const quote = value => "'" + value.replace(/['\u2018\u2019\u201a\u201b]/g, '$&$&') + "'";
-    const script = '& ' + [executable, ...args].map(quote).join(' ');
+    const script = '& ' + [executable, ...args].map(quote).join(' ') + '; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }';
     executable = 'powershell.exe';
     args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
   }
   return cp.spawn(executable, args, {cwd: os.tmpdir(),
     detached: process.platform !== 'win32', windowsHide: true,
     stdio, env: {...process.env, NO_COLOR: '1',
-      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false', MUSE_NO_AUTO_UPDATE: '1'}});
+      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false',
+      MUSE_NO_AUTO_UPDATE: '1', AGY_CLI_DISABLE_AUTO_UPDATE: '1'}});
 }
 function rpc(executable, args, method, framed, initialize) {
   return new Promise((resolve, reject) => {
@@ -180,15 +181,20 @@ function retryFields(error) {
     ? {retryAfterSeconds: Math.min(604800, Math.ceil(error.retryAfterSeconds))} : {};
 }
 const requestCache = new Map();
-function requestJson(url, {token, headers = {}, body, local = false} = {}) {
+const localHttpAgent = new http.Agent({keepAlive: false, proxyEnv: {}});
+const localHttpsAgent = new https.Agent({keepAlive: false, proxyEnv: {}});
+function requestJson(url, {token, headers = {}, body, local = false, timeoutMs} = {}) {
   const address = new URL(url);
-  if (local && address.hostname !== '127.0.0.1') return Promise.reject(new Error('unavailable'));
+  if (local && address.hostname !== '127.0.0.1' && address.hostname !== '[::1]') {
+    return Promise.reject(new Error('unavailable'));
+  }
   const key = crypto.createHash('sha256').update(JSON.stringify([url, token, headers, body])).digest('hex');
   if (requestCache.has(key)) return requestCache.get(key);
   const promise = new Promise((resolve, reject) => {
     const payload = body == null ? null : JSON.stringify(body);
     const transport = address.protocol === 'https:' ? https : http;
     const request = transport.request(address, {method: payload ? 'POST' : 'GET',
+      ...(local ? {agent: address.protocol === 'https:' ? localHttpsAgent : localHttpAgent} : {}),
       rejectUnauthorized: !local, headers: {
         Accept: 'application/json', 'User-Agent': 'MonkeySSH-Usage/1.0',
         ...(token ? {Authorization: `Bearer ${token}`} : {}),
@@ -214,7 +220,8 @@ function requestJson(url, {token, headers = {}, body, local = false} = {}) {
       response.on('error', () => reject(new Error('unavailable')));
       response.on('end', () => { try { resolve(JSON.parse(text)); } catch { reject(new Error('unavailable')); } });
     });
-    const timer = setTimeout(() => request.destroy(new Error('timeout')), local ? 2500 : 8000);
+    const timer = setTimeout(() => request.destroy(new Error('timeout')),
+      Math.max(100, timeoutMs ?? (local ? 2500 : 8000)));
     request.on('close', () => clearTimeout(timer));
     request.on('error', () => reject(new Error('unavailable')));
     request.end(payload);
@@ -222,7 +229,7 @@ function requestJson(url, {token, headers = {}, body, local = false} = {}) {
   requestCache.set(key, promise);
   return promise;
 }
-function runJson(executable, args, parse = JSON.parse) {
+function runJson(executable, args, parse = JSON.parse, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const child = spawnAgent(executable, args);
     let output = '', done = false;
@@ -232,7 +239,7 @@ function runJson(executable, args, parse = JSON.parse) {
       if (error) return reject(new Error('unavailable'));
       try { resolve(parse(output)); } catch { reject(new Error('unavailable')); }
     };
-    const timer = setTimeout(() => finish(true), 12000);
+    const timer = setTimeout(() => finish(true), Math.max(100, timeoutMs));
     child.on('error', () => finish(true));
     child.on('close', code => finish(code !== 0));
     child.stdin.end();
@@ -390,28 +397,50 @@ function antigravityUsage(data) {
   return {windows};
 }
 // agy 1.1.11+ answers `-p /usage --output-format json` natively without
-// starting a conversation or spending quota. Earlier versions treat `/usage`
-// as literal prompt text, so gate the headless command on the CLI version.
-function antigravitySupportsHeadlessUsage(versionText) {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(String(versionText || ''));
-  if (!match) return false;
-  const [, major, minor, patch] = match.map(Number);
-  return major > 1 || (major === 1 && (minor > 1 || (minor === 1 && patch >= 11)));
+// starting a conversation or spending quota. Earlier versions, prereleases
+// before 1.1.11, and desktop launchers must fail closed so `/usage` is never
+// sent as literal prompt text.
+function parseAntigravityVersion(versionText) {
+  const text = String(versionText || '').trim();
+  const match = /^(?:(?:agy|antigravity(?:-cli)?)\s+)?v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/i.exec(text);
+  if (!match) return null;
+  return {major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]), prerelease: match[4] || null};
 }
-async function antigravityCli(executable, run = runJson) {
+function antigravityVersionAtLeast(version, minMajor, minMinor, minPatch) {
+  if (!version) return false;
+  if (version.major !== minMajor) return version.major > minMajor;
+  if (version.minor !== minMinor) return version.minor > minMinor;
+  if (version.patch !== minPatch) return version.patch > minPatch;
+  return !version.prerelease;
+}
+function antigravitySupportsHeadlessUsage(versionText) {
+  return antigravityVersionAtLeast(parseAntigravityVersion(versionText), 1, 1, 11);
+}
+async function antigravityCli(executable, run = runJson, deadline = Date.now() + 14000) {
   if (!executable) return null;
-  let version = '';
-  try { version = await run(executable, ['--version'], String); } catch { return null; }
-  if (!antigravitySupportsHeadlessUsage(version)) return null;
+  const versionRemaining = deadline - Date.now();
+  if (versionRemaining <= 250) throw new Error('timeout');
+  let versionText = '';
+  try { versionText = await run(executable, ['--version'], String, Math.min(3000, versionRemaining)); } catch { return null; }
+  const version = parseAntigravityVersion(versionText);
+  if (!antigravityVersionAtLeast(version, 1, 1, 11)) return null;
+  const remaining = deadline - Date.now();
+  if (remaining <= 250) throw new Error('timeout');
+  const args = ['-p', '/usage', '--output-format', 'json'];
+  // 1.1.28+ supports --print-timeout so detached runs still self-terminate if
+  // the enclosing SSH session drops before node's own timer fires.
+  if (antigravityVersionAtLeast(version, 1, 1, 28)) {
+    args.push('--print-timeout', `${Math.max(1, Math.floor(remaining / 1000))}s`);
+  }
   return new Promise((resolve, reject) => {
-    const child = spawnAgent(executable, ['-p', '/usage', '--output-format', 'json'], ['pipe', 'pipe', 'pipe']);
+    const child = spawnAgent(executable, args, ['pipe', 'pipe', 'pipe']);
     let stdout = '', stderr = '', done = false;
     const finish = (error, result) => {
       if (done) return;
       done = true; clearTimeout(timer); stop(child);
       error ? reject(error) : resolve(result);
     };
-    const timer = setTimeout(() => finish(new Error('timeout')), 12000);
+    const timer = setTimeout(() => finish(new Error('timeout')), remaining);
     child.on('error', () => finish(new Error('unavailable')));
     child.stdin.on('error', () => {});
     child.stdin.end();
@@ -444,64 +473,121 @@ async function antigravityCli(executable, run = runJson) {
       if (/authentication required|please sign in|not logged in|unauthenticated/i.test(stderr)) {
         return finish(new Error('signInRequired'));
       }
-      if (/"code"\s*:\s*429\b|\b429\b|rate.?limit/i.test(stderr)) {
+      if (/"code"\s*:\s*429\b|\b(?:http|status(?:\s+code)?)\s*[:=]?\s*429\b|too many requests|resource_exhausted|rate.?limit/i.test(stderr)) {
         return finish(new Error('rateLimited'));
       }
       finish(new Error('unavailable'));
     });
   });
 }
-function antigravityPorts() {
-  const command = (exe, args) => cp.execFileSync(exe, args, {
-    encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  const extractCsrf = args => {
-    const match = /--csrf_token(?:=|\s+)([^\s'"]+)/.exec(args || '');
-    return match ? match[1] : null;
+function extractAntigravityCsrf(args) {
+  const match = /--csrf_token(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s'"]+))/.exec(args || '');
+  return match ? (match[1] || match[2] || match[3]) : null;
+}
+function normalizeLoopbackHost(rawHost, family = null) {
+  const host = String(rawHost || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === '127.0.0.1' || host === '0.0.0.0' || host === '::ffff:127.0.0.1') return '127.0.0.1';
+  if (host === '::1' || host === '::') return '::1';
+  if (host === '*') return family === 'IPv6' ? '::1' : family === 'IPv4' ? '127.0.0.1' : null;
+  return null;
+}
+function parseAntigravityLsof(output, csrf = null) {
+  const listeners = [];
+  let family = null;
+  for (const row of String(output || '').split('\n')) {
+    if (row.startsWith('f')) { family = null; continue; }
+    if (row.startsWith('t')) { family = row.slice(1).trim(); continue; }
+    if (!row.startsWith('n')) continue;
+    const match = /^n(.+):(\d+)$/.exec(row.trim());
+    if (!match) continue;
+    const host = normalizeLoopbackHost(match[1], family);
+    const port = Number(match[2]);
+    if (host && Number.isInteger(port) && port > 0) {
+      listeners.push(csrf ? {host, port, csrf} : {host, port});
+    }
+  }
+  return listeners;
+}
+function parseAntigravityProcNet(content, ipv6, sockets, csrf = null) {
+  const listeners = [];
+  for (const row of String(content || '').split('\n')) {
+    const fields = row.trim().split(/\s+/);
+    if (fields[3] !== '0A' || !sockets.has(fields[9])) continue;
+    const [addrHex, portHex] = (fields[1] || '').split(':');
+    const port = parseInt(portHex, 16);
+    if (!Number.isInteger(port) || port <= 0) continue;
+    const upper = (addrHex || '').toUpperCase();
+    let host = null;
+    if (!ipv6) {
+      if (upper === '0100007F' || upper === '00000000') host = '127.0.0.1';
+    } else {
+      if (upper === '00000000000000000000000001000000' || upper === '00000000000000000000000000000000') host = '::1';
+      else if (upper === '0000000000000000FFFF00000100007F') host = '127.0.0.1';
+    }
+    if (host) listeners.push(csrf ? {host, port, csrf} : {host, port});
+  }
+  return listeners;
+}
+function parseAntigravityWindowsListeners(rows) {
+  const seen = new Map();
+  for (const row of [].concat(rows || [])) {
+    if (!row || typeof row !== 'object') continue;
+    const host = normalizeLoopbackHost(row.LocalAddress);
+    const port = Number(row.LocalPort);
+    if (!host || !Number.isInteger(port) || port <= 0) continue;
+    const csrf = extractAntigravityCsrf(row.CommandLine);
+    seen.set(`${host}:${port}`, csrf ? {host, port, csrf} : {host, port});
+  }
+  return [...seen.values()];
+}
+function antigravityPorts(deadline = Date.now() + 4000) {
+  const scanDeadline = Math.min(deadline, Date.now() + 4000);
+  const command = (exe, args) => {
+    const remaining = scanDeadline - Date.now();
+    if (remaining <= 100) throw new Error('unavailable');
+    return cp.execFileSync(exe, args, {
+      encoding: 'utf8', timeout: Math.min(2000, remaining), maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+    });
   };
   if (process.platform === 'win32') {
-    const script = "$ids = @(Get-Process -Name agy,antigravity,antigravity-cli -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id); @((Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.OwningProcess }).LocalPort) | ConvertTo-Json -Compress";
-    try { return [].concat(JSON.parse(command('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]))).filter(Number.isInteger); } catch { return []; }
+    const script = "$procs = @{}; Get-CimInstance Win32_Process -Filter \"Name='agy.exe' OR Name='antigravity.exe' OR Name='antigravity-cli.exe'\" -ErrorAction SilentlyContinue | ForEach-Object { $procs[[int]$_.ProcessId] = [string]$_.CommandLine }; if ($procs.Count -eq 0) { '[]'; exit 0 }; @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $procs.ContainsKey([int]$_.OwningProcess) } | ForEach-Object { @{ LocalAddress = $_.LocalAddress; LocalPort = $_.LocalPort; CommandLine = $procs[[int]$_.OwningProcess] } }) | ConvertTo-Json -Compress";
+    try { return parseAntigravityWindowsListeners(JSON.parse(command('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]))); } catch { return []; }
   }
-  const ports = new Map();
+  const listeners = new Map();
   let processes;
   try { processes = command('ps', ['-axo', 'pid=,comm=']).split('\n'); } catch { return []; }
-  const deadline = Date.now() + 4000;
   for (const line of processes) {
-    if (Date.now() > deadline) throw new Error('unavailable');
+    if (Date.now() > scanDeadline) throw new Error('unavailable');
     const match = /^\s*(\d+)\s+(.+)$/.exec(line);
     if (!match || !['agy', 'antigravity', 'antigravity-cli'].includes(path.basename(match[2].trim()))) continue;
     const pid = match[1];
     let csrf = null;
-    try { csrf = extractCsrf(command('ps', ['-p', pid, '-o', 'args='])); } catch {}
+    try { csrf = extractAntigravityCsrf(command('ps', ['-p', pid, '-o', 'args='])); } catch {}
     try {
       if (process.platform === 'darwin') {
-        const output = command('lsof', ['-a', '-p', pid, '-iTCP', '-sTCP:LISTEN', '-Fn']);
-        for (const row of output.split('\n')) {
-          const port = /^n.*:(\d+)$/.exec(row);
-          if (port) ports.set(Number(port[1]), csrf);
-        }
+        const output = command('lsof', ['-a', '-p', pid, '-iTCP', '-sTCP:LISTEN', '-n', '-P', '-Fnt']);
+        for (const item of parseAntigravityLsof(output, csrf)) listeners.set(`${item.host}:${item.port}`, item);
       } else {
         const fds = path.join('/proc', pid, 'fd');
         const sockets = new Set(fs.readdirSync(fds).flatMap(fd => {
           try { const m = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(path.join(fds, fd))); return m ? [m[1]] : []; } catch { return []; }
         }));
-        for (const version of ['tcp', 'tcp6']) {
-          const rows = fs.readFileSync(path.join('/proc', pid, 'net', version), 'utf8').split('\n');
-          for (const row of rows) {
-            const fields = row.trim().split(/\s+/);
-            if (fields[3] === '0A' && sockets.has(fields[9])) ports.set(parseInt(fields[1].split(':')[1], 16), csrf);
-          }
+        for (const [version, ipv6] of [['tcp', false], ['tcp6', true]]) {
+          const content = fs.readFileSync(path.join('/proc', pid, 'net', version), 'utf8');
+          for (const item of parseAntigravityProcNet(content, ipv6, sockets, csrf)) listeners.set(`${item.host}:${item.port}`, item);
         }
       }
     } catch {}
   }
-  return [...ports.entries()].map(([port, csrf]) => csrf ? {port, csrf} : port);
+  return [...listeners.values()];
 }
-async function antigravityLocal(ports, request = requestJson) {
+async function antigravityLocal(ports, request = requestJson, deadline = Date.now() + 10000) {
   if (!ports.length) return {windows: []};
   const results = await Promise.all(ports.slice(0, 16).map(async entry => {
     const port = typeof entry === 'number' ? entry : entry.port;
+    const host = typeof entry === 'object' && entry?.host ? normalizeLoopbackHost(entry.host) : '127.0.0.1';
+    if (!host || !Number.isInteger(port) || port <= 0) return {windows: []};
+    const urlHost = host === '::1' ? '[::1]' : '127.0.0.1';
     const csrf = typeof entry === 'object' && entry ? entry.csrf : null;
     const headers = csrf ? {'x-codeium-csrf-token': csrf} : {};
     for (const scheme of ['https', 'http']) {
@@ -509,8 +595,11 @@ async function antigravityLocal(ports, request = requestJson) {
         ['RetrieveUserQuotaSummary', {forceRefresh: true}],
         ['GetUserStatus', {metadata: {ideName: 'antigravity', extensionName: 'antigravity', ideVersion: 'unknown', locale: 'en'}}],
       ]) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 150) return {windows: []};
         try {
-          const result = antigravityUsage(await request(`${scheme}://127.0.0.1:${port}/exa.language_server_pb.LanguageServerService/${method}`, {local: true, headers, body}));
+          const result = antigravityUsage(await request(`${scheme}://${urlHost}:${port}/exa.language_server_pb.LanguageServerService/${method}`,
+            {local: true, headers, body, timeoutMs: Math.min(2500, remaining)}));
           if (result.windows.length) return result;
         } catch {}
       }
@@ -531,13 +620,15 @@ async function antigravity(executable = '', options = {}) {
     ports = antigravityPorts,
     request = requestJson,
     cli = antigravityCli,
+    timeoutMs = 14000,
   } = options;
+  const deadline = Date.now() + timeoutMs;
 
   let cliError = null;
   let cliSupported = false;
   if (executable) {
     try {
-      const cliResult = await cli(executable);
+      const cliResult = await cli(executable, runJson, deadline);
       if (cliResult != null) {
         cliSupported = true;
         if (cliResult.windows?.length || cliResult.status) return cliResult;
@@ -549,10 +640,14 @@ async function antigravity(executable = '', options = {}) {
     }
   }
 
-  const running = typeof ports === 'function' ? ports() : ports;
-  if (running.length) {
-    const localResult = await antigravityLocal(running, request);
-    if (localResult.windows.length) return localResult;
+  // Skip local fallback if a modern CLI already timed out or exhausted the shared deadline.
+  let running = [];
+  if (!(cliSupported && cliError?.message === 'timeout') && deadline - Date.now() > 500) {
+    running = typeof ports === 'function' ? ports(deadline) : ports;
+    if (running.length) {
+      const localResult = await antigravityLocal(running, request, deadline);
+      if (localResult.windows.length) return localResult;
+    }
   }
 
   if (cliError) throw cliError;
@@ -830,7 +925,7 @@ async function probe(id, executable) {
   }
 }
 module.exports = {hermesHome, requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
-  antigravitySupportsHeadlessUsage, antigravityCli, openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
+  antigravitySupportsHeadlessUsage, antigravityCli, extractAntigravityCsrf, parseAntigravityLsof, parseAntigravityProcNet, parseAntigravityWindowsListeners, openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
   Promise.all(Object.entries(input).map(async ([id, executable]) => {

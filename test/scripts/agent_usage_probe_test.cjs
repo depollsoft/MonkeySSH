@@ -634,14 +634,61 @@ test('Antigravity uses the quota-summary request schema and falls back on older 
 });
 
 test('Antigravity parses headless CLI /usage JSON and gates version >= 1.1.11', () => {
-  const {antigravitySupportsHeadlessUsage, antigravityUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const {
+    antigravitySupportsHeadlessUsage,
+    antigravityUsage,
+    extractAntigravityCsrf,
+    parseAntigravityLsof,
+    parseAntigravityProcNet,
+    parseAntigravityWindowsListeners,
+  } = require('../../assets/scripts/agent_usage_probe.cjs');
 
-  assert.equal(antigravitySupportsHeadlessUsage('1.1.10'), false);
-  assert.equal(antigravitySupportsHeadlessUsage('1.0.99'), false);
-  assert.equal(antigravitySupportsHeadlessUsage(''), false);
-  assert.equal(antigravitySupportsHeadlessUsage('1.1.11'), true);
-  assert.equal(antigravitySupportsHeadlessUsage('1.5.14\n'), true);
-  assert.equal(antigravitySupportsHeadlessUsage('agy 2.0.0'), true);
+  for (const rejected of [
+    '',
+    '1.0.99',
+    '1.1.10',
+    '1.1.11-rc.1',
+    '1.1.11-beta.0',
+    'Node 22.0.0\nagy 1.1.10',
+    '1.107.0\nabcdef1234567890\narm64',
+    'unknown 1.5.14',
+  ]) {
+    assert.equal(antigravitySupportsHeadlessUsage(rejected), false, `expected reject: ${JSON.stringify(rejected)}`);
+  }
+  for (const accepted of ['1.1.11', '1.1.11+build.1', '1.1.12-rc.1', '1.5.14\n', 'agy 2.0.0', 'antigravity-cli v1.2.0']) {
+    assert.equal(antigravitySupportsHeadlessUsage(accepted), true, `expected accept: ${JSON.stringify(accepted)}`);
+  }
+
+  assert.equal(extractAntigravityCsrf('agy --csrf_token=tok123 --other'), 'tok123');
+  assert.equal(extractAntigravityCsrf('agy --csrf_token "tok 456"'), 'tok 456');
+
+  // Loopback parsers preserve IPv4 vs IPv6 family and drop non-loopback listeners.
+  assert.deepEqual(parseAntigravityLsof(
+    'p123\nf10\ntIPv4\nn127.0.0.1:5000\nf11\ntIPv6\nn[::1]:5000\nf12\ntIPv4\nn192.168.1.5:5001\nf13\ntIPv6\nn*:5002\n',
+    'CSRF_A',
+  ), [
+    {host: '127.0.0.1', port: 5000, csrf: 'CSRF_A'},
+    {host: '::1', port: 5000, csrf: 'CSRF_A'},
+    {host: '::1', port: 5002, csrf: 'CSRF_A'},
+  ]);
+  const sockets = new Set(['101', '102', '103']);
+  assert.deepEqual(parseAntigravityProcNet(
+    '  0: 0100007F:1388 00000000:0000 0A 00:00 00:00 00 0 0 101\n' +
+    '  1: 0501A8C0:1389 00000000:0000 0A 00:00 00:00 00 0 0 102\n',
+    false, sockets, 'CSRF_B',
+  ), [{host: '127.0.0.1', port: 5000, csrf: 'CSRF_B'}]);
+  assert.deepEqual(parseAntigravityProcNet(
+    '  0: 00000000000000000000000001000000:1388 00000000000000000000000000000000:0000 0A 00:00 00:00 00 0 0 103\n',
+    true, sockets, 'CSRF_C',
+  ), [{host: '::1', port: 5000, csrf: 'CSRF_C'}]);
+  assert.deepEqual(parseAntigravityWindowsListeners([
+    {LocalAddress: '127.0.0.1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token=WIN_V4'},
+    {LocalAddress: '::1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token WIN_V6'},
+    {LocalAddress: '10.0.0.5', LocalPort: 5001, CommandLine: 'agy.exe --csrf_token=LAN'},
+  ]), [
+    {host: '127.0.0.1', port: 5000, csrf: 'WIN_V4'},
+    {host: '::1', port: 5000, csrf: 'WIN_V6'},
+  ]);
 
   const parsed = antigravityUsage({
     conversation_id: '',
@@ -677,6 +724,50 @@ test('Antigravity parses headless CLI /usage JSON and gates version >= 1.1.11', 
   assert.ok(!JSON.stringify(parsed).includes('SECRET'));
 });
 
+test('Antigravity local fallback targets only the discovered loopback family and bypasses env proxies', async () => {
+  const cp = require('child_process');
+  const http = require('http');
+  const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
+
+  // An IPv6-only listener's CSRF token must never be sent to 127.0.0.1 on the same port.
+  const seen = [];
+  const res = await antigravity([{host: '::1', port: 54321, csrf: 'IPV6_ONLY_CSRF'}], async (url, options) => {
+    seen.push({url, csrf: options.headers['x-codeium-csrf-token']});
+    return {groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]};
+  });
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].url, /^https:\/\/\[::1\]:54321\//);
+  assert.equal(seen[0].csrf, 'IPV6_ONLY_CSRF');
+  assert.equal(res.windows[0].usedPercent, 50);
+
+  // Even with NODE_USE_ENV_PROXY=1 and HTTP_PROXY pointing at an interceptor, local: true skips the proxy.
+  let proxyHits = 0;
+  const proxy = http.createServer((req, res) => { proxyHits++; res.writeHead(200); res.end('{}'); });
+  const target = http.createServer((req, res) => {
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({ok: req.headers['x-codeium-csrf-token']}));
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+  try {
+    const out = await new Promise((resolve, reject) => cp.execFile(process.execPath, ['-e', `
+      const {requestJson} = require(${JSON.stringify(require.resolve('../../assets/scripts/agent_usage_probe.cjs'))});
+      requestJson('http://127.0.0.1:${target.address().port}/quota', {
+        local: true, headers: {'x-codeium-csrf-token': 'LOCAL_CSRF'}, body: {},
+      }).then(r => console.log(JSON.stringify(r)));
+    `], {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {...process.env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: ''},
+    }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+    assert.deepEqual(JSON.parse(out.trim()), {ok: 'LOCAL_CSRF'});
+    assert.equal(proxyHits, 0);
+  } finally {
+    proxy.closeAllConnections(); target.closeAllConnections();
+    await Promise.all([new Promise(r => proxy.close(r)), new Promise(r => target.close(r))]);
+  }
+});
+
 test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops early when signed out', {skip: process.platform === 'win32'}, async () => {
   const fs = require('fs'), os = require('os'), path = require('path');
   const {antigravity, antigravityCli} = require('../../assets/scripts/agent_usage_probe.cjs');
@@ -689,21 +780,44 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       return file;
     };
 
-    // Older CLI (< 1.1.11) must never be called with `-p /usage` (it would send a prompt).
-    const oldMarker = path.join(dir, 'old-invoked');
-    const oldAgy = makeFakeAgy('agy-old', `
-      if (process.argv.includes('--version')) { console.log('1.1.10'); process.exit(0); }
-      require('fs').writeFileSync(${JSON.stringify(oldMarker)}, 'PROMPTED');
-      process.exit(1);
-    `);
-    assert.equal(await antigravityCli(oldAgy), null);
-    assert.equal(fs.existsSync(oldMarker), false);
-    await assert.rejects(antigravity(oldAgy, {ports: []}), /needsRunning/);
+    // Older CLI (< 1.1.11), prerelease 1.1.11-rc.1, and multi-line launcher banners must never be called with `-p`.
+    for (const [label, versionOut] of [
+      ['old', '1.1.10'],
+      ['prerelease', '1.1.11-rc.1'],
+      ['banner', 'Node 22.0.0\\nagy 1.1.10'],
+      ['desktop', '1.107.0\\nabcdef123456\\narm64'],
+    ]) {
+      const marker = path.join(dir, `invoked-${label}`);
+      const fake = makeFakeAgy(`agy-${label}`, `
+        if (process.argv.includes('--version')) { console.log("${versionOut}"); process.exit(0); }
+        require('fs').writeFileSync(${JSON.stringify(marker)}, 'PROMPTED');
+        process.exit(1);
+      `);
+      assert.equal(await antigravityCli(fake), null);
+      assert.equal(fs.existsSync(marker), false);
+      await assert.rejects(antigravity(fake, {ports: []}), /needsRunning/);
+    }
 
-    // Modern CLI returns structured /usage data without scanning local ports.
-    const modernAgy = makeFakeAgy('agy-modern', `
-      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+    // 1.1.11 invokes `-p /usage --output-format json` without --print-timeout and disables auto-update.
+    const cli1111 = makeFakeAgy('agy-1111', `
+      if (process.env.AGY_CLI_DISABLE_AUTO_UPDATE !== '1') process.exit(8);
+      if (process.argv.includes('--version')) { console.log('1.1.11'); process.exit(0); }
       if (process.argv.slice(2).join(' ') !== '-p /usage --output-format json') process.exit(9);
+      console.log(JSON.stringify({
+        status: 'SUCCESS',
+        command: {name: 'usage', data: {groups: [{name: 'Gemini Models', buckets: [
+          {name: 'Weekly Limit Remaining', remaining_fraction: 0.75},
+        ]}]}},
+      }));
+    `);
+    assert.equal((await antigravity(cli1111, {ports: []})).windows[0].usedPercent, 25);
+
+    // 1.5.14 adds --print-timeout and disables auto-update without scanning local ports.
+    const modernAgy = makeFakeAgy('agy-modern', `
+      if (process.env.AGY_CLI_DISABLE_AUTO_UPDATE !== '1') process.exit(8);
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      const args = process.argv.slice(2);
+      if (args.slice(0, 4).join(' ') !== '-p /usage --output-format json' || args[4] !== '--print-timeout' || !/^\\d+s$/.test(args[5])) process.exit(9);
       console.log(JSON.stringify({
         status: 'SUCCESS',
         command: {name: 'usage', data: {groups: [{name: 'Gemini Models', buckets: [
@@ -740,7 +854,7 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       ports: () => { throw new Error('should not fall back on notReported'); },
     }), {windows: [], status: 'notReported'});
 
-    // HTTP 429 on stderr reports rateLimited without falling back.
+    // HTTP 429 on stderr reports rateLimited; incidental 429 (line numbers / timestamps) does not.
     const throttledAgy = makeFakeAgy('agy-429', `
       if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
       process.stderr.write('AGY_ERROR: {"code":429,"status":"RESOURCE_EXHAUSTED"}\\n');
@@ -749,6 +863,34 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
     await assert.rejects(antigravity(throttledAgy, {
       ports: () => { throw new Error('should not fall back on rateLimited'); },
     }), /rateLimited/);
+
+    const incidental429Agy = makeFakeAgy('agy-line429', `
+      if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+      process.stderr.write('E1121 11:30:00.429 client.go:429] connection reset\\n');
+      process.exit(1);
+    `);
+    await assert.rejects(antigravity(incidental429Agy, {ports: []}), /unavailable/);
+
+    // Shared deadline bounds version + usage and skips local fallback after a timeout.
+    const slowAgy = makeFakeAgy('agy-slow', `
+      if (process.argv.includes('--version')) { setTimeout(() => { console.log('1.5.14'); process.exit(0); }, 250); return; }
+      setTimeout(() => { console.log('{}'); process.exit(0); }, 5000);
+    `);
+    const t1 = Date.now();
+    await assert.rejects(antigravity(slowAgy, {
+      timeoutMs: 600,
+      ports: () => { throw new Error('should not scan ports after CLI timeout'); },
+    }), /timeout/);
+    assert.ok(Date.now() - t1 < 2500);
+
+    // Non-timeout CLI failure falls back to local server; empty supported CLI returns empty windows (not needsRunning).
+    const fallback = await antigravity('/fake/agy', {
+      cli: async () => { throw new Error('unavailable'); },
+      ports: [{host: '127.0.0.1', port: 12345, csrf: 'TOK'}],
+      request: async () => ({groups: [{displayName: 'Local', buckets: [{displayName: '5h', remainingFraction: 0.25}]}]}),
+    });
+    assert.equal(fallback.windows[0].usedPercent, 75);
+    assert.deepEqual(await antigravity('/fake/agy', {cli: async () => ({windows: []}), ports: []}), {windows: []});
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }

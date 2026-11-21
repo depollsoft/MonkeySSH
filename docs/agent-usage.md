@@ -21,7 +21,7 @@ Every supported agent has a reader:
 | Codex | Installed CLI's `account/rateLimits/read` app-server method. Reports every returned bucket and earned resets available. Never redeems a reset. |
 | Copilot CLI | Installed CLI's `account.getQuota` stdio method. Reports allowances, unlimited categories, resets, and paid overage availability. |
 | OpenCode | Its saved provider accounts (OpenCode 2 through `opencode auth export`). Reads the applicable provider quota endpoint for each account. For an OpenCode 2 Console sign-in, OpenCode's own `experimental.usage.limits` operation (OpenCode 2.2+) reports the Go plan's five-hour, weekly, and monthly meters and the workspace's spending budgets. |
-| Antigravity | Installed CLI's `agy -p /usage --output-format json` (1.1.11+), with fallback to a running local `LanguageServerService` on older CLIs. Reports all enabled quota groups and reset times without starting an agent turn or reading tokens directly. |
+| Antigravity | Installed CLI's `agy -p /usage --output-format json` (1.1.11+, run with `AGY_CLI_DISABLE_AUTO_UPDATE=1`), with fallback to a running local `LanguageServerService` on older CLIs. Reports all enabled quota groups and reset times without starting an agent turn or reading tokens directly. |
 | Cursor Agent | Its existing access token and `DashboardService/GetUsageLimitPolicyStatus`. Reports access restrictions and the supplied reset time. Does not infer a percentage or remaining allowance from that status. |
 | Pi | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
 | Hermes | Its saved provider accounts and credential pool, deduplicated by credential. Includes Nous subscription, purchased-credit balances, and member spending caps when reported. |
