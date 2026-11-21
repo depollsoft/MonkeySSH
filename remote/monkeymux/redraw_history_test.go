@@ -754,6 +754,128 @@ func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
 	}
 }
 
+func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Split a single Kitty APC chunk's base64 payload across the pause resume.
+	const head = "\x1b[2J\x1b[H\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAA"
+	const tail = "BBBB\x1b\\\x1b[16;4H\x1b_Ga=p,i=4242,p=1,c=10,r=5,C=1,q=2\x1b\\"
+	server.handleWindowOutput(window.id, []byte(head))
+
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	server.handleWindowOutput(window.id, []byte(tail))
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	const wantFullApc = "\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAABBBB\x1b\\"
+	if !strings.Contains(got, wantFullApc) {
+		t.Fatalf("split Kitty APC was corrupted by resume marker; got tail %q", got[max(0, len(got)-160):])
+	}
+}
+
+func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upload a > 2 MiB store-only image that completes (m=0) during the pause
+	// before its a=p placement arrives after resume.
+	chunkPayload := strings.Repeat("A", 4096)
+	var upload bytes.Buffer
+	upload.WriteString("\x1b[2J\x1b[Hready")
+	upload.WriteString("\x1b_Ga=t,f=100,i=5555,q=2,m=1;" + chunkPayload + "\x1b\\")
+	for i := 0; i < 600; i++ { // ~2.45 MiB (> maxReplayedKittyImageBytes)
+		upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+	}
+	upload.WriteString("\x1b_Gq=2,m=0;AAAA\x1b\\")
+	server.handleWindowOutput(window.id, upload.Bytes())
+
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=5555,p=2,c=27,r=24,C=1,q=2\x1b\\"
+	server.handleWindowOutput(window.id, []byte(placement))
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	if !strings.Contains(got, "i=5555,") && !strings.Contains(got, "i=5555;") {
+		t.Fatalf("completed >2 MiB store-only upload was dropped before placement arrived (delivered %d bytes)", len(got))
+	}
+	if !strings.Contains(got, placement) {
+		t.Fatal("placement missing after redraw pause resume")
+	}
+}
+
+func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{
+		id:        "@2",
+		index:     1,
+		agentTool: "copilot",
+		pty:       &recordingPty{},
+		ptyWidth:  120,
+		ptyHeight: 40,
+	}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	secondary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	secondaryClient := registerTestAttachClient(t, server, secondary, "desktop", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a large 6 MiB deferred replay plus a 3 MiB in-progress Kitty
+	// upload and a pending terminal query so failover + secondary reservations
+	// would exceed attachWriteQueueLimitBytes if the upload were kept verbatim.
+	server.mu.Lock()
+	window.redrawForwardingReplay = bytes.Repeat([]byte("R"), 6*1024*1024)
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+
+	chunkPayload := strings.Repeat("A", 4096)
+	var upload bytes.Buffer
+	upload.WriteString("\x1b[2J\x1b[H\x1b[6n")
+	upload.WriteString("\x1b_Ga=t,f=100,i=6666,q=2,m=1;" + chunkPayload + "\x1b\\")
+	for i := 0; i < 750; i++ { // ~3 MiB
+		upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+	}
+	server.handleWindowOutput(window.id, upload.Bytes())
+
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	if secondaryClient.isClosed() {
+		t.Fatal("secondary viewer was disconnected by oversized redraw reservation")
+	}
+}
+
 func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
 	for _, test := range []struct{ mode, app string }{
 		{"1047", "alternate app"},

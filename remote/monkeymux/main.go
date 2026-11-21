@@ -101,19 +101,14 @@ const (
 	terminalResponseMaxOutstanding    = 64
 	// terminalResponseMaxUndelivered bounds the replies owed to queries a
 	// reporting client has read but its terminal has not been written yet.
-	terminalResponseMaxUndelivered   = 4096
-	attachWriteChunkBytes            = 32 * 1024
-	terminalResponseFocusGrace       = 2 * time.Second
-	focusInputCarryDelay             = 75 * time.Millisecond
-	bracketedPasteStartCarryDelay    = 20 * time.Millisecond
-	foregroundRedrawResizeDelay      = 40 * time.Millisecond
-	foregroundRedrawForwardingPause  = foregroundRedrawResizeDelay + 80*time.Millisecond
-	foregroundRedrawBufferLimitBytes = 512 * 1024
-	// maxRedrawPendingKittyBufferBytes bounds a redraw pause carrying an
-	// incomplete multi-chunk Kitty upload. Keeping it at one quarter of
-	// attachWriteQueueLimitBytes guarantees that replay + failover + secondary
-	// reservations in deliverWithQueryFallback never disconnect a viewer.
-	maxRedrawPendingKittyBufferBytes  = attachWriteQueueLimitBytes / 4
+	terminalResponseMaxUndelivered    = 4096
+	attachWriteChunkBytes             = 32 * 1024
+	terminalResponseFocusGrace        = 2 * time.Second
+	focusInputCarryDelay              = 75 * time.Millisecond
+	bracketedPasteStartCarryDelay     = 20 * time.Millisecond
+	foregroundRedrawResizeDelay       = 40 * time.Millisecond
+	foregroundRedrawForwardingPause   = foregroundRedrawResizeDelay + 80*time.Millisecond
+	foregroundRedrawBufferLimitBytes  = 512 * 1024
 	windowUpdateMinInterval           = 750 * time.Millisecond
 	windowHistoryLimitBytes           = 128 * 1024
 	windowFullReplayHistoryLimitBytes = 512 * 1024
@@ -1103,6 +1098,10 @@ type muxWindow struct {
 	// redrawForwardingAnsweredCursor records that MonkeyMux answered a cursor
 	// position query from the screen model during the current pause.
 	redrawForwardingAnsweredCursor bool
+	// redrawForwardingStartKittySeq snapshots kittyImageStoreSeq when the
+	// current redraw pause began so a screen-model fallback can still include
+	// store-only images uploaded during the pause whose a=p arrives after it.
+	redrawForwardingStartKittySeq uint64
 	// redrawForwardingClipboard holds the OSC 5522 packets forwarded during
 	// the pause apart from the redraw; see forwardKittyClipboardLocked.
 	redrawForwardingClipboard kittyClipboardDelivery
@@ -7636,6 +7635,71 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 	return output
 }
 
+// incompleteTrailingKittyApcStart returns the index in data where an
+// unterminated Kitty APC (`ESC _ G` or C1 `0x9f G`) begins at the tail, or -1
+// if data does not end inside an open Kitty APC. Scans forward once in O(n).
+func incompleteTrailingKittyApcStart(data []byte) int {
+	inApc := false
+	apcStart := -1
+	for i := 0; i < len(data); i++ {
+		if !inApc {
+			if data[i] == '\x1b' && i+2 < len(data) &&
+				data[i+1] == '_' && data[i+2] == 'G' {
+				inApc = true
+				apcStart = i
+				i += 2
+			} else if data[i] == 0x9f && i+1 < len(data) && data[i+1] == 'G' {
+				inApc = true
+				apcStart = i
+				i++
+			}
+			continue
+		}
+		switch data[i] {
+		case 0x18, 0x1a, 0x9c: // CAN, SUB, C1 ST
+			inApc = false
+			apcStart = -1
+		case '\x1b':
+			if i+1 < len(data) {
+				if data[i+1] == '\\' {
+					inApc = false
+					apcStart = -1
+					i++
+				} else {
+					// ESC followed by another byte aborts the APC and starts a
+					// new sequence; reprocess this ESC in ground state.
+					inApc = false
+					apcStart = -1
+					i--
+				}
+			}
+		}
+	}
+	if inApc {
+		return apcStart
+	}
+	return -1
+}
+
+// wrapSynchronizedTerminalOutputBeforeIncompleteApc wraps prefix and the
+// complete head of data in a synchronized transaction and appends any
+// unterminated trailing Kitty APC after ESC[?9002l so the end marker is never
+// injected inside an open graphics chunk.
+func wrapSynchronizedTerminalOutputBeforeIncompleteApc(
+	prefix []byte,
+	data []byte,
+) []byte {
+	apcStart := incompleteTrailingKittyApcStart(data)
+	if apcStart < 0 {
+		return wrapSynchronizedTerminalOutput(prefix, data)
+	}
+	wrapped := wrapSynchronizedTerminalOutput(prefix, data[:apcStart])
+	out := make([]byte, 0, len(wrapped)+len(data)-apcStart)
+	out = append(out, wrapped...)
+	out = append(out, data[apcStart:]...)
+	return out
+}
+
 func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.closed = true
 	window.replies.take()
@@ -11500,6 +11564,9 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	} else if !window.redrawForwardingPaused {
 		window.redrawForwardingFallbackScreen = nil
 	}
+	if !window.redrawForwardingPaused {
+		window.redrawForwardingStartKittySeq = kittyImageStoreSeq
+	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
 	windowID := window.id
@@ -11596,25 +11663,37 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// so retain only a parser-safe tail of that redraw instead of sending many
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
-	pendingKitty := len(window.kittyGraphicsPending) > 0 &&
-		len(buffered) <= maxRedrawPendingKittyBufferBytes &&
-		len(failoverBuffered) <= maxRedrawPendingKittyBufferBytes &&
-		len(secondaryBuffered) <= maxRedrawPendingKittyBufferBytes
+	endedAtGround := window.terminalOutputIsGroundLocked()
+	hasQueryFailover := len(queryData) > 0 || len(clipboard.tags) > 0
+	// Account for the prepended replay and both mutually exclusive writes
+	// queued per secondary viewer in deliverWithQueryFallback so a preserved
+	// upload can never overflow attachWriteQueueLimitBytes and drop a viewer.
+	kittyRedrawFitsQueue := func() bool {
+		const maxAllowed = attachWriteQueueLimitBytes / 2
+		primaryBytes := len(replay) + len(buffered)
+		failoverBytes := len(replay) + len(failoverBuffered)
+		secondaryBytes := len(replay) + len(secondaryBuffered)
+		if primaryBytes > maxAllowed {
+			return false
+		}
+		if hasQueryFailover {
+			return failoverBytes+secondaryBytes <= maxAllowed
+		}
+		return failoverBytes <= maxAllowed && secondaryBytes <= maxAllowed
+	}
+	pendingKitty := len(window.kittyGraphicsPending) > 0 && kittyRedrawFitsQueue()
 	hasRedrawContent := visibleRedraw || pendingKitty
 	paintedFromScreen := false
-	if len(replay) > 0 && window.terminalOutputIsGroundLocked() {
+	if len(replay) > 0 && endedAtGround {
 		// If a chunked Kitty transmission is still in flight when the redraw
 		// pause ends, replacing buffered with a screen-model frame or trimming
 		// its head discards the opening m=1 chunks so later chunks arrive
-		// orphaned and the image never displays. Keep the upload intact up to
-		// maxRedrawPendingKittyBufferBytes.
-		redrawLimit := foregroundRedrawBufferLimitBytes
-		if len(window.kittyGraphicsPending) > 0 {
-			redrawLimit = maxRedrawPendingKittyBufferBytes
-		}
-		oversized := len(buffered) > redrawLimit ||
-			len(failoverBuffered) > redrawLimit ||
-			len(secondaryBuffered) > redrawLimit
+		// orphaned and the image never displays. Keep the upload intact while
+		// the combined replay and redraw stay safely within the client queue.
+		oversized := !pendingKitty &&
+			(len(buffered) > foregroundRedrawBufferLimitBytes ||
+				len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
+				len(secondaryBuffered) > foregroundRedrawBufferLimitBytes)
 		if oversized && window.screenLocked().HasVisibleContent() {
 			// Cutting the head off a long repaint loses the top of the frame.
 			// The screen model has already absorbed the whole redraw, so paint
@@ -11738,18 +11817,15 @@ func (s *muxServer) resumePausedAttachForwarding(
 		}
 	}
 	s.mu.Unlock()
-	primaryOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		buffered,
-	)
-	failoverOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		failoverBuffered,
-	)
-	secondaryOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		secondaryBuffered,
-	)
+	formatOutput := func(prefix []byte, data []byte) []byte {
+		if !endedAtGround {
+			return wrapSynchronizedTerminalOutputBeforeIncompleteApc(prefix, data)
+		}
+		return wrapSynchronizedTerminalOutput(prefix, data)
+	}
+	primaryOutput := formatOutput(replay, buffered)
+	failoverOutput := formatOutput(replay, failoverBuffered)
+	secondaryOutput := formatOutput(replay, secondaryBuffered)
 	var primaryClient *attachClient
 	for _, client := range clients {
 		if client.conn == primary {
@@ -12197,6 +12273,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingAnsweredCursor = false
+	w.redrawForwardingStartKittySeq = 0
 	w.redrawForwardingClipboard = kittyClipboardDelivery{}
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
@@ -12219,12 +12296,21 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	// The frame is rendered from the screen model, which drops the APC image
 	// transmissions, so every image its placeholder cells reference must travel
 	// with it — not just the few most recently mutated ones — and so must the
-	// images its direct placements show.
+	// images its direct placements show, plus any store-only images uploaded
+	// during an active redraw pause whose placement has not arrived yet.
+	neededIDs := screen.KittyPlacementImageIDs()
+	if window.redrawForwardingPaused && screen == window.screenLocked() {
+		for _, id := range window.kittyImageOrder {
+			if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq {
+				neededIDs = append(neededIDs, id)
+			}
+		}
+	}
 	frameImages, served := window.kittyFrameImageReplayLocked(
 		replayed,
 		nil,
 		maxKittyImageRepairBytes-len(images),
-		screen.KittyPlacementImageIDs(),
+		neededIDs,
 	)
 	images = append(images, frameImages...)
 	// A direct placement whose image did not fit is left out rather than
