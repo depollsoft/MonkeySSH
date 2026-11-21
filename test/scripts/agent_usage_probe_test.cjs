@@ -662,32 +662,32 @@ test('Antigravity parses headless CLI /usage JSON and gates version >= 1.1.11', 
   assert.equal(extractAntigravityCsrf('agy --csrf_token=tok123 --other'), 'tok123');
   assert.equal(extractAntigravityCsrf('agy --csrf_token "tok 456"'), 'tok 456');
 
-  // Loopback parsers preserve IPv4 vs IPv6 family and drop non-loopback listeners.
+  // Loopback parsers preserve IPv4 vs IPv6 family and PID, and drop non-loopback listeners.
   assert.deepEqual(parseAntigravityLsof(
     'p123\nf10\ntIPv4\nn127.0.0.1:5000\nf11\ntIPv6\nn[::1]:5000\nf12\ntIPv4\nn192.168.1.5:5001\nf13\ntIPv6\nn*:5002\n',
     'CSRF_A',
   ), [
-    {host: '127.0.0.1', port: 5000, csrf: 'CSRF_A'},
-    {host: '::1', port: 5000, csrf: 'CSRF_A'},
-    {host: '::1', port: 5002, csrf: 'CSRF_A'},
+    {host: '127.0.0.1', port: 5000, csrf: 'CSRF_A', pid: 123},
+    {host: '::1', port: 5000, csrf: 'CSRF_A', pid: 123},
+    {host: '::1', port: 5002, csrf: 'CSRF_A', pid: 123},
   ]);
   const sockets = new Set(['101', '102', '103']);
   assert.deepEqual(parseAntigravityProcNet(
     '  0: 0100007F:1388 00000000:0000 0A 00:00 00:00 00 0 0 101\n' +
     '  1: 0501A8C0:1389 00000000:0000 0A 00:00 00:00 00 0 0 102\n',
-    false, sockets, 'CSRF_B',
-  ), [{host: '127.0.0.1', port: 5000, csrf: 'CSRF_B'}]);
+    false, sockets, 'CSRF_B', 456,
+  ), [{host: '127.0.0.1', port: 5000, csrf: 'CSRF_B', pid: 456}]);
   assert.deepEqual(parseAntigravityProcNet(
     '  0: 00000000000000000000000001000000:1388 00000000000000000000000000000000:0000 0A 00:00 00:00 00 0 0 103\n',
-    true, sockets, 'CSRF_C',
-  ), [{host: '::1', port: 5000, csrf: 'CSRF_C'}]);
+    true, sockets, 'CSRF_C', 456,
+  ), [{host: '::1', port: 5000, csrf: 'CSRF_C', pid: 456}]);
   assert.deepEqual(parseAntigravityWindowsListeners([
-    {LocalAddress: '127.0.0.1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token=WIN_V4'},
-    {LocalAddress: '::1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token WIN_V6'},
-    {LocalAddress: '10.0.0.5', LocalPort: 5001, CommandLine: 'agy.exe --csrf_token=LAN'},
+    {OwningProcess: 789, LocalAddress: '127.0.0.1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token=WIN_V4'},
+    {OwningProcess: 789, LocalAddress: '::1', LocalPort: 5000, CommandLine: 'agy.exe --csrf_token WIN_V6'},
+    {OwningProcess: 790, LocalAddress: '10.0.0.5', LocalPort: 5001, CommandLine: 'agy.exe --csrf_token=LAN'},
   ]), [
-    {host: '127.0.0.1', port: 5000, csrf: 'WIN_V4'},
-    {host: '::1', port: 5000, csrf: 'WIN_V6'},
+    {host: '127.0.0.1', port: 5000, csrf: 'WIN_V4', pid: 789},
+    {host: '::1', port: 5000, csrf: 'WIN_V6', pid: 789},
   ]);
 
   const parsed = antigravityUsage({
@@ -739,6 +739,24 @@ test('Antigravity local fallback targets only the discovered loopback family and
   assert.match(seen[0].url, /^https:\/\/\[::1\]:54321\//);
   assert.equal(seen[0].csrf, 'IPV6_ONLY_CSRF');
   assert.equal(res.windows[0].usedPercent, 50);
+
+  // Dual-stack listeners on one PID are probed as alternatives and reported once,
+  // while two distinct PIDs stay separate instances.
+  const dualStack = await antigravity([
+    {host: '127.0.0.1', port: 5000, csrf: 'SAME', pid: 123},
+    {host: '::1', port: 5000, csrf: 'SAME', pid: 123},
+  ], async () => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]}));
+  assert.deepEqual(dualStack.windows.map(w => w.label), ['Models · Weekly']);
+
+  const multiPid = await antigravity([
+    {host: '127.0.0.1', port: 5000, csrf: 'A', pid: 100},
+    {host: '::1', port: 5000, csrf: 'A', pid: 100},
+    {host: '127.0.0.1', port: 5001, csrf: 'B', pid: 200},
+  ], async url => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: url.includes(':5000/') ? 0.5 : 0.25}]}]}));
+  assert.deepEqual(multiPid.windows.map(w => [w.label, w.usedPercent]), [
+    ['Instance 1 · Models · Weekly', 50],
+    ['Instance 2 · Models · Weekly', 75],
+  ]);
 
   // Even with NODE_USE_ENV_PROXY=1 and HTTP_PROXY pointing at an interceptor, local: true skips the proxy.
   let proxyHits = 0;

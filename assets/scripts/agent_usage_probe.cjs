@@ -491,10 +491,16 @@ function normalizeLoopbackHost(rawHost, family = null) {
   if (host === '*') return family === 'IPv6' ? '::1' : family === 'IPv4' ? '127.0.0.1' : null;
   return null;
 }
-function parseAntigravityLsof(output, csrf = null) {
+function parseAntigravityLsof(output, csrf = null, defaultPid = null) {
   const listeners = [];
+  let pid = defaultPid != null ? Number(defaultPid) : null;
   let family = null;
   for (const row of String(output || '').split('\n')) {
+    if (row.startsWith('p')) {
+      const parsed = Number(row.slice(1).trim());
+      pid = Number.isInteger(parsed) && parsed > 0 ? parsed : pid;
+      continue;
+    }
     if (row.startsWith('f')) { family = null; continue; }
     if (row.startsWith('t')) { family = row.slice(1).trim(); continue; }
     if (!row.startsWith('n')) continue;
@@ -503,13 +509,14 @@ function parseAntigravityLsof(output, csrf = null) {
     const host = normalizeLoopbackHost(match[1], family);
     const port = Number(match[2]);
     if (host && Number.isInteger(port) && port > 0) {
-      listeners.push(csrf ? {host, port, csrf} : {host, port});
+      listeners.push({host, port, ...(csrf ? {csrf} : {}), ...(pid != null ? {pid} : {})});
     }
   }
   return listeners;
 }
-function parseAntigravityProcNet(content, ipv6, sockets, csrf = null) {
+function parseAntigravityProcNet(content, ipv6, sockets, csrf = null, pid = null) {
   const listeners = [];
+  const pidNum = pid != null && Number.isInteger(Number(pid)) && Number(pid) > 0 ? Number(pid) : null;
   for (const row of String(content || '').split('\n')) {
     const fields = row.trim().split(/\s+/);
     if (fields[3] !== '0A' || !sockets.has(fields[9])) continue;
@@ -524,7 +531,7 @@ function parseAntigravityProcNet(content, ipv6, sockets, csrf = null) {
       if (upper === '00000000000000000000000001000000' || upper === '00000000000000000000000000000000') host = '::1';
       else if (upper === '0000000000000000FFFF00000100007F') host = '127.0.0.1';
     }
-    if (host) listeners.push(csrf ? {host, port, csrf} : {host, port});
+    if (host) listeners.push({host, port, ...(csrf ? {csrf} : {}), ...(pidNum != null ? {pid: pidNum} : {})});
   }
   return listeners;
 }
@@ -536,7 +543,9 @@ function parseAntigravityWindowsListeners(rows) {
     const port = Number(row.LocalPort);
     if (!host || !Number.isInteger(port) || port <= 0) continue;
     const csrf = extractAntigravityCsrf(row.CommandLine);
-    seen.set(`${host}:${port}`, csrf ? {host, port, csrf} : {host, port});
+    const rawPid = row.OwningProcess ?? row.ProcessId ?? row.pid;
+    const pid = rawPid != null && Number.isInteger(Number(rawPid)) && Number(rawPid) > 0 ? Number(rawPid) : null;
+    seen.set(`${host}:${port}`, {host, port, ...(csrf ? {csrf} : {}), ...(pid != null ? {pid} : {})});
   }
   return [...seen.values()];
 }
@@ -550,7 +559,7 @@ function antigravityPorts(deadline = Date.now() + 4000) {
     });
   };
   if (process.platform === 'win32') {
-    const script = "$procs = @{}; Get-CimInstance Win32_Process -Filter \"Name='agy.exe' OR Name='antigravity.exe' OR Name='antigravity-cli.exe'\" -ErrorAction SilentlyContinue | ForEach-Object { $procs[[int]$_.ProcessId] = [string]$_.CommandLine }; if ($procs.Count -eq 0) { '[]'; exit 0 }; @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $procs.ContainsKey([int]$_.OwningProcess) } | ForEach-Object { @{ LocalAddress = $_.LocalAddress; LocalPort = $_.LocalPort; CommandLine = $procs[[int]$_.OwningProcess] } }) | ConvertTo-Json -Compress";
+    const script = "$procs = @{}; Get-CimInstance Win32_Process -Filter \"Name='agy.exe' OR Name='antigravity.exe' OR Name='antigravity-cli.exe'\" -ErrorAction SilentlyContinue | ForEach-Object { $procs[[int]$_.ProcessId] = [string]$_.CommandLine }; if ($procs.Count -eq 0) { '[]'; exit 0 }; @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $procs.ContainsKey([int]$_.OwningProcess) } | ForEach-Object { @{ OwningProcess = [int]$_.OwningProcess; LocalAddress = $_.LocalAddress; LocalPort = $_.LocalPort; CommandLine = $procs[[int]$_.OwningProcess] } }) | ConvertTo-Json -Compress";
     try { return parseAntigravityWindowsListeners(JSON.parse(command('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]))); } catch { return []; }
   }
   const listeners = new Map();
@@ -566,7 +575,7 @@ function antigravityPorts(deadline = Date.now() + 4000) {
     try {
       if (process.platform === 'darwin') {
         const output = command('lsof', ['-a', '-p', pid, '-iTCP', '-sTCP:LISTEN', '-n', '-P', '-Fnt']);
-        for (const item of parseAntigravityLsof(output, csrf)) listeners.set(`${item.host}:${item.port}`, item);
+        for (const item of parseAntigravityLsof(output, csrf, pid)) listeners.set(`${item.host}:${item.port}`, item);
       } else {
         const fds = path.join('/proc', pid, 'fd');
         const sockets = new Set(fs.readdirSync(fds).flatMap(fd => {
@@ -574,7 +583,7 @@ function antigravityPorts(deadline = Date.now() + 4000) {
         }));
         for (const [version, ipv6] of [['tcp', false], ['tcp6', true]]) {
           const content = fs.readFileSync(path.join('/proc', pid, 'net', version), 'utf8');
-          for (const item of parseAntigravityProcNet(content, ipv6, sockets, csrf)) listeners.set(`${item.host}:${item.port}`, item);
+          for (const item of parseAntigravityProcNet(content, ipv6, sockets, csrf, pid)) listeners.set(`${item.host}:${item.port}`, item);
         }
       }
     } catch {}
@@ -583,32 +592,43 @@ function antigravityPorts(deadline = Date.now() + 4000) {
 }
 async function antigravityLocal(ports, request = requestJson, deadline = Date.now() + 10000) {
   if (!ports.length) return {windows: []};
-  const results = await Promise.all(ports.slice(0, 16).map(async entry => {
-    const port = typeof entry === 'number' ? entry : entry.port;
-    const host = typeof entry === 'object' && entry?.host ? normalizeLoopbackHost(entry.host) : '127.0.0.1';
-    if (!host || !Number.isInteger(port) || port <= 0) return {windows: []};
-    const urlHost = host === '::1' ? '[::1]' : '127.0.0.1';
-    const csrf = typeof entry === 'object' && entry ? entry.csrf : null;
-    const headers = csrf ? {'x-codeium-csrf-token': csrf} : {};
-    for (const scheme of ['https', 'http']) {
-      for (const [method, body] of [
-        ['RetrieveUserQuotaSummary', {forceRefresh: true}],
-        ['GetUserStatus', {metadata: {ideName: 'antigravity', extensionName: 'antigravity', ideVersion: 'unknown', locale: 'en'}}],
-      ]) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 150) return {windows: []};
-        try {
-          const result = antigravityUsage(await request(`${scheme}://${urlHost}:${port}/exa.language_server_pb.LanguageServerService/${method}`,
-            {local: true, headers, body, timeoutMs: Math.min(2500, remaining)}));
-          if (result.windows.length) return result;
-        } catch {}
+  // Group endpoints belonging to the same server process so dual-stack or
+  // multi-port listeners on one instance are tried as alternatives, not duplicated.
+  const groups = new Map();
+  for (const [index, entry] of ports.slice(0, 16).entries()) {
+    const key = typeof entry === 'object' && entry?.pid != null ? `pid:${entry.pid}` : `entry:${index}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  const results = await Promise.all([...groups.values()].map(async entries => {
+    for (const entry of entries) {
+      const port = typeof entry === 'number' ? entry : entry.port;
+      const host = typeof entry === 'object' && entry?.host ? normalizeLoopbackHost(entry.host) : '127.0.0.1';
+      if (!host || !Number.isInteger(port) || port <= 0) continue;
+      const urlHost = host === '::1' ? '[::1]' : '127.0.0.1';
+      const csrf = typeof entry === 'object' && entry ? entry.csrf : null;
+      const headers = csrf ? {'x-codeium-csrf-token': csrf} : {};
+      for (const scheme of ['https', 'http']) {
+        for (const [method, body] of [
+          ['RetrieveUserQuotaSummary', {forceRefresh: true}],
+          ['GetUserStatus', {metadata: {ideName: 'antigravity', extensionName: 'antigravity', ideVersion: 'unknown', locale: 'en'}}],
+        ]) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 150) return {windows: []};
+          try {
+            const result = antigravityUsage(await request(`${scheme}://${urlHost}:${port}/exa.language_server_pb.LanguageServerService/${method}`,
+              {local: true, headers, body, timeoutMs: Math.min(2500, remaining)}));
+            if (result.windows.length) return result;
+          } catch {}
+        }
       }
     }
     return {windows: []};
   }));
   // Multiple running servers can use different accounts. Do not silently choose one.
-  return {windows: results.flatMap((r, i) => r.windows.map(w => ({...w,
-    label: results.filter(x => x.windows.length).length > 1 ? `Instance ${i + 1} · ${w.label}` : w.label}))) };
+  const active = results.filter(r => r.windows.length);
+  return {windows: active.flatMap((r, i) => r.windows.map(w => ({...w,
+    label: active.length > 1 ? `Instance ${i + 1} · ${w.label}` : w.label}))) };
 }
 async function antigravity(executable = '', options = {}) {
   if (Array.isArray(executable)) {
