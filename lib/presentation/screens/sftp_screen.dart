@@ -258,6 +258,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   List<RemoteFileSelection> _selectedFiles = const [];
   SftpBrowserViewSettings _viewSettings = const SftpBrowserViewSettings();
   bool _viewSettingsChangedLocally = false;
+  Future<void> _viewSettingsSaveQueue = Future<void>.value();
   bool _filterChangedLocally = false;
   final TextEditingController _filterController = TextEditingController();
   String _filterQuery = '';
@@ -1254,18 +1255,33 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           children: [
             _buildLocationShortcuts(),
             _buildBreadcrumbs(),
-            SftpBrowserToolbar(
-              filterController: _filterController,
-              onFilterChanged: _onFilterChanged,
-              settings: _viewSettings,
-              onShowViewOptions: () => unawaited(_showViewOptions()),
-              onStartSelection:
-                  _isSelectionMode ||
-                      _isBatchSelecting ||
-                      _movingFiles != null ||
-                      _batchRunning
-                  ? null
-                  : _startBatchSelection,
+            Builder(
+              builder: (context) {
+                final filterCounts = !_isLoading && _error == null
+                    ? countSftpFilterMatches(
+                        _files,
+                        _viewSettings,
+                        _filterQuery,
+                      )
+                    : null;
+                return SftpBrowserToolbar(
+                  filterController: _filterController,
+                  onFilterChanged: _onFilterChanged,
+                  settings: _viewSettings,
+                  onShowViewOptions: () => unawaited(_showViewOptions()),
+                  onToggleSortDirection: () =>
+                      unawaited(_toggleSortDirection()),
+                  onStartSelection:
+                      _isSelectionMode ||
+                          _isBatchSelecting ||
+                          _movingFiles != null ||
+                          _batchRunning
+                      ? null
+                      : _startBatchSelection,
+                  matchCount: filterCounts?.matched,
+                  totalCount: filterCounts?.total,
+                );
+              },
             ),
             Expanded(child: _buildFileList()),
           ],
@@ -1563,19 +1579,41 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     final visibleFiles = _visibleFiles;
+    final hiddenCount = _files
+        .where((file) => isHiddenSftpName(file.filename))
+        .length;
     if (visibleFiles.isEmpty) {
       final query = _filterQuery.trim();
-      final hiddenCount = _files
-          .where((file) => isHiddenSftpName(file.filename))
-          .length;
+      final filterCounts = countSftpFilterMatches(
+        _files,
+        _viewSettings,
+        _filterQuery,
+      );
+      final hiddenMatched = filterCounts.hiddenMatched;
       return _scrollableEmptyState(
         query.isNotEmpty
             ? BrandEmptyState(
                 title: 'no matches',
-                message: 'Nothing in this folder matches "$query".',
+                message: hiddenMatched > 0
+                    ? 'Nothing visible matches "$query" '
+                          '($hiddenMatched hidden '
+                          '${hiddenMatched == 1 ? 'item matches' : 'items match'}).'
+                    : 'Nothing in this folder matches "$query".',
                 primaryLabel: 'Clear filter',
                 primaryIcon: Icons.filter_list_off,
                 onPrimary: _clearFilter,
+                secondaryActions: [
+                  if (hiddenMatched > 0)
+                    BrandEmptyAction(
+                      icon: Icons.visibility_outlined,
+                      label: 'Show hidden files',
+                      onTap: () => unawaited(
+                        _applyViewSettings(
+                          _viewSettings.copyWith(showHidden: true),
+                        ),
+                      ),
+                    ),
+                ],
               )
             : BrandEmptyState(
                 title: 'only hidden files',
@@ -1591,6 +1629,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       );
     }
 
+    final showHiddenFooter = !_viewSettings.showHidden && hiddenCount > 0;
+    final highlightQuery = _filterQuery.trim();
     return RefreshIndicator(
       onRefresh: () async {
         _clearHighlightedFile();
@@ -1598,13 +1638,23 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       },
       child: ListView.builder(
         controller: _fileListScrollController,
-        itemCount: visibleFiles.length,
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        itemCount: visibleFiles.length + (showHiddenFooter ? 1 : 0),
         itemBuilder: (context, index) {
+          if (showHiddenFooter && index == visibleFiles.length) {
+            return _HiddenItemsFooter(
+              hiddenCount: hiddenCount,
+              onShowHidden: () => unawaited(
+                _applyViewSettings(_viewSettings.copyWith(showHidden: true)),
+              ),
+            );
+          }
           final file = visibleFiles[index];
           final selectionDisabledReason = _selectionDisabledReasonForFile(file);
           final isSelected = _selectionActive && _isRemoteFileSelected(file);
           return _FileListTile(
             file: file,
+            highlightQuery: highlightQuery,
             isHighlighted:
                 (_highlightedDirectoryPath == _currentPath &&
                     _highlightedFileName == file.filename) ||
@@ -2894,10 +2944,60 @@ class _RenameDialogState extends State<_RenameDialog> {
   }
 }
 
+class _HiddenItemsFooter extends StatelessWidget {
+  const _HiddenItemsFooter({
+    required this.hiddenCount,
+    required this.onShowHidden,
+  });
+
+  final int hiddenCount;
+  final VoidCallback onShowHidden;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = theme.textTheme.bodyMedium?.color ?? scheme.onSurfaceVariant;
+    final noun = hiddenCount == 1 ? 'hidden item' : 'hidden items';
+    return InkWell(
+      onTap: onShowHidden,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.visibility_off_outlined, size: 15, color: muted),
+              const SizedBox(width: 6),
+              Text(
+                '$hiddenCount $noun · ',
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 12,
+                  color: muted,
+                ),
+              ),
+              Text(
+                'show',
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: scheme.primary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _FileListTile extends StatelessWidget {
   const _FileListTile({
     required this.file,
     required this.onTap,
+    this.highlightQuery = '',
     this.onLongPress,
     this.onShowOptions,
     this.isHighlighted = false,
@@ -2909,6 +3009,7 @@ class _FileListTile extends StatelessWidget {
   });
 
   final SftpName file;
+  final String highlightQuery;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
   final VoidCallback? onShowOptions;
@@ -2980,6 +3081,53 @@ class _FileListTile extends StatelessWidget {
         );
       }
     }
+    final filenameStyle = isHighlighted
+        ? FluttyTheme.monoStyle.copyWith(
+            fontSize: 14,
+            color: theme.colorScheme.onPrimaryContainer,
+            fontWeight: FontWeight.w600,
+          )
+        : FluttyTheme.monoStyle.copyWith(
+            fontSize: 14,
+            color: isDisabled
+                ? theme.colorScheme.onSurface.withAlpha(170)
+                : theme.colorScheme.onSurface,
+          );
+    final matchColors = resolveSftpTintedAccentColors(
+      theme,
+      baseSurface: theme.scaffoldBackgroundColor,
+      darkAlpha: 0.42,
+      lightAlpha: 0.18,
+    );
+    final matchStyle = filenameStyle.copyWith(
+      fontWeight: FontWeight.w700,
+      color: isHighlighted
+          ? theme.colorScheme.onPrimaryContainer
+          : matchColors.foreground,
+      backgroundColor: isHighlighted
+          ? theme.colorScheme.onPrimaryContainer.withValues(alpha: 0.22)
+          : matchColors.background,
+    );
+    final Widget titleWidget = highlightQuery.isEmpty
+        ? Text(
+            file.filename,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: filenameStyle,
+          )
+        : Text.rich(
+            TextSpan(
+              children: buildHighlightedSftpFilenameSpans(
+                filename: file.filename,
+                query: highlightQuery,
+                baseStyle: filenameStyle,
+                matchStyle: matchStyle,
+              ),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            semanticsLabel: file.filename,
+          );
     final tile = ListTile(
       visualDensity: VisualDensity.compact,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12),
@@ -2991,23 +3139,7 @@ class _FileListTile extends StatelessWidget {
         resolveSftpFileIcon(isDirectory: isDirectory, filename: file.filename),
         color: iconColor,
       ),
-      title: Text(
-        file.filename,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: isHighlighted
-            ? FluttyTheme.monoStyle.copyWith(
-                fontSize: 14,
-                color: theme.colorScheme.onPrimaryContainer,
-                fontWeight: FontWeight.w600,
-              )
-            : FluttyTheme.monoStyle.copyWith(
-                fontSize: 14,
-                color: isDisabled
-                    ? theme.colorScheme.onSurface.withAlpha(170)
-                    : theme.colorScheme.onSurface,
-              ),
-      ),
+      title: titleWidget,
       subtitle: subtitle,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,

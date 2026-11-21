@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
@@ -154,6 +157,124 @@ String _sftpExtension(String name) {
   return dot <= 0 ? '' : name.substring(dot + 1).toLowerCase();
 }
 
+double _contrastRatio(Color a, Color b) {
+  final la = a.computeLuminance();
+  final lb = b.computeLuminance();
+  final lighter = la > lb ? la : lb;
+  final darker = la > lb ? lb : la;
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+Color _mutedTextColor(ThemeData theme) =>
+    theme.textTheme.bodyMedium?.color ?? theme.colorScheme.onSurfaceVariant;
+
+Color _inputSurfaceColor(ThemeData theme) =>
+    theme.inputDecorationTheme.fillColor ??
+    theme.colorScheme.surfaceContainerHighest;
+
+/// Resolves a tinted accent surface and a foreground color that clears WCAG AA
+/// contrast across dark, light, and terminal-derived themes.
+({Color background, Color foreground}) resolveSftpTintedAccentColors(
+  ThemeData theme, {
+  required Color baseSurface,
+  double darkAlpha = 0.28,
+  double lightAlpha = 0.14,
+}) {
+  final scheme = theme.colorScheme;
+  final isDark = theme.brightness == Brightness.dark;
+  final tint = scheme.primary.withValues(
+    alpha: isDark ? darkAlpha : lightAlpha,
+  );
+  final composite = Color.alphaBlend(tint, baseSurface);
+  final primaryContrast = _contrastRatio(scheme.primary, composite);
+  final onSurfaceContrast = _contrastRatio(scheme.onSurface, composite);
+  final foreground = !isDark && primaryContrast >= 4.5
+      ? scheme.primary
+      : onSurfaceContrast >= 4.5
+      ? scheme.onSurface
+      : _contrastRatio(Colors.white, composite) >=
+            _contrastRatio(Colors.black, composite)
+      ? Colors.white
+      : Colors.black;
+  return (background: composite, foreground: foreground);
+}
+
+/// Literal ascending/descending labels for a [SftpSortField].
+({String ascending, String descending}) sftpSortOrderLabels(
+  SftpSortField field,
+) => switch (field) {
+  SftpSortField.name ||
+  SftpSortField.type => (ascending: 'A to Z', descending: 'Z to A'),
+  SftpSortField.size => (ascending: 'Smallest', descending: 'Largest'),
+  SftpSortField.modified => (ascending: 'Oldest', descending: 'Newest'),
+};
+
+/// Counts entries eligible under [settings] and how many match [filter].
+///
+/// [hiddenMatched] counts dot-files that match [filter] while hidden files are
+/// turned off, so empty states can offer to reveal them.
+({int matched, int total, int hiddenMatched}) countSftpFilterMatches(
+  Iterable<SftpName> entries,
+  SftpBrowserViewSettings settings,
+  String filter,
+) {
+  final query = filter.trim().toLowerCase();
+  var total = 0;
+  var matched = 0;
+  var hiddenMatched = 0;
+  for (final entry in entries) {
+    final hidden = isHiddenSftpName(entry.filename);
+    final matchesQuery =
+        query.isEmpty || entry.filename.toLowerCase().contains(query);
+    if (!settings.showHidden && hidden) {
+      if (query.isNotEmpty && matchesQuery) {
+        hiddenMatched++;
+      }
+      continue;
+    }
+    total++;
+    if (matchesQuery) {
+      matched++;
+    }
+  }
+  return (matched: matched, total: total, hiddenMatched: hiddenMatched);
+}
+
+/// Splits [filename] into plain and highlighted [TextSpan]s for every
+/// case-insensitive occurrence of [query].
+List<InlineSpan> buildHighlightedSftpFilenameSpans({
+  required String filename,
+  required String query,
+  required TextStyle baseStyle,
+  required TextStyle matchStyle,
+}) {
+  final needle = query.trim().toLowerCase();
+  if (needle.isEmpty) {
+    return [TextSpan(text: filename, style: baseStyle)];
+  }
+  final haystack = filename.toLowerCase();
+  final spans = <InlineSpan>[];
+  var cursor = 0;
+  while (cursor < filename.length) {
+    final index = haystack.indexOf(needle, cursor);
+    if (index < 0) {
+      spans.add(TextSpan(text: filename.substring(cursor), style: baseStyle));
+      break;
+    }
+    if (index > cursor) {
+      spans.add(
+        TextSpan(text: filename.substring(cursor, index), style: baseStyle),
+      );
+    }
+    final end = index + needle.length;
+    spans.add(
+      TextSpan(text: filename.substring(index, end), style: matchStyle),
+    );
+    cursor = end;
+  }
+  return spans;
+}
+
 /// Describes the current sort for buttons and screen readers.
 String describeSftpSort(SftpBrowserViewSettings settings) {
   final direction = switch (settings.sortField) {
@@ -243,23 +364,29 @@ final sftpBrowserViewStoreProvider = Provider<SftpBrowserViewStore>(
   (ref) => SettingsSftpBrowserViewStore(ref.watch(settingsServiceProvider)),
 );
 
-/// Shows sort and hidden-file choices; returns the new settings, or null
-/// when dismissed unchanged.
+/// Shows sort and hidden-file choices.
+///
+/// When [onChanged] is provided, every tap applies immediately so the file list
+/// updates live behind the sheet. Returns the final settings if they changed,
+/// or null when dismissed unchanged.
 Future<SftpBrowserViewSettings?> showSftpBrowserViewOptions(
   BuildContext context,
-  SftpBrowserViewSettings settings,
-) => showModalBottomSheet<SftpBrowserViewSettings>(
+  SftpBrowserViewSettings settings, {
+  ValueChanged<SftpBrowserViewSettings>? onChanged,
+}) => showModalBottomSheet<SftpBrowserViewSettings>(
   context: context,
   showDragHandle: true,
   // Sized to its options, scrolling only when the screen is too short.
   isScrollControlled: true,
-  builder: (context) => _SftpBrowserViewOptionsSheet(initial: settings),
+  builder: (context) =>
+      _SftpBrowserViewOptionsSheet(initial: settings, onChanged: onChanged),
 );
 
 class _SftpBrowserViewOptionsSheet extends StatefulWidget {
-  const _SftpBrowserViewOptionsSheet({required this.initial});
+  const _SftpBrowserViewOptionsSheet({required this.initial, this.onChanged});
 
   final SftpBrowserViewSettings initial;
+  final ValueChanged<SftpBrowserViewSettings>? onChanged;
 
   @override
   State<_SftpBrowserViewOptionsSheet> createState() =>
@@ -271,12 +398,22 @@ class _SftpBrowserViewOptionsSheetState
   late SftpBrowserViewSettings _settings = widget.initial;
 
   void _update(SftpBrowserViewSettings next) {
+    if (next == _settings) return;
     setState(() => _settings = next);
+    widget.onChanged?.call(next);
   }
+
+  void _close() =>
+      Navigator.of(context).pop(_settings == widget.initial ? null : _settings);
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = _mutedTextColor(theme);
+    final orderLabels = sftpSortOrderLabels(_settings.sortField);
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+
     return SafeArea(
       child: SingleChildScrollView(
         child: Column(
@@ -284,60 +421,133 @@ class _SftpBrowserViewOptionsSheetState
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-              child: Text(
-                'sort by',
-                style: FluttyTheme.displayMono(
-                  fontSize: 14,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-            RadioGroup<SftpSortField>(
-              groupValue: _settings.sortField,
-              onChanged: (field) {
-                if (field != null) {
-                  _update(_settings.copyWith(sortField: field));
-                }
-              },
-              child: Column(
+              padding: const EdgeInsets.fromLTRB(20, 0, 8, 6),
+              child: Row(
                 children: [
-                  for (final field in SftpSortField.values)
-                    RadioListTile<SftpSortField>(
-                      value: field,
-                      title: Text(field.label),
+                  Expanded(
+                    child: Text(
+                      'view options',
+                      style: FluttyTheme.displayMono(
+                        fontSize: 15,
+                        color: scheme.onSurface,
+                      ),
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: _close,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 44,
+                      height: 44,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: Icon(Icons.close, size: 20, color: muted),
+                  ),
                 ],
               ),
             ),
-            SwitchListTile(
-              secondary: const Icon(Icons.swap_vert),
-              title: const Text('Reverse order'),
-              subtitle: Text(describeSftpSort(_settings)),
-              value: _settings.descending,
-              onChanged: (value) =>
-                  _update(_settings.copyWith(descending: value)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 8),
+              child: Text(
+                'sort by',
+                style: FluttyTheme.displayMono(fontSize: 12, color: muted),
+              ),
             ),
-            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final useWrap = constraints.maxWidth < 320 || textScale > 1.3;
+                  final tiles = [
+                    for (final field in SftpSortField.values)
+                      _ViewChoicePill(
+                        label: field.label,
+                        selected: _settings.sortField == field,
+                        showCheck: true,
+                        onTap: () => _update(
+                          _settings.sortField == field
+                              ? _settings.copyWith(
+                                  descending: !_settings.descending,
+                                )
+                              : _settings.copyWith(sortField: field),
+                        ),
+                      ),
+                  ];
+                  if (useWrap) {
+                    return Wrap(
+                      spacing: FluttyTheme.spacingSm,
+                      runSpacing: FluttyTheme.spacingSm,
+                      children: tiles,
+                    );
+                  }
+                  return Row(
+                    children: [
+                      for (var i = 0; i < tiles.length; i++) ...[
+                        if (i > 0) const SizedBox(width: 6),
+                        Expanded(child: tiles[i]),
+                      ],
+                    ],
+                  );
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+              child: Text(
+                'order',
+                style: FluttyTheme.displayMono(fontSize: 12, color: muted),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _ViewChoicePill(
+                      label: orderLabels.ascending,
+                      icon: Icons.arrow_upward,
+                      selected: !_settings.descending,
+                      onTap: () =>
+                          _update(_settings.copyWith(descending: false)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _ViewChoicePill(
+                      label: orderLabels.descending,
+                      icon: Icons.arrow_downward,
+                      selected: _settings.descending,
+                      onTap: () =>
+                          _update(_settings.copyWith(descending: true)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.only(top: 16),
+              child: Divider(height: 1),
+            ),
             SwitchListTile(
-              secondary: const Icon(Icons.visibility_outlined),
+              contentPadding: const EdgeInsets.fromLTRB(20, 4, 16, 12),
+              secondary: Icon(
+                _settings.showHidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+                size: 20,
+                color: _settings.showHidden ? muted : scheme.primary,
+              ),
               title: const Text('Show hidden files'),
-              subtitle: const Text('Names that start with a dot'),
+              subtitle: Text(
+                '.dotfiles',
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 12,
+                  color: muted,
+                ),
+              ),
               value: _settings.showHidden,
               onChanged: (value) =>
                   _update(_settings.copyWith(showHidden: value)),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(48),
-                ),
-                onPressed: () =>
-                    Navigator.of(context)
-                        .pop(_settings == widget.initial ? null : _settings),
-                child: const Text('Done'),
-              ),
             ),
           ],
         ),
@@ -346,15 +556,101 @@ class _SftpBrowserViewOptionsSheetState
   }
 }
 
-/// Filter field plus view and selection buttons shown above the file list.
-class SftpBrowserToolbar extends StatelessWidget {
+class _ViewChoicePill extends StatelessWidget {
+  const _ViewChoicePill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.icon,
+    this.showCheck = false,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+  final bool showCheck;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final restingBg = _inputSurfaceColor(theme);
+    final accent = resolveSftpTintedAccentColors(
+      theme,
+      baseSurface: scheme.surface,
+      darkAlpha: 0.30,
+    );
+    final bgColor = selected ? accent.background : restingBg;
+    final foreground = selected ? accent.foreground : scheme.onSurface;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: label,
+      child: Material(
+        color: bgColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+          side: BorderSide(
+            color: selected ? scheme.primary : scheme.outline,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 15, color: foreground),
+                    const SizedBox(width: 5),
+                  ] else if (showCheck && selected) ...[
+                    Icon(Icons.check, size: 14, color: foreground),
+                    const SizedBox(width: 4),
+                  ],
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontSize: 13,
+                        fontWeight: selected
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                        color: foreground,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact filter field, live sort/view pill and selection trigger shown above
+/// the SFTP file list.
+class SftpBrowserToolbar extends StatefulWidget {
   /// Creates the toolbar.
   const SftpBrowserToolbar({
     required this.filterController,
     required this.onFilterChanged,
     required this.settings,
     required this.onShowViewOptions,
+    this.onToggleSortDirection,
     this.onStartSelection,
+    this.matchCount,
+    this.totalCount,
     super.key,
   });
 
@@ -370,67 +666,343 @@ class SftpBrowserToolbar extends StatelessWidget {
   /// Opens the sort and hidden-file options.
   final VoidCallback onShowViewOptions;
 
+  /// Quickly flips sort direction on long-press of the sort pill.
+  final VoidCallback? onToggleSortDirection;
+
   /// Enters selection mode, or null to hide the button.
   final VoidCallback? onStartSelection;
 
+  /// Number of entries matching the active filter, or null when not filtering
+  /// or still loading.
+  final int? matchCount;
+
+  /// Total eligible entries in the current directory, or null while loading.
+  final int? totalCount;
+
+  @override
+  State<SftpBrowserToolbar> createState() => _SftpBrowserToolbarState();
+}
+
+class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
+  late final FocusNode _focusNode = FocusNode(
+    debugLabel: 'sftp-filter-field',
+    onKeyEvent: _handleKeyEvent,
+  );
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (widget.filterController.text.isNotEmpty) {
+        widget.filterController.clear();
+        widget.onFilterChanged('');
+      } else {
+        _focusNode.unfocus();
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = _mutedTextColor(theme);
+    final inputFill = _inputSurfaceColor(theme);
+    final settings = widget.settings;
     final sortDescription = describeSftpSort(settings);
     final viewTooltip = settings.showHidden
         ? 'Sort and view: $sortDescription'
         : 'Sort and view: $sortDescription, hidden files off';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: ValueListenableBuilder<TextEditingValue>(
-              valueListenable: filterController,
-              builder: (context, value, _) => TextField(
-                key: const ValueKey('sftpFilterField'),
-                controller: filterController,
-                onChanged: onFilterChanged,
-                textInputAction: TextInputAction.search,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: 'Filter this folder',
-                  prefixIcon: const Icon(Icons.filter_list, size: 20),
-                  suffixIcon: value.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: 'Clear filter',
-                          icon: const Icon(Icons.close, size: 20),
-                          onPressed: () {
-                            filterController.clear();
-                            onFilterChanged('');
-                          },
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 6, 6),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 340 || textScale > 1.35;
+            return Row(
+              children: [
+                Expanded(
+                  child: ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: widget.filterController,
+                    builder: (context, value, _) {
+                      final hasText = value.text.isNotEmpty;
+                      final hasQuery = value.text.trim().isNotEmpty;
+                      final showCount =
+                          hasQuery &&
+                          !compact &&
+                          widget.matchCount != null &&
+                          widget.totalCount != null;
+                      final zeroMatches = widget.matchCount == 0;
+                      final restingBorderColor = hasQuery
+                          ? scheme.primary.withValues(alpha: 0.7)
+                          : scheme.outline;
+                      return Semantics(
+                        label: 'Filter names in this folder',
+                        child: TextField(
+                          key: const ValueKey('sftpFilterField'),
+                          controller: widget.filterController,
+                          focusNode: _focusNode,
+                          onChanged: widget.onFilterChanged,
+                          textInputAction: TextInputAction.search,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 13.5,
+                            color: scheme.onSurface,
+                          ),
+                          decoration: InputDecoration(
+                            isDense: true,
+                            filled: true,
+                            fillColor: inputFill,
+                            hintText: 'Filter names',
+                            hintStyle: theme.textTheme.bodyMedium?.copyWith(
+                              fontSize: 13.5,
+                              color: muted,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 9,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(
+                                FluttyTheme.radiusSm,
+                              ),
+                              borderSide: BorderSide(color: restingBorderColor),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(
+                                FluttyTheme.radiusSm,
+                              ),
+                              borderSide: BorderSide(color: restingBorderColor),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(
+                                FluttyTheme.radiusSm,
+                              ),
+                              borderSide: BorderSide(
+                                color: scheme.primary,
+                                width: 1.5,
+                              ),
+                            ),
+                            prefixIcon: Icon(
+                              Icons.search,
+                              size: 18,
+                              color: hasQuery ? scheme.primary : muted,
+                            ),
+                            prefixIconConstraints: const BoxConstraints(
+                              minWidth: 34,
+                              minHeight: 36,
+                            ),
+                            suffixIconConstraints: const BoxConstraints(
+                              minWidth: 36,
+                              minHeight: 36,
+                            ),
+                            suffixIcon: hasText
+                                ? Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (showCount)
+                                        Semantics(
+                                          container: true,
+                                          liveRegion: true,
+                                          label:
+                                              '${widget.matchCount} of ${widget.totalCount} items match',
+                                          child: ExcludeSemantics(
+                                            child: Padding(
+                                              padding: const EdgeInsets.only(
+                                                left: 4,
+                                                right: 2,
+                                              ),
+                                              child: Text(
+                                                '${widget.matchCount}/${widget.totalCount}',
+                                                key: const ValueKey(
+                                                  'sftpFilterMatchCount',
+                                                ),
+                                                style: FluttyTheme.monoStyle
+                                                    .copyWith(
+                                                      fontSize: 11.5,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: zeroMatches
+                                                          ? scheme.error
+                                                          : muted,
+                                                    ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      IconButton(
+                                        tooltip: 'Clear filter',
+                                        constraints: const BoxConstraints(
+                                          minWidth: 36,
+                                          minHeight: 36,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        icon: Icon(
+                                          Icons.close,
+                                          size: 17,
+                                          color: muted,
+                                        ),
+                                        onPressed: () {
+                                          widget.filterController.clear();
+                                          widget.onFilterChanged('');
+                                        },
+                                      ),
+                                    ],
+                                  )
+                                : null,
+                          ),
                         ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 6),
+                _SortViewPill(
+                  key: const ValueKey('sftpSortViewButton'),
+                  settings: settings,
+                  tooltip: viewTooltip,
+                  compact: compact,
+                  onTap: widget.onShowViewOptions,
+                  onLongPress: widget.onToggleSortDirection == null
+                      ? null
+                      : () {
+                          unawaited(HapticFeedback.selectionClick());
+                          widget.onToggleSortDirection!();
+                        },
+                ),
+                if (widget.onStartSelection != null) ...[
+                  const SizedBox(width: 2),
+                  IconButton(
+                    tooltip: 'Select files',
+                    onPressed: widget.onStartSelection,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 44,
+                      height: 44,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      Icons.check_circle_outline,
+                      size: 20,
+                      color: muted,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _SortViewPill extends StatelessWidget {
+  const _SortViewPill({
+    required this.settings,
+    required this.tooltip,
+    required this.compact,
+    required this.onTap,
+    this.onLongPress,
+    super.key,
+  });
+
+  final SftpBrowserViewSettings settings;
+  final String tooltip;
+  final bool compact;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = _mutedTextColor(theme);
+    final isCustom = !settings.isDefault;
+    final accent = resolveSftpTintedAccentColors(
+      theme,
+      baseSurface: scheme.surface,
+    );
+    final bgColor = isCustom ? accent.background : _inputSurfaceColor(theme);
+    final borderColor = isCustom ? scheme.primary : scheme.outline;
+    final fgColor = isCustom ? accent.foreground : muted;
+    final directionIcon = settings.descending
+        ? Icons.arrow_downward
+        : Icons.arrow_upward;
+
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        label: tooltip,
+        child: ExcludeSemantics(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+              child: Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: bgColor,
+                    borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: compact ? 8 : 9,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (compact)
+                          Icon(Icons.tune, size: 16, color: fgColor)
+                        else
+                          Text(
+                            settings.sortField.label.toLowerCase(),
+                            style: FluttyTheme.monoStyle.copyWith(
+                              fontSize: 12,
+                              fontWeight: isCustom
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                              color: fgColor,
+                            ),
+                          ),
+                        const SizedBox(width: 2),
+                        Icon(directionIcon, size: 13, color: fgColor),
+                        if (!settings.showHidden) ...[
+                          const SizedBox(width: 4),
+                          Icon(
+                            Icons.visibility_off_outlined,
+                            size: 13,
+                            color: fgColor,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
-          const SizedBox(width: 4),
-          IconButton(
-            tooltip: viewTooltip,
-            onPressed: onShowViewOptions,
-            // The dot marks a non-default view: another sort order, or
-            // hidden files filtered out.
-            icon: Badge(
-              isLabelVisible: !settings.isDefault,
-              smallSize: 8,
-              backgroundColor: Theme.of(context).colorScheme.primary,
-              child: const Icon(Icons.sort),
-            ),
-          ),
-          if (onStartSelection != null)
-            IconButton(
-              tooltip: 'Select files',
-              onPressed: onStartSelection,
-              icon: const Icon(Icons.checklist),
-            ),
-        ],
+        ),
       ),
     );
   }

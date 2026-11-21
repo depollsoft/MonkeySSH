@@ -74,24 +74,34 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   }
 
   Future<void> _showViewOptions() async {
-    final next = await showSftpBrowserViewOptions(context, _viewSettings);
-    if (next == null || !mounted) return;
-    await _applyViewSettings(next);
+    await showSftpBrowserViewOptions(
+      context,
+      _viewSettings,
+      onChanged: (next) => unawaited(_applyViewSettings(next)),
+    );
   }
 
-  /// Shows [next] now and saves it for this host.
-  Future<void> _applyViewSettings(SftpBrowserViewSettings next) async {
+  Future<void> _toggleSortDirection() => _applyViewSettings(
+    _viewSettings.copyWith(descending: !_viewSettings.descending),
+  );
+
+  /// Shows [next] now and saves it for this host, serialized so rapid sheet
+  /// taps never persist out of order.
+  Future<void> _applyViewSettings(SftpBrowserViewSettings next) {
     _viewSettingsChangedLocally = true;
     _update(() => _viewSettings = next);
-    try {
-      await ref.read(sftpBrowserViewStoreProvider).save(widget.hostId, next);
-    } on Exception catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'sftp.view',
-        'save_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-    }
+    final store = ref.read(sftpBrowserViewStoreProvider);
+    return _viewSettingsSaveQueue = _viewSettingsSaveQueue.then((_) async {
+      try {
+        await store.save(widget.hostId, next);
+      } on Exception catch (error) {
+        DiagnosticsLogService.instance.warning(
+          'sftp.view',
+          'save_failed',
+          fields: {'errorType': error.runtimeType},
+        );
+      }
+    });
   }
 
   void _onFilterChanged(String query) {

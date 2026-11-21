@@ -412,15 +412,16 @@ void main() {
     await _pumpBrowser(tester, container);
     expect(_listedNames(tester, names), names);
 
-    await tester.tap(find.byIcon(Icons.sort));
+    await tester.tap(find.byKey(const ValueKey('sftpSortViewButton')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Size'));
-    await tester.tap(find.text('Reverse order'));
-    await tester.tap(find.text('Show hidden files'));
     await tester.pump();
-    await tester.tap(find.widgetWithText(FilledButton, 'Done'));
+    await tester.tap(find.text('Largest'));
+    await tester.pump();
+    await tester.tap(find.text('Show hidden files'));
     await tester.pumpAndSettle();
 
+    // Changes apply live without needing a confirmation button.
     expect(_listedNames(tester, names), ['src', 'big.log', 'small.txt']);
     expect(
       store.saved[1],
@@ -430,6 +431,9 @@ void main() {
         showHidden: false,
       ),
     );
+
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
 
     await tester.enterText(
       find.byKey(const ValueKey('sftpFilterField')),
@@ -461,9 +465,49 @@ void main() {
     await tester.enterText(find.byKey(const ValueKey('sftpFilterField')), 'zz');
     await tester.pumpAndSettle();
     expect(find.text('no matches'), findsOneWidget);
+    expect(find.text('0/1'), findsOneWidget);
     await tester.tap(find.text('Clear filter'));
     await tester.pumpAndSettle();
     expect(find.text('notes.txt'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('filtering for a hidden file offers to reveal hidden files', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(files: {'$_home/.env': 5, '$_home/notes.txt': 10});
+    final store = _MemoryViewStore()
+      ..saved[1] = const SftpBrowserViewSettings(showHidden: false);
+    await _pumpBrowser(tester, _container(sftp, store: store));
+
+    await tester.enterText(
+      find.byKey(const ValueKey('sftpFilterField')),
+      '.env',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('no matches'), findsOneWidget);
+    expect(find.text('Show hidden files'), findsOneWidget);
+
+    await tester.tap(find.text('Show hidden files'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(ListTile, '.env'), findsOneWidget);
+    expect(find.text('1/2'), findsOneWidget);
+    expect(store.saved[1]?.showHidden, isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('long-pressing the sort pill flips sort direction', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(files: {'$_home/a.txt': 1, '$_home/z.txt': 2});
+    final store = _MemoryViewStore();
+    await _pumpBrowser(tester, _container(sftp, store: store));
+    expect(_listedNames(tester, ['a.txt', 'z.txt']), ['a.txt', 'z.txt']);
+
+    await tester.longPress(find.byKey(const ValueKey('sftpSortViewButton')));
+    await tester.pumpAndSettle();
+    expect(_listedNames(tester, ['a.txt', 'z.txt']), ['z.txt', 'a.txt']);
+    expect(store.saved[1]?.descending, isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
