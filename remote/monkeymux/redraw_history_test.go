@@ -798,15 +798,20 @@ func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T
 		})
 	}
 
-	t.Run("multibyte UTF-8 containing 0x9f G is not misread as C1 APC", func(t *testing.T) {
+	t.Run("multibyte UTF-8 containing 0x9f G and split trailing rune stays intact", func(t *testing.T) {
 		// "ßGit…" encodes ß as 0xc3 0x9f followed by 'G' (0x47). Ending mid-ellipsis
-		// leaves the parser off ground, exercising the trailing APC scanner.
+		// leaves the parser off ground: neither ß nor the trailing ellipsis may be
+		// split by ESC[?9002l.
 		ellipsis := "\u2026"
 		head := []byte("\x1b[2J\x1b[HßGit" + ellipsis[:2])
 		wrapped := wrapSynchronizedTerminalOutputBeforeIncompleteApc(nil, head, 0)
-		want := string(terminalSynchronizedOutputBegin) + string(head) + string(terminalSynchronizedOutputEnd)
-		if string(wrapped) != want {
-			t.Fatalf("UTF-8 0x9f continuation was split by sync end marker: got %q, want %q", wrapped, want)
+		combined := append(wrapped, ellipsis[2:]...)
+		want := string(terminalSynchronizedOutputBegin) +
+			"\x1b[2J\x1b[HßGit" +
+			string(terminalSynchronizedOutputEnd) +
+			ellipsis
+		if string(combined) != want {
+			t.Fatalf("UTF-8 stream corrupted by sync end marker: got %q, want %q", combined, want)
 		}
 	})
 }

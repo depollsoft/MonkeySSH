@@ -7697,23 +7697,44 @@ func incompleteTrailingKittyApcStart(data []byte, startUtf8Remaining int) int {
 	return -1
 }
 
+// incompleteTrailingUtf8Start returns the index where an incomplete multibyte
+// UTF-8 sequence begins at the tail of data, or -1 if data ends on a complete
+// UTF-8 boundary (or with invalid bytes that cannot be completed).
+func incompleteTrailingUtf8Start(data []byte) int {
+	for back := 1; back <= 3 && back <= len(data); back++ {
+		start := len(data) - back
+		b := data[start]
+		if b&0xc0 == 0x80 {
+			continue
+		}
+		if expected := utf8ContinuationCount(b); expected > 0 && back <= expected {
+			return start
+		}
+		return -1
+	}
+	return -1
+}
+
 // wrapSynchronizedTerminalOutputBeforeIncompleteApc wraps prefix and the
 // complete head of data in a synchronized transaction and appends any
-// unterminated trailing Kitty APC after ESC[?9002l so the end marker is never
-// injected inside an open graphics chunk.
+// unterminated trailing Kitty APC or incomplete UTF-8 rune after ESC[?9002l so
+// the end marker is never injected inside an open graphics chunk or rune.
 func wrapSynchronizedTerminalOutputBeforeIncompleteApc(
 	prefix []byte,
 	data []byte,
 	startUtf8Remaining int,
 ) []byte {
-	apcStart := incompleteTrailingKittyApcStart(data, startUtf8Remaining)
-	if apcStart < 0 {
+	splitAt := incompleteTrailingKittyApcStart(data, startUtf8Remaining)
+	if splitAt < 0 {
+		splitAt = incompleteTrailingUtf8Start(data)
+	}
+	if splitAt < 0 {
 		return wrapSynchronizedTerminalOutput(prefix, data)
 	}
-	wrapped := wrapSynchronizedTerminalOutput(prefix, data[:apcStart])
-	out := make([]byte, 0, len(wrapped)+len(data)-apcStart)
+	wrapped := wrapSynchronizedTerminalOutput(prefix, data[:splitAt])
+	out := make([]byte, 0, len(wrapped)+len(data)-splitAt)
 	out = append(out, wrapped...)
-	out = append(out, data[apcStart:]...)
+	out = append(out, data[splitAt:]...)
 	return out
 }
 
