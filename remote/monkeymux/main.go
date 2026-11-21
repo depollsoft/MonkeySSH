@@ -7639,12 +7639,17 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 // incompleteTrailingKittyApcStart returns the index in data where an
 // unterminated Kitty APC (`ESC _ G` or C1 `0x9f G`) or a trailing partial APC
 // introducer (`ESC`, `ESC _`, or `0x9f`) begins at the tail, or -1 if data
-// does not end inside one. Scans forward once in O(n).
-func incompleteTrailingKittyApcStart(data []byte) int {
+// does not end inside one. UTF-8 continuation bytes (such as `0x9f` in `ß`)
+// are never treated as C1 introducers. Scans forward once in O(n).
+func incompleteTrailingKittyApcStart(data []byte, startUtf8Remaining int) int {
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(data, startUtf8Remaining)
 	inApc := false
 	apcStart := -1
 	for i := 0; i < len(data); i++ {
 		if !inApc {
+			if i < leadingUtf8Prefix && data[i]&0xc0 == 0x80 {
+				continue
+			}
 			if data[i] == '\x1b' {
 				if i+2 < len(data) && data[i+1] == '_' && data[i+2] == 'G' {
 					inApc = true
@@ -7655,7 +7660,7 @@ func incompleteTrailingKittyApcStart(data []byte) int {
 				} else if i == len(data)-2 && data[i+1] == '_' {
 					return i
 				}
-			} else if data[i] == 0x9f {
+			} else if data[i] == 0x9f && !isUtf8ContinuationAt(data, i) {
 				if i+1 < len(data) && data[i+1] == 'G' {
 					inApc = true
 					apcStart = i
@@ -7699,8 +7704,9 @@ func incompleteTrailingKittyApcStart(data []byte) int {
 func wrapSynchronizedTerminalOutputBeforeIncompleteApc(
 	prefix []byte,
 	data []byte,
+	startUtf8Remaining int,
 ) []byte {
-	apcStart := incompleteTrailingKittyApcStart(data)
+	apcStart := incompleteTrailingKittyApcStart(data, startUtf8Remaining)
 	if apcStart < 0 {
 		return wrapSynchronizedTerminalOutput(prefix, data)
 	}
@@ -8218,8 +8224,12 @@ func (c *attachClient) enqueueMutuallyExclusiveWrites(
 		c.close()
 		return nil, false, false
 	}
+	// Callers (deliverWithQueryFallback) pass immutable slices that are never
+	// mutated afterwards, and gated writes never coalesce, so share the slice
+	// headers across viewers rather than duplicating multi-MiB payloads per
+	// secondary connection.
 	failoverWrite := attachWrite{
-		data:             append([]byte(nil), failover...),
+		data:             failover,
 		reservedBytes:    reservedTotal - len(secondary),
 		complete:         make(chan error, 1),
 		responseWindowID: responseWindowID,
@@ -8227,7 +8237,7 @@ func (c *attachClient) enqueueMutuallyExclusiveWrites(
 		gate:             failoverGate,
 	}
 	secondaryWrite := attachWrite{
-		data:          append([]byte(nil), secondary...),
+		data:          secondary,
 		reservedBytes: len(secondary),
 		gate:          secondaryGate,
 	}
@@ -11745,6 +11755,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
 	endedAtGround := window.terminalOutputIsGroundLocked()
+	startUtf8Remaining := window.redrawForwardingStartParser.utf8Remaining
 	uploadedKittyDuringPause := false
 	for _, id := range window.kittyImageOrder {
 		if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq {
@@ -11753,9 +11764,10 @@ func (s *muxServer) resumePausedAttachForwarding(
 		}
 	}
 	// Account for the prepended replay when deciding whether an in-progress
-	// Kitty upload fits safely inside the client write queue.
+	// Kitty upload fits safely inside the client write queue (keeping
+	// foregroundRedrawBufferLimitBytes of headroom below attachWriteQueueLimitBytes).
 	kittyRedrawFitsQueue := func() bool {
-		const maxAllowed = attachWriteQueueLimitBytes / 2
+		const maxAllowed = attachWriteQueueLimitBytes - foregroundRedrawBufferLimitBytes
 		return len(replay)+len(buffered) <= maxAllowed &&
 			len(replay)+len(failoverBuffered) <= maxAllowed &&
 			len(replay)+len(secondaryBuffered) <= maxAllowed
@@ -11900,7 +11912,11 @@ func (s *muxServer) resumePausedAttachForwarding(
 	s.mu.Unlock()
 	formatOutput := func(prefix []byte, data []byte) []byte {
 		if !endedAtGround {
-			return wrapSynchronizedTerminalOutputBeforeIncompleteApc(prefix, data)
+			return wrapSynchronizedTerminalOutputBeforeIncompleteApc(
+				prefix,
+				data,
+				startUtf8Remaining,
+			)
 		}
 		return wrapSynchronizedTerminalOutput(prefix, data)
 	}
