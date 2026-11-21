@@ -159,13 +159,16 @@ function parseCredentials(text) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('unavailable');
   return value;
 }
-function readJson(file) {
+function readOptionalJson(file) {
   try { return parseCredentials(fs.readFileSync(file, 'utf8')); }
   catch (error) {
-    if (error.code === 'ENOENT') return {};
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
     // A malformed or unreadable credential store is not an empty account list.
     throw new Error('unavailable');
   }
+}
+function readJson(file) {
+  return readOptionalJson(file) || {};
 }
 // Normalize only a bounded delay. Raw headers, responses, and credentials never
 // leave the host. Relative seconds avoid differences between host/client clocks.
@@ -375,24 +378,102 @@ function antigravityUsage(data) {
     windows.push({label: label(model.label, 'Model quota'), usedPercent: (1 - fraction) * 100,
       resetsAt: date(model.quotaInfo.resetTime)});
   }
-  // Gemini / Antigravity OAuth providers return model buckets directly.
-  for (const bucket of data.buckets || []) {
-    const fraction = number(bucket.remainingFraction);
-    if (fraction == null || fraction < 0 || fraction > 1) continue;
-    windows.push({label: label(bucket.modelId, 'Model quota'), usedPercent: (1 - fraction) * 100,
-      resetsAt: date(bucket.resetTime)});
+  // Top-level summary buckets and Gemini / Antigravity OAuth model buckets.
+  if (!windows.length) {
+    for (const bucket of summary.buckets || data.buckets || []) {
+      const fraction = number(bucket.remainingFraction);
+      if (bucket.disabled || fraction == null || fraction < 0 || fraction > 1) continue;
+      windows.push({label: label(bucket.displayName || bucket.modelId, 'Model quota'),
+        usedPercent: (1 - fraction) * 100, resetsAt: date(bucket.resetTime)});
+    }
   }
   return {windows};
+}
+const antigravityHeaders = {'User-Agent': 'antigravity/1.0'};
+const antigravityEndpoints = [
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+  'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+];
+function antigravityTokenFiles() {
+  const root = process.env.ANTIGRAVITY_GEMINI_DIR || path.join(os.homedir(), '.gemini');
+  const dirs = process.env.ANTIGRAVITY_CONFIG_REL_DIR
+    ? [process.env.ANTIGRAVITY_CONFIG_REL_DIR]
+    : ['antigravity-cli', 'antigravity'];
+  const files = [];
+  for (const dir of dirs) {
+    for (const name of ['antigravity-oauth-token', 'jetski-standalone-oauth-token']) {
+      files.push(path.join(root, dir, name));
+    }
+  }
+  return files;
+}
+function antigravityCredentials() {
+  for (const file of antigravityTokenFiles()) {
+    const stored = readOptionalJson(file);
+    if (!stored) continue;
+    const token = stored.token && typeof stored.token === 'object' ? stored.token : stored;
+    const accessToken = typeof token.access_token === 'string' && token.access_token ? token.access_token :
+      typeof token.accessToken === 'string' && token.accessToken ? token.accessToken : null;
+    const refreshToken = typeof token.refresh_token === 'string' && token.refresh_token ? token.refresh_token :
+      typeof token.refreshToken === 'string' && token.refreshToken ? token.refreshToken : null;
+    const expiry = Date.parse(token.expiry || '');
+    const project = typeof stored.project_id === 'string' && stored.project_id ? stored.project_id :
+      typeof stored.projectId === 'string' && stored.projectId ? stored.projectId :
+      typeof stored.project === 'string' && stored.project ? stored.project : null;
+    return {
+      accessToken,
+      hasRefresh: Boolean(refreshToken),
+      expired: Number.isFinite(expiry) && expiry <= Date.now(),
+      project,
+      authMethod: typeof stored.auth_method === 'string' ? stored.auth_method : null,
+    };
+  }
+  return null;
+}
+function refreshAntigravityAuth(executable) {
+  if (!executable) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const child = spawnAgent(executable, ['models']);
+    let done = false;
+    const finish = ok => {
+      if (done) return;
+      done = true; clearTimeout(timer); stop(child); resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), 6000);
+    child.on('error', () => finish(false));
+    child.on('close', code => finish(code === 0));
+    child.stdout.resume();
+    child.stdin.end();
+  });
+}
+async function fetchAntigravityCloudQuota(token, project, request) {
+  const body = project ? {project} : {};
+  let lastError = null;
+  for (const url of antigravityEndpoints) {
+    try {
+      const result = antigravityUsage(await request(url, {token, headers: antigravityHeaders, body}));
+      if (result.windows.length) return result;
+    } catch (error) {
+      if (error?.message === 'signInRequired' || error?.message === 'rateLimited') throw error;
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  return {windows: []};
 }
 function antigravityPorts() {
   const command = (exe, args) => cp.execFileSync(exe, args, {
     encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
   });
+  const extractCsrf = args => {
+    const match = /--csrf_token(?:=|\s+)([^\s'"]+)/.exec(args || '');
+    return match ? match[1] : null;
+  };
   if (process.platform === 'win32') {
     const script = "$ids = @(Get-Process -Name agy,antigravity,antigravity-cli -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id); @((Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.OwningProcess }).LocalPort) | ConvertTo-Json -Compress";
     try { return [].concat(JSON.parse(command('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]))).filter(Number.isInteger); } catch { return []; }
   }
-  const ports = new Set();
+  const ports = new Map();
   let processes;
   try { processes = command('ps', ['-axo', 'pid=,comm=']).split('\n'); } catch { return []; }
   const deadline = Date.now() + 4000;
@@ -401,12 +482,14 @@ function antigravityPorts() {
     const match = /^\s*(\d+)\s+(.+)$/.exec(line);
     if (!match || !['agy', 'antigravity', 'antigravity-cli'].includes(path.basename(match[2].trim()))) continue;
     const pid = match[1];
+    let csrf = null;
+    try { csrf = extractCsrf(command('ps', ['-p', pid, '-o', 'args='])); } catch {}
     try {
       if (process.platform === 'darwin') {
         const output = command('lsof', ['-a', '-p', pid, '-iTCP', '-sTCP:LISTEN', '-Fn']);
         for (const row of output.split('\n')) {
           const port = /^n.*:(\d+)$/.exec(row);
-          if (port) ports.add(Number(port[1]));
+          if (port) ports.set(Number(port[1]), csrf);
         }
       } else {
         const fds = path.join('/proc', pid, 'fd');
@@ -417,24 +500,27 @@ function antigravityPorts() {
           const rows = fs.readFileSync(path.join('/proc', pid, 'net', version), 'utf8').split('\n');
           for (const row of rows) {
             const fields = row.trim().split(/\s+/);
-            if (fields[3] === '0A' && sockets.has(fields[9])) ports.add(parseInt(fields[1].split(':')[1], 16));
+            if (fields[3] === '0A' && sockets.has(fields[9])) ports.set(parseInt(fields[1].split(':')[1], 16), csrf);
           }
         }
       }
     } catch {}
   }
-  return [...ports];
+  return [...ports.entries()].map(([port, csrf]) => csrf ? {port, csrf} : port);
 }
-async function antigravity(ports = antigravityPorts(), request = requestJson) {
-  if (!ports.length) throw new Error('needsRunning');
-  const results = await Promise.all(ports.slice(0, 16).map(async port => {
-    for (const scheme of process.platform === 'linux' ? ['https', 'http'] : ['https']) {
+async function antigravityLocal(ports, request = requestJson) {
+  if (!ports.length) return {windows: []};
+  const results = await Promise.all(ports.slice(0, 16).map(async entry => {
+    const port = typeof entry === 'number' ? entry : entry.port;
+    const csrf = typeof entry === 'object' && entry ? entry.csrf : null;
+    const headers = csrf ? {'x-codeium-csrf-token': csrf} : {};
+    for (const scheme of ['https', 'http']) {
       for (const [method, body] of [
         ['RetrieveUserQuotaSummary', {forceRefresh: true}],
         ['GetUserStatus', {metadata: {ideName: 'antigravity', extensionName: 'antigravity', ideVersion: 'unknown', locale: 'en'}}],
       ]) {
         try {
-          const result = antigravityUsage(await request(`${scheme}://127.0.0.1:${port}/exa.language_server_pb.LanguageServerService/${method}`, {local: true, body}));
+          const result = antigravityUsage(await request(`${scheme}://127.0.0.1:${port}/exa.language_server_pb.LanguageServerService/${method}`, {local: true, headers, body}));
           if (result.windows.length) return result;
         } catch {}
       }
@@ -444,6 +530,76 @@ async function antigravity(ports = antigravityPorts(), request = requestJson) {
   // Multiple running servers can use different accounts. Do not silently choose one.
   return {windows: results.flatMap((r, i) => r.windows.map(w => ({...w,
     label: results.filter(x => x.windows.length).length > 1 ? `Instance ${i + 1} · ${w.label}` : w.label}))) };
+}
+async function antigravity(executable = '', options = {}) {
+  if (Array.isArray(executable)) {
+    const result = await antigravityLocal(executable, typeof options === 'function' ? options : requestJson);
+    if (!executable.length) throw new Error('needsRunning');
+    return result;
+  }
+  const {
+    ports = antigravityPorts,
+    request = requestJson,
+    credentials = antigravityCredentials,
+    refresh = refreshAntigravityAuth,
+  } = options;
+
+  let cred = credentials();
+  let cloudError = null;
+  if (cred) {
+    if (!cred.accessToken && !cred.hasRefresh) {
+      if (cred.authMethod === 'gemini_api_key' || process.env.GEMINI_API_KEY) {
+        return {windows: [], status: 'notReported'};
+      }
+      cloudError = new Error('signInRequired');
+    } else {
+      let refreshed = false;
+      if ((!cred.accessToken || cred.expired) && cred.hasRefresh && executable) {
+        refreshed = true;
+        await refresh(executable);
+        cred = credentials() || cred;
+      }
+      if (cred.accessToken) {
+        try {
+          const result = await fetchAntigravityCloudQuota(cred.accessToken, cred.project, request);
+          if (result.windows.length) return result;
+        } catch (error) {
+          if (error?.message === 'rateLimited') throw error;
+          if (error?.message === 'signInRequired' && !refreshed && cred.hasRefresh && executable) {
+            const failedToken = cred.accessToken;
+            await refresh(executable);
+            const next = credentials();
+            if (next?.accessToken && next.accessToken !== failedToken) {
+              try {
+                const result = await fetchAntigravityCloudQuota(next.accessToken, next.project, request);
+                if (result.windows.length) return result;
+              } catch (retryError) {
+                if (retryError?.message === 'rateLimited') throw retryError;
+                cloudError = retryError;
+              }
+            } else {
+              cloudError = error;
+            }
+          } else {
+            cloudError = error;
+          }
+        }
+      } else {
+        cloudError = new Error('signInRequired');
+      }
+    }
+  }
+
+  const running = typeof ports === 'function' ? ports() : ports;
+  if (running.length) {
+    const localResult = await antigravityLocal(running, request);
+    if (localResult.windows.length) return localResult;
+  }
+
+  if (cloudError) throw cloudError;
+  if (cred || running.length) return {windows: []};
+  if (process.env.GEMINI_API_KEY) return {windows: [], status: 'notReported'};
+  throw new Error('signInRequired');
 }
 function openclawUsage(data) {
   const usage = data.usage;
@@ -594,6 +750,7 @@ async function providerUsage(id, credential, fetch = requestJson, accounts = [])
     }
     if (['google-antigravity', 'google-gemini-cli'].includes(id)) return antigravityUsage(await fetch(
       'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota', {token,
+        ...(id === 'google-antigravity' ? {headers: antigravityHeaders} : {}),
         body: c.projectId ? {project: c.projectId} : {}}));
     if (id === 'nous') return nousUsage(await fetch('https://portal.nousresearch.com/api/oauth/account', {token}));
   }
@@ -702,7 +859,7 @@ async function probe(id, executable) {
     else if (id === 'muse') result = museUsage(await runJson(executable, ['usage', '--json']));
     else if (id === 'grok') result = await grok();
     else if (id === 'cursor') result = await cursor();
-    else if (id === 'antigravity') result = await antigravity();
+    else if (id === 'antigravity') result = await antigravity(executable);
     else if (id === 'openclaw') result = openclawUsage(await runJson(executable, ['status', '--usage', '--json']));
     else if (id === 'opencode') {
       const exported = await openCodeAccounts(executable);
@@ -716,7 +873,7 @@ async function probe(id, executable) {
   }
 }
 module.exports = {hermesHome, requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
-  openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
+  antigravityCredentials, openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
   Promise.all(Object.entries(input).map(async ([id, executable]) => {

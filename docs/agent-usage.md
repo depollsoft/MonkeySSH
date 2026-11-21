@@ -21,7 +21,7 @@ Every supported agent has a reader:
 | Codex | Installed CLI's `account/rateLimits/read` app-server method. Reports every returned bucket and earned resets available. Never redeems a reset. |
 | Copilot CLI | Installed CLI's `account.getQuota` stdio method. Reports allowances, unlimited categories, resets, and paid overage availability. |
 | OpenCode | Its saved provider accounts (OpenCode 2 through `opencode auth export`). Reads the applicable provider quota endpoint for each account. For an OpenCode 2 Console sign-in, OpenCode's own `experimental.usage.limits` operation (OpenCode 2.2+) reports the Go plan's five-hour, weekly, and monthly meters and the workspace's spending budgets. |
-| Antigravity | An already-running CLI's local `RetrieveUserQuotaSummary` endpoint. Reports all enabled quota groups and reset times. Shows a start-agent hint when no running CLI is found. |
+| Antigravity | Saved CLI OAuth credentials (`~/.gemini/antigravity-cli/antigravity-oauth-token`) and Cloud Code's `v1internal:retrieveUserQuotaSummary` endpoint, with fallback to a running local `LanguageServerService`. Reports all enabled quota groups and reset times. |
 | Cursor Agent | Its existing access token and `DashboardService/GetUsageLimitPolicyStatus`. Reports access restrictions and the supplied reset time. Does not infer a percentage or remaining allowance from that status. |
 | Pi | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
 | Hermes | Its saved provider accounts and credential pool, deduplicated by credential. Includes Nous subscription, purchased-credit balances, and member spending caps when reported. |
@@ -94,8 +94,9 @@ allowances show an empty bar; unlimited and unknown allowances have no bar.
 
 The remote reader requires Node.js and uses built-in libraries. No package is
 installed or updated. Codex, Copilot, and OpenClaw start temporary read-only CLI
-processes without sending prompts. Antigravity reuses a running process; it does
-not start an agent session. Requests and subprocesses have time limits. Windows
+processes without sending prompts. Antigravity reads its saved OAuth token directly
+and only runs `agy models` once when a stored refreshable access token has expired,
+falling back to a running local language server if present. Requests and subprocesses have time limits. Windows
 receives the reader through SSH standard input to stay within command-line limits.
 The Windows launcher loads the same user profile PATH as version detection,
 including fnm, and falls back to Node beside a detected agent launcher. If Node
