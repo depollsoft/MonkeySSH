@@ -854,6 +854,8 @@ typedef _MonkeyMuxResizeSyncKey = ({
   String sessionName,
   int columns,
   int rows,
+  int cellWidth,
+  int cellHeight,
 });
 
 class _TerminalScreenState extends ConsumerState<TerminalScreen>
@@ -5055,11 +5057,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           initialAutoConnect.handled ||
           _suppressRemoteMuxDetectionConnectionId == session.connectionId;
       final viewportCellSize = _localTerminalViewportCellSize();
+      final viewportPixelSize = _localTerminalViewportPixelSize();
 
       final shell = await session.getShell(
         pty: SSHPtyConfig(
           width: viewportCellSize.columns,
           height: viewportCellSize.rows,
+          pixelWidth: viewportPixelSize?.width ?? 0,
+          pixelHeight: viewportPixelSize?.height ?? 0,
         ),
         requestPty:
             !(session.remoteIsWindows &&
@@ -6224,6 +6229,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     final sessionName = _activeMonkeyMuxSessionName(session);
     final viewportCellSize = _localTerminalViewportCellSize();
+    final cellPixelSize = _localTerminalCellPixelSize();
     final columns = viewportCellSize.columns;
     final rows = viewportCellSize.rows;
     if (sessionName == null || columns <= 0 || rows <= 0) {
@@ -6232,7 +6238,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final connectionId = session.connectionId;
     unawaited(
       _monkeyMuxService
-          .focusClient(session, sessionName, columns: columns, rows: rows)
+          .focusClient(
+            session,
+            sessionName,
+            columns: columns,
+            rows: rows,
+            cellWidth: cellPixelSize?.width,
+            cellHeight: cellPixelSize?.height,
+          )
           .then((focusChanged) {
             if (!mounted ||
                 !focusChanged ||
@@ -6288,6 +6301,60 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }
     return (columns: _terminal.viewWidth, rows: _terminal.viewHeight);
+  }
+
+  ({int width, int height})? _localTerminalViewportPixelSize() {
+    final viewportPixelSize = _terminalViewKey.currentState?.viewportPixelSize;
+    if (viewportPixelSize != null &&
+        viewportPixelSize.width > 0 &&
+        viewportPixelSize.height > 0) {
+      return viewportPixelSize;
+    }
+    final layoutSize = _terminalViewportLayoutSize;
+    if (layoutSize != null && mounted) {
+      final mediaQuery = MediaQuery.of(context);
+      final viewportPadding = resolveTerminalViewportPadding(mediaQuery);
+      final availableWidth =
+          (layoutSize.width -
+                  viewportPadding.horizontal -
+                  _terminalViewportReservedWidth)
+              .round();
+      final availableHeight =
+          (layoutSize.height -
+                  viewportPadding.vertical -
+                  _terminalViewportReservedBottomPadding)
+              .round();
+      if (availableWidth > 0 && availableHeight > 0) {
+        return (width: availableWidth, height: availableHeight);
+      }
+    }
+    final metrics = _activeSession()?.terminalWindowMetrics;
+    if (metrics != null && metrics.pixelWidth > 0 && metrics.pixelHeight > 0) {
+      return (width: metrics.pixelWidth, height: metrics.pixelHeight);
+    }
+    return null;
+  }
+
+  ({int width, int height})? _localTerminalCellPixelSize() {
+    final cellPixelSize = _terminalViewKey.currentState?.viewportCellPixelSize;
+    if (cellPixelSize != null &&
+        cellPixelSize.width > 0 &&
+        cellPixelSize.height > 0) {
+      return cellPixelSize;
+    }
+    final metrics = _activeSession()?.terminalWindowMetrics;
+    if (metrics != null &&
+        metrics.columns > 0 &&
+        metrics.rows > 0 &&
+        metrics.pixelWidth > 0 &&
+        metrics.pixelHeight > 0) {
+      final width = (metrics.pixelWidth / metrics.columns).round();
+      final height = (metrics.pixelHeight / metrics.rows).round();
+      if (width > 0 && height > 0) {
+        return (width: width, height: height);
+      }
+    }
+    return null;
   }
 
   Future<void> _waitForInitialTerminalViewportLayout({
@@ -6348,8 +6415,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final viewportCellSize = _localTerminalViewportCellSize();
+    final cellPixelSize = _localTerminalCellPixelSize();
     final terminalColumns = columns ?? viewportCellSize.columns;
     final terminalRows = rows ?? viewportCellSize.rows;
+    final terminalCellWidth = cellPixelSize?.width ?? 0;
+    final terminalCellHeight = cellPixelSize?.height ?? 0;
     if (terminalColumns <= 0 || terminalRows <= 0) {
       return;
     }
@@ -6359,6 +6429,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       sessionName: sessionName,
       columns: terminalColumns,
       rows: terminalRows,
+      cellWidth: terminalCellWidth,
+      cellHeight: terminalCellHeight,
     );
     final isDuplicateSize =
         _lastMonkeyMuxResizeSync == resizeKey ||
@@ -6376,6 +6448,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionName,
         columns: terminalColumns,
         rows: terminalRows,
+        cellWidth: terminalCellWidth > 0 ? terminalCellWidth : null,
+        cellHeight: terminalCellHeight > 0 ? terminalCellHeight : null,
         redraw: refreshVisibleTerminal,
       );
       DiagnosticsLogService.instance.debug(
@@ -11698,9 +11772,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     unawaited(_releaseShellStreams());
 
     final viewportCellSize = _localTerminalViewportCellSize();
+    final viewportPixelSize = _localTerminalViewportPixelSize();
     final pty = SSHPtyConfig(
       width: viewportCellSize.columns,
       height: viewportCellSize.rows,
+      pixelWidth: viewportPixelSize?.width ?? 0,
+      pixelHeight: viewportPixelSize?.height ?? 0,
     );
 
     final SSHSession shell;

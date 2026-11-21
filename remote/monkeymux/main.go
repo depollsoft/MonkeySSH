@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.259"
+	monkeyMuxVersion                  = "0.1.260"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -101,14 +101,19 @@ const (
 	terminalResponseMaxOutstanding    = 64
 	// terminalResponseMaxUndelivered bounds the replies owed to queries a
 	// reporting client has read but its terminal has not been written yet.
-	terminalResponseMaxUndelivered    = 4096
-	attachWriteChunkBytes             = 32 * 1024
-	terminalResponseFocusGrace        = 2 * time.Second
-	focusInputCarryDelay              = 75 * time.Millisecond
-	bracketedPasteStartCarryDelay     = 20 * time.Millisecond
-	foregroundRedrawResizeDelay       = 40 * time.Millisecond
-	foregroundRedrawForwardingPause   = foregroundRedrawResizeDelay + 80*time.Millisecond
-	foregroundRedrawBufferLimitBytes  = 512 * 1024
+	terminalResponseMaxUndelivered   = 4096
+	attachWriteChunkBytes            = 32 * 1024
+	terminalResponseFocusGrace       = 2 * time.Second
+	focusInputCarryDelay             = 75 * time.Millisecond
+	bracketedPasteStartCarryDelay    = 20 * time.Millisecond
+	foregroundRedrawResizeDelay      = 40 * time.Millisecond
+	foregroundRedrawForwardingPause  = foregroundRedrawResizeDelay + 80*time.Millisecond
+	foregroundRedrawBufferLimitBytes = 512 * 1024
+	// maxRedrawPendingKittyBufferBytes bounds a redraw pause carrying an
+	// incomplete multi-chunk Kitty upload. Keeping it at one quarter of
+	// attachWriteQueueLimitBytes guarantees that replay + failover + secondary
+	// reservations in deliverWithQueryFallback never disconnect a viewer.
+	maxRedrawPendingKittyBufferBytes  = attachWriteQueueLimitBytes / 4
 	windowUpdateMinInterval           = 750 * time.Millisecond
 	windowHistoryLimitBytes           = 128 * 1024
 	windowFullReplayHistoryLimitBytes = 512 * 1024
@@ -10062,6 +10067,13 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			client.sendError(request, errors.New("invalid terminal size"))
 			return
 		}
+		if validCellPixelSize(request.CellWidth, request.CellHeight) {
+			s.recordAttachClientCellSize(
+				request.ClientID,
+				request.CellWidth,
+				request.CellHeight,
+			)
+		}
 		result := s.focusAttachClientByIDWithResult(
 			request.ClientID,
 			request.Width,
@@ -11584,11 +11596,25 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// so retain only a parser-safe tail of that redraw instead of sending many
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
+	pendingKitty := len(window.kittyGraphicsPending) > 0 &&
+		len(buffered) <= maxRedrawPendingKittyBufferBytes &&
+		len(failoverBuffered) <= maxRedrawPendingKittyBufferBytes &&
+		len(secondaryBuffered) <= maxRedrawPendingKittyBufferBytes
+	hasRedrawContent := visibleRedraw || pendingKitty
 	paintedFromScreen := false
 	if len(replay) > 0 && window.terminalOutputIsGroundLocked() {
-		oversized := len(buffered) > foregroundRedrawBufferLimitBytes ||
-			len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
-			len(secondaryBuffered) > foregroundRedrawBufferLimitBytes
+		// If a chunked Kitty transmission is still in flight when the redraw
+		// pause ends, replacing buffered with a screen-model frame or trimming
+		// its head discards the opening m=1 chunks so later chunks arrive
+		// orphaned and the image never displays. Keep the upload intact up to
+		// maxRedrawPendingKittyBufferBytes.
+		redrawLimit := foregroundRedrawBufferLimitBytes
+		if len(window.kittyGraphicsPending) > 0 {
+			redrawLimit = maxRedrawPendingKittyBufferBytes
+		}
+		oversized := len(buffered) > redrawLimit ||
+			len(failoverBuffered) > redrawLimit ||
+			len(secondaryBuffered) > redrawLimit
 		if oversized && window.screenLocked().HasVisibleContent() {
 			// Cutting the head off a long repaint loses the top of the frame.
 			// The screen model has already absorbed the whole redraw, so paint
@@ -11602,7 +11628,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 			secondaryBuffered = append([]byte(nil), frame...)
 			paintedFromScreen = true
-		} else {
+		} else if !pendingKitty {
 			buffered = trimForegroundRedrawBuffer(buffered, queryData)
 			failoverBuffered = trimForegroundRedrawBuffer(failoverBuffered, queryData)
 			secondaryBuffered = trimForegroundRedrawBuffer(secondaryBuffered, nil)
@@ -11615,7 +11641,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// now, whose cursor is the one reported. A visible redraw is applied over
 	// the snapshot and reaches the same cursor.
 	if !paintedFromScreen && window.redrawForwardingAnsweredCursor &&
-		window.terminalOutputIsGroundLocked() && !visibleRedraw {
+		window.terminalOutputIsGroundLocked() && !hasRedrawContent {
 		frame := s.foregroundHistoryFallbackReplayLocked(
 			window,
 			window.screenLocked(),
@@ -11631,7 +11657,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// escape sequence would drop the head of a sequence whose tail is still to
 	// come and corrupt the client, so leave those redraws to forward normally.
 	if !paintedFromScreen && window.terminalOutputIsGroundLocked() &&
-		(!visibleRedraw || !replacesScreen) {
+		(!hasRedrawContent || !replacesScreen) {
 		// Some TUIs coalesce the temporary and restored SIGWINCH notifications
 		// and emit either nothing or an incremental update. The normal
 		// foreground replay clears the client, so the update needs its base
@@ -11648,7 +11674,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			)
 		}
 		if len(fallbackReplay) > 0 {
-			if visibleRedraw {
+			if hasRedrawContent {
 				// A normal TUI update (for example a spinner tick) can arrive
 				// while the child coalesces both resize notifications. It relies
 				// on the pre-resize frame. Restore that frame before applying the

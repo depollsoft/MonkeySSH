@@ -773,6 +773,14 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     return (columns: viewportSize.width, rows: viewportSize.height);
   }
 
+  /// Current local viewport dimensions in logical pixels.
+  ({int width, int height})? get viewportPixelSize =>
+      _renderTerminalOrNull?.viewportPixelSize;
+
+  /// Current cell dimensions in logical pixels.
+  ({int width, int height})? get viewportCellPixelSize =>
+      _renderTerminalOrNull?.viewportCellPixelSize;
+
   /// Forces the live terminal to relayout and repaint its current buffer.
   /// Used as a safety net after a multiplexer window switch.
   void forceFullRepaint() => _renderTerminalOrNull?.forceFullRepaint();
@@ -3327,6 +3335,18 @@ class MonkeyRenderTerminal extends RenderBox
   TerminalSize? get viewportSize => _viewportSize;
 
   ({int width, int height})? _viewportPixelSize;
+
+  ({int width, int height})? get viewportPixelSize => _viewportPixelSize;
+
+  ({int width, int height})? get viewportCellPixelSize {
+    final cellSize = _painter.cellSize;
+    final width = cellSize.width.round();
+    final height = cellSize.height.round();
+    if (width <= 0 || height <= 0) {
+      return null;
+    }
+    return (width: width, height: height);
+  }
 
   Timer? _keyboardResizeDebounceTimer;
 

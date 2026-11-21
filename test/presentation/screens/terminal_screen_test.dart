@@ -546,6 +546,8 @@ class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
     bool redraw = false,
     SshExecPriority priority = SshExecPriority.normal,
   }) async {
@@ -564,6 +566,8 @@ class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
   }) async {
     controlOperations.add('focus');
     focusClientCalls.add((

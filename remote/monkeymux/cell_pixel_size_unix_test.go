@@ -351,3 +351,23 @@ func TestCellSizeRequestTargetsTheAttachItsTokenNames(t *testing.T) {
 	}
 	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
 }
+
+func TestFocusClientRequestAppliesCellPixelSizeOnRedrawHandoff(t *testing.T) {
+	server, _, windowPty := newCellSizeTestServer(t)
+	registerTestAttachClientWithCellSize(t, server, "tablet", 80, 24, 10, 20)
+	registerTestAttachClientWithCellSize(t, server, "phone", 80, 24, 10, 20)
+	server.resizeForClient("phone", 80, 24, false)
+	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
+
+	server.handleControlRequest(newControlClient(nil), controlMessage{
+		Type:       "focus_client",
+		ClientID:   "tablet",
+		Width:      80,
+		Height:     24,
+		CellWidth:  12,
+		CellHeight: 24,
+		Redraw:     true,
+	})
+
+	assertPtyPixelSizeEventually(t, windowPty, 80, 24, 960, 576)
+}

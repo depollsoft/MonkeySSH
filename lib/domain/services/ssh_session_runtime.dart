@@ -341,6 +341,21 @@ if(!$__flResolved){$__flResolved='cmd'}
         _shellPty = shellPty;
         _shellHasPty = requestPty;
         _syncKittyGraphicsAvailability();
+        // Seed terminal metrics regardless of requestPty so no-PTY channels
+        // (such as Windows MonkeyMux attaches) still answer early CSI 14 t /
+        // CSI 16 t queries before the first resize callback arrives.
+        if (_terminalWindowMetrics == null &&
+            shellPty.width > 0 &&
+            shellPty.height > 0 &&
+            shellPty.pixelWidth > 0 &&
+            shellPty.pixelHeight > 0) {
+          _terminalWindowMetrics = (
+            columns: shellPty.width,
+            rows: shellPty.height,
+            pixelWidth: shellPty.pixelWidth,
+            pixelHeight: shellPty.pixelHeight,
+          );
+        }
         if (requestPty) {
           _applyLatestTerminalWindowMetrics(openedShell);
         }

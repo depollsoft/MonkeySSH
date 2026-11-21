@@ -988,6 +988,8 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
   }) async {
     if (isAppReviewDemoSession(session)) {
       return false;
@@ -998,6 +1000,13 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         'clientId': session.monkeyMuxClientId,
         'width': columns,
         'height': rows,
+        if (cellWidth != null &&
+            cellWidth > 0 &&
+            cellHeight != null &&
+            cellHeight > 0) ...{
+          'cellWidth': cellWidth,
+          'cellHeight': cellHeight,
+        },
         'redraw': true,
       });
       return response.focusChanged;
@@ -1076,6 +1085,8 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
     bool redraw = false,
     SshExecPriority priority = SshExecPriority.normal,
   }) async {
@@ -1087,6 +1098,13 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       'clientId': session.monkeyMuxClientId,
       'width': columns,
       'height': rows,
+      if (cellWidth != null &&
+          cellWidth > 0 &&
+          cellHeight != null &&
+          cellHeight > 0) ...{
+        'cellWidth': cellWidth,
+        'cellHeight': cellHeight,
+      },
       if (redraw) 'redraw': true,
     }, priority: priority);
   }

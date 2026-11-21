@@ -703,6 +703,57 @@ func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
 	}
 }
 
+func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send > 512 KiB of complete m=1 Kitty chunks while the redraw pause is
+	// active, leaving the transmission in flight across the pause deadline.
+	const firstChunkHeader = "\x1b_Ga=t,f=100,i=3875144,q=2,m=1;"
+	chunkPayload := strings.Repeat("A", 4096)
+	var firstHalf bytes.Buffer
+	firstHalf.WriteString("\x1b[2J\x1b[H")
+	firstHalf.WriteString(firstChunkHeader + chunkPayload + "\x1b\\")
+	for i := 0; i < 135; i++ {
+		firstHalf.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+	}
+	server.handleWindowOutput(window.id, firstHalf.Bytes())
+
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	pendingLen := len(window.kittyGraphicsPending)
+	server.mu.Unlock()
+	if pendingLen == 0 {
+		t.Fatal("setup error: expected in-progress Kitty transmission in kittyGraphicsPending")
+	}
+
+	// Resume forwarding between chunks before m=0 and a=p arrive.
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	// Now deliver the final chunk and placement after the pause.
+	const finalChunk = "\x1b_Gq=2,m=0;AAAA\x1b\\"
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=3875144,p=2,c=27,r=24,C=1,q=2\x1b\\"
+	server.handleWindowOutput(window.id, []byte(finalChunk+placement))
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	if !strings.Contains(got, firstChunkHeader) {
+		t.Fatalf("opening chunk of in-progress Kitty upload was dropped across redraw pause (delivered %d bytes)", len(got))
+	}
+	if !strings.Contains(got, finalChunk) || !strings.Contains(got, placement) {
+		t.Fatalf("trailing chunk or placement missing after redraw pause resume")
+	}
+}
+
 func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
 	for _, test := range []struct{ mode, app string }{
 		{"1047", "alternate app"},
