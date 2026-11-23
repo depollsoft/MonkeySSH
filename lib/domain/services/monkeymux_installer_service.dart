@@ -888,15 +888,24 @@ class MonkeyMuxInstallerService {
   }
 
   String? _parsePosixHomeDirectory(String output) {
-    final lines = output
-        .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .toList(growable: false);
-    if (lines.length < 3) {
+    final rawLines = output.split('\n');
+    // Accept only the exact 3 lines from `printf "%s\n%s\n%s\n"` (with or
+    // without the final trailing newline) so embedded newlines in $HOME or
+    // unexpected extra lines fall back to SFTP realpath instead of guessing.
+    if (rawLines.length == 4 && rawLines[3].isEmpty) {
+      rawLines.removeLast();
+    } else if (rawLines.length != 3) {
       return null;
     }
-    final home = lines[2];
+    if (rawLines[0].trim().isEmpty || rawLines[1].trim().isEmpty) {
+      return null;
+    }
+    // Preserve exact leading/trailing spaces in $HOME; strip only a single
+    // transport CRLF carriage return if present.
+    var home = rawLines[2];
+    if (home.endsWith('\r')) {
+      home = home.substring(0, home.length - 1);
+    }
     if (!home.startsWith('/') || home.contains('\r') || home.contains('\x00')) {
       return null;
     }
