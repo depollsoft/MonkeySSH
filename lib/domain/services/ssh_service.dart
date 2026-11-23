@@ -106,6 +106,15 @@ splitSynchronizedOutputHold(
   String input, {
   SynchronizedOutputScanState? resume,
 }) {
+  if (resume == null && !input.contains('\x1b')) {
+    return (apply: input, hold: '', resume: null);
+  }
+  if (resume == null &&
+      !input.contains('\x1b[?') &&
+      !input.endsWith('\x1b') &&
+      !input.endsWith('\x1b[')) {
+    return (apply: input, hold: '', resume: null);
+  }
   var synchronizedOpen = resume?.synchronizedOpen ?? false;
   var monkeyMuxOpen = resume?.monkeyMuxOpen ?? false;
   var holdFrom = resume == null ? -1 : 0;
@@ -273,6 +282,19 @@ class TerminalTmuxPassthroughDecoder {
 
   /// Decodes a chunk, retaining incomplete passthroughs until their terminator.
   String add(String input) {
+    if (input.isEmpty) {
+      return input;
+    }
+    // Fast path: no active passthrough state and no ESC byte (single-code-unit
+    // intrinsic scan), or no DCS introducer (`ESC P`) / trailing lone ESC byte.
+    if (_payload == null &&
+        _prefixLength == 0 &&
+        (!input.contains('\x1b') ||
+            (!input.contains('\x1bP') &&
+                input.codeUnitAt(input.length - 1) !=
+                    _terminalEscapeCodeUnit))) {
+      return input;
+    }
     final output = StringBuffer();
     var cursor = 0;
     while (cursor < input.length) {
@@ -333,7 +355,16 @@ buildTerminalWindowControlQueryResponses({
   required TerminalWindowMetrics? metrics,
   TerminalThemeData? theme,
 }) {
-  final combinedInput = pendingInput + input;
+  if (pendingInput.isEmpty && !input.contains('\x1b')) {
+    return (response: null, pendingInput: '');
+  }
+  final combinedInput = pendingInput.isEmpty ? input : pendingInput + input;
+  if (!combinedInput.contains('\x1b[')) {
+    return (
+      response: null,
+      pendingInput: _terminalControlQueryPendingSuffix(combinedInput),
+    );
+  }
   final responses = StringBuffer();
 
   for (final match in _terminalWindowQueryPattern.allMatches(combinedInput)) {
@@ -369,7 +400,21 @@ extractTerminalControlModeUpdates({
   required String input,
   required String pendingInput,
 }) {
-  final combinedInput = pendingInput + input;
+  if (pendingInput.isEmpty && !input.contains('\x1b')) {
+    return (
+      colorSchemeUpdatesMode: null,
+      win32InputMode: null,
+      pendingInput: '',
+    );
+  }
+  final combinedInput = pendingInput.isEmpty ? input : pendingInput + input;
+  if (!combinedInput.contains('\x1b[?')) {
+    return (
+      colorSchemeUpdatesMode: null,
+      win32InputMode: null,
+      pendingInput: _terminalControlQueryPendingSuffix(combinedInput),
+    );
+  }
   bool? colorSchemeUpdatesMode;
   bool? win32InputMode;
 
@@ -484,45 +529,107 @@ class TerminalXtermOutputDecoder {
 
   /// Adapts the next chunk of remote output.
   String add({required String input}) {
+    if (input.isEmpty) {
+      return input;
+    }
     final combinedInput = _pendingSurrogate.isEmpty
         ? input
         : _pendingSurrogate + input;
     _pendingSurrogate = '';
-    final output = StringBuffer();
+
+    final length = combinedInput.length;
+    // Zero-allocation fast path when no escape sequence is in flight and the
+    // chunk contains no ESC byte.
+    if (_state == null && !combinedInput.contains('\x1b')) {
+      final lastCodeUnit = combinedInput.codeUnitAt(length - 1);
+      if (lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF) {
+        _pendingSurrogate = combinedInput.substring(length - 1);
+        return combinedInput.substring(0, length - 1);
+      }
+      return combinedInput;
+    }
+
+    // Lazily allocate StringBuffer only if a sequence is split across chunks,
+    // dropped (`CSI > ... m`), or a trailing surrogate must be withheld.
+    StringBuffer? output;
+    var emitStart = 0;
     var cursor = 0;
-    while (cursor < combinedInput.length) {
+    while (cursor < length) {
       if (_state != null) {
         final start = cursor;
-        while (cursor < combinedInput.length && _state != null) {
+        while (cursor < length && _state != null) {
           _scanSequenceCodeUnit(combinedInput.codeUnitAt(cursor++));
         }
         _sequence.write(combinedInput.substring(start, cursor));
-        if (_state != null) break;
+        if (_state != null) {
+          emitStart = length;
+          break;
+        }
         final sequence = _sequence.toString();
         materializedSequenceCodeUnits += sequence.length;
         _sequence.clear();
+        output ??= StringBuffer();
         if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
           output.write(sequence);
         }
+        emitStart = cursor;
         continue;
       }
-      final codeUnit = combinedInput.codeUnitAt(cursor);
-      if (codeUnit == _terminalEscapeCodeUnit) {
-        _sequence.write(_terminalEscape);
-        _state = _TerminalSequenceState.escape;
-        cursor++;
-        continue;
-      }
-      if (cursor == combinedInput.length - 1 &&
-          codeUnit >= 0xD800 &&
-          codeUnit <= 0xDBFF) {
-        _pendingSurrogate = combinedInput.substring(cursor);
+
+      final nextEscape = combinedInput.indexOf('\x1b', cursor);
+      if (nextEscape < 0) {
+        final lastCodeUnit = combinedInput.codeUnitAt(length - 1);
+        if (lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF) {
+          output ??= StringBuffer();
+          if (length - 1 > emitStart) {
+            output.write(combinedInput.substring(emitStart, length - 1));
+          }
+          _pendingSurrogate = combinedInput.substring(length - 1);
+          emitStart = length;
+        }
         break;
       }
-      final rune = _terminalRuneAt(combinedInput, cursor);
-      final runeLength = _terminalRuneLength(rune);
-      output.write(combinedInput.substring(cursor, cursor + runeLength));
-      cursor += runeLength;
+
+      // Scan the escape sequence in-place without copying into `_sequence`
+      // unless it remains incomplete at the end of `combinedInput`.
+      final seqStart = nextEscape;
+      cursor = seqStart + 1;
+      _state = _TerminalSequenceState.escape;
+      while (cursor < length && _state != null) {
+        _scanSequenceCodeUnit(combinedInput.codeUnitAt(cursor++));
+      }
+      if (_state != null) {
+        // Sequence is split across chunks: flush everything before it and
+        // buffer only the partial sequence.
+        output ??= StringBuffer();
+        if (seqStart > emitStart) {
+          output.write(combinedInput.substring(emitStart, seqStart));
+        }
+        _sequence.write(combinedInput.substring(seqStart, cursor));
+        emitStart = length;
+        break;
+      }
+
+      // Sequence completed within `combinedInput`.
+      materializedSequenceCodeUnits += cursor - seqStart;
+      if (_shouldDropTerminalOutputSequenceSliceForXterm(
+        combinedInput,
+        seqStart,
+        cursor,
+      )) {
+        output ??= StringBuffer();
+        if (seqStart > emitStart) {
+          output.write(combinedInput.substring(emitStart, seqStart));
+        }
+        emitStart = cursor;
+      }
+    }
+
+    if (output == null) {
+      return emitStart == 0 ? combinedInput : '';
+    }
+    if (emitStart < length) {
+      output.write(combinedInput.substring(emitStart));
     }
     return output.toString();
   }
@@ -584,7 +691,6 @@ final _terminalPrivateModeSetResetPattern = RegExp(r'\x1b\[\?([0-9;]+)([hl])');
 final _terminalOscOrDcsSequencePattern = RegExp(
   r'\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)',
 );
-final _terminalCsiNumericParamsPattern = RegExp(r'^[0-9;]*$');
 
 String? _buildTerminalWindowQueryResponse(
   String primaryParam,
@@ -630,38 +736,35 @@ const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;
 
-bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
-  if (sequence.length < 4 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit ||
-      sequence.codeUnitAt(2) != _terminalPrivateMarkerCodeUnit ||
-      sequence.codeUnitAt(sequence.length - 1) !=
+bool _shouldDropTerminalOutputSequenceForXterm(String sequence) =>
+    _shouldDropTerminalOutputSequenceSliceForXterm(
+      sequence,
+      0,
+      sequence.length,
+    );
+
+bool _shouldDropTerminalOutputSequenceSliceForXterm(
+  String input,
+  int start,
+  int end,
+) {
+  if (end - start < 4 ||
+      input.codeUnitAt(start) != _terminalEscapeCodeUnit ||
+      input.codeUnitAt(start + 1) != _terminalCsiIntroducerCodeUnit ||
+      input.codeUnitAt(start + 2) != _terminalPrivateMarkerCodeUnit ||
+      input.codeUnitAt(end - 1) !=
           _terminalSelectGraphicRenditionFinalCodeUnit) {
     return false;
   }
 
-  final params = sequence.substring(3, sequence.length - 1);
-  return _terminalCsiNumericParamsPattern.hasMatch(params);
-}
-
-int _terminalRuneAt(String input, int index) {
-  final first = input.codeUnitAt(index);
-  if (_isTerminalHighSurrogate(first) && index + 1 < input.length) {
-    final second = input.codeUnitAt(index + 1);
-    if (_isTerminalLowSurrogate(second)) {
-      return 0x10000 + ((first - 0xD800) << 10) + second - 0xDC00;
+  for (var i = start + 3; i < end - 1; i++) {
+    final c = input.codeUnitAt(i);
+    if (!((c >= 0x30 && c <= 0x39) || c == 0x3B)) {
+      return false;
     }
   }
-  return first;
+  return true;
 }
-
-int _terminalRuneLength(int rune) => rune > 0xFFFF ? 2 : 1;
-
-bool _isTerminalHighSurrogate(int codeUnit) =>
-    codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
-
-bool _isTerminalLowSurrogate(int codeUnit) =>
-    codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 
 bool _hasValidTerminalWindowMetrics(TerminalWindowMetrics? metrics) =>
     metrics != null &&

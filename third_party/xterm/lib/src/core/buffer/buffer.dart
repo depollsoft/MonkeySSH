@@ -134,7 +134,97 @@ class Buffer {
   /// both run the cases in its testdata/grapheme_cluster_parity.json.
   ///
   /// See also: [Terminal.writeChar]
+  /// Bulk fast path for a contiguous run of printable ASCII (`0x20..0x7E`).
+  void writeAsciiRun(List<int> units, int start, int end) {
+    if (!charset.isAscii || terminal.insertMode) {
+      for (var i = start; i < end; i++) {
+        writeChar(units[i]);
+      }
+      return;
+    }
+    final style = terminal.cursor;
+    final semantic = semanticPrompt.content;
+    final width = viewWidth;
+    var pos = start;
+    while (pos < end) {
+      if (_cursorX >= width) {
+        if (terminal.autoWrapMode) {
+          _wrapToNextLine();
+        } else {
+          // Without autowrap, every remaining char overwrites the last cell.
+          _cursorX = width - 1;
+          final line = currentLine;
+          if (_cursorX > 0 && line.getWidth(_cursorX - 1) == 2) {
+            line.eraseCell(_cursorX - 1, style);
+          }
+          if (line.anchors.isNotEmpty) {
+            graphics.removePlaceholderAt(line, _cursorX);
+          }
+          line.setCell(_cursorX, units[end - 1], 1, style, semantic);
+          _cursorX++;
+          return;
+        }
+      }
+      final line = currentLine;
+      final remaining = end - pos;
+      final room = width - _cursorX;
+      final count = remaining < room ? remaining : room;
+      // Fix up wide-glyph boundary on the left edge.
+      if (_cursorX > 0 && line.getWidth(_cursorX - 1) == 2) {
+        line.eraseCell(_cursorX - 1, style);
+      }
+      // Fix up wide-glyph boundary on the right edge (if last written cell
+      // overwrites the left half of a wide glyph whose right half lies past
+      // `_cursorX + count - 1`).
+      final lastCol = _cursorX + count - 1;
+      if (lastCol + 1 < width && line.getWidth(lastCol) == 2) {
+        _blankHalf(line, lastCol + 1);
+      }
+      if (line.anchors.isNotEmpty) {
+        graphics.removePlaceholdersInLineRange(
+            line, _cursorX, _cursorX + count);
+      }
+      line.setAsciiRun(_cursorX, units, pos, count, style, semantic);
+      _cursorX += count;
+      pos += count;
+    }
+  }
+
   bool writeChar(int codePoint) {
+    // Fast path for printable ASCII when no charset translation or insert mode
+    // is active: width is always 1 and ASCII never continues a grapheme cluster.
+    if (codePoint >= 0x20 && codePoint <= 0x7E && charset.isAscii) {
+      if (_cursorX >= viewWidth) {
+        if (terminal.autoWrapMode) {
+          _wrapToNextLine();
+        } else {
+          _cursorX = viewWidth - 1;
+        }
+      }
+      if (terminal.insertMode) {
+        insertBlankChars(1);
+      }
+      final line = currentLine;
+      if (_cursorX > 0 && line.getWidth(_cursorX - 1) == 2) {
+        line.eraseCell(_cursorX - 1, terminal.cursor);
+      }
+      if (line.getWidth(_cursorX) == 2 && _cursorX + 1 < viewWidth) {
+        _blankHalf(line, _cursorX + 1);
+      }
+      if (line.anchors.isNotEmpty) {
+        graphics.removePlaceholderAt(line, _cursorX);
+      }
+      line.setCell(
+        _cursorX,
+        codePoint,
+        1,
+        terminal.cursor,
+        semanticPrompt.content,
+      );
+      _cursorX++;
+      return true;
+    }
+
     codePoint = charset.translate(codePoint);
 
     final mayJoin =

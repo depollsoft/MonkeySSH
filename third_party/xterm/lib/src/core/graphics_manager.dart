@@ -4,10 +4,10 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:archive/archive.dart';
 import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/utils/async_semaphore.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
+import 'package:xterm/src/utils/zlib_inflate.dart';
 
 /// Optional observer invoked after each Kitty graphics decode attempt.
 ///
@@ -1181,13 +1181,18 @@ class GraphicsManager {
   ///
   /// Looking through the line's anchors keeps terminal erase and resize work
   /// proportional to that one row instead of every image in scrollback.
-  Set<CellAnchor> physicalPlacementAnchorsInLine(BufferLine line) =>
-      <CellAnchor>{
-        for (final anchor in line.anchors)
-          if (_placementsByAnchor.containsKey(anchor) ||
-              _pendingPlacementAnchors.contains(anchor))
-            anchor,
-      };
+  Set<CellAnchor> physicalPlacementAnchorsInLine(BufferLine line) {
+    if ((_placementsByAnchor.isEmpty && _pendingPlacementAnchors.isEmpty) ||
+        line.anchors.isEmpty) {
+      return const <CellAnchor>{};
+    }
+    return <CellAnchor>{
+      for (final anchor in line.anchors)
+        if (_placementsByAnchor.containsKey(anchor) ||
+            _pendingPlacementAnchors.contains(anchor))
+          anchor,
+    };
+  }
 
   /// Takes the placements anchored in a scroll region out of their rows before
   /// the region scrolls by [delta] rows (negative scrolls up), for
@@ -1363,7 +1368,9 @@ class GraphicsManager {
   /// Removes Unicode placeholders attached to [line] within `[start, end)`.
   /// Physical placement anchors are independent layers and are left intact.
   void removePlaceholdersInLineRange(BufferLine line, int start, int end) {
-    if (end <= start) return;
+    if (_placeholdersByAnchor.isEmpty || line.anchors.isEmpty || end <= start) {
+      return;
+    }
     for (final anchor in line.anchors.toList()) {
       if (anchor.x < start || anchor.x >= end) continue;
       final placeholder = _placeholdersByAnchor[anchor];
@@ -1518,6 +1525,7 @@ class GraphicsManager {
   /// Removes graphics anchored to [line] before the circular scrollback buffer
   /// evicts it. Work is proportional to anchors on that line, not total history.
   void removeGraphicsAnchoredToLine(BufferLine line) {
+    if (line.anchors.isEmpty) return;
     for (final anchor in line.anchors.toList()) {
       final placement = _placementsByAnchor[anchor];
       if (placement != null) {
@@ -4123,11 +4131,7 @@ Uint8List? inflateZlibData(
   if (bytes.isEmpty) {
     return null;
   }
-  try {
-    return const ZLibDecoder().decodeBytes(bytes, maxOutputSize: maxBytes);
-  } catch (_) {
-    return null;
-  }
+  return inflateZlibNative(bytes, maxBytes: maxBytes);
 }
 
 Uint8List _rgbToRgba(Uint8List rgb) {

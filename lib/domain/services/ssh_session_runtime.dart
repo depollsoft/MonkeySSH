@@ -357,7 +357,16 @@ if(!$__flResolved){$__flResolved='cmd'}
           );
         }
         if (requestPty) {
-          _applyLatestTerminalWindowMetrics(openedShell);
+          final latest = _terminalWindowMetrics;
+          final ptyMatchesLatest =
+              latest == null ||
+              (latest.columns == shellPty.width &&
+                  latest.rows == shellPty.height &&
+                  latest.pixelWidth == shellPty.pixelWidth &&
+                  latest.pixelHeight == shellPty.pixelHeight);
+          if (!ptyMatchesLatest) {
+            _applyLatestTerminalWindowMetrics(openedShell);
+          }
         }
         _shell = openedShell;
         _returnToLoginShell = command != null && returnToLoginShell;
@@ -1104,6 +1113,26 @@ if(!$__flResolved){$__flResolved='cmd'}
       return;
     }
 
+    // Leading-edge flush for interactive responsiveness: when the terminal has
+    // been idle for at least `_terminalOutputFlushInterval` (e.g. a user
+    // keystroke echo arriving after idle), flush immediately with 0 ms delay
+    // instead of waiting 8 ms, then coalesce any follow-up burst chunks that
+    // arrive within the next interval. Keep deterministic buffering when a
+    // caller explicitly configures a longer flush interval (e.g. tests).
+    final now = DateTime.now();
+    final canLeadingEdgeFlush =
+        _terminalOutputFlushInterval <= _defaultTerminalOutputFlushInterval &&
+        _pendingShellOutputs.length == 1 &&
+        !(_terminalOutputFlushTimer?.isActive ?? false) &&
+        _terminalParseBacklog.isEmpty &&
+        (_lastShellOutputFlushAt == null ||
+            now.difference(_lastShellOutputFlushAt!) >=
+                _terminalOutputFlushInterval);
+    if (canLeadingEdgeFlush) {
+      _flushPendingShellOutput();
+      return;
+    }
+
     if (!(_terminalOutputFlushTimer?.isActive ?? false)) {
       _terminalOutputFlushTimer = Timer(
         _terminalOutputFlushInterval,
@@ -1112,11 +1141,19 @@ if(!$__flResolved){$__flResolved='cmd'}
     }
   }
 
+  DateTime? _lastShellOutputFlushAt;
+
   bool _trackMonkeyMuxActiveWindowReplay(String terminalData) {
     if (terminalData.isEmpty) {
       return false;
     }
-    final combined = _monkeyMuxReplayDetectionTail + terminalData;
+    if (_monkeyMuxReplayDetectionTail.isEmpty &&
+        !terminalData.contains('\x1b')) {
+      return false;
+    }
+    final combined = _monkeyMuxReplayDetectionTail.isEmpty
+        ? terminalData
+        : _monkeyMuxReplayDetectionTail + terminalData;
     final detected = combined.contains(_monkeyMuxActiveWindowReplayMarker);
     final partialMarkerLength = _activeWindowReplayMarkerPrefixSuffixLength(
       combined,
@@ -1200,6 +1237,7 @@ if(!$__flResolved){$__flResolved='cmd'}
       (terminalData.contains('\x1b]') || terminalData.contains('\x1b[?'));
 
   void _flushPendingShellOutput({bool drainAll = false}) {
+    _lastShellOutputFlushAt = DateTime.now();
     _terminalOutputFlushTimer?.cancel();
     _terminalOutputFlushTimer = null;
     _monkeyMuxReplayCoalesceTimer?.cancel();
@@ -1585,6 +1623,11 @@ if(!$__flResolved){$__flResolved='cmd'}
   }) {
     if (_pendingShellOutputs.isEmpty) {
       return (terminalData: '', stdoutData: '');
+    }
+    if (_pendingShellOutputs.length == 1) {
+      final only = _pendingShellOutputs.removeFirst();
+      _pendingTerminalWriteChars = 0;
+      return only;
     }
 
     final terminalOutput = StringBuffer();

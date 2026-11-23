@@ -256,6 +256,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   String? _connectionStartDirectoryPath;
   String? _tmuxPaneDirectoryPath;
   List<RemoteFileSelection> _selectedFiles = const [];
+  List<RemoteFileSelection>? _selectedFilePathsSource;
+  Set<String> _selectedFilePathsCache = const {};
+  Timer? _filterSaveDebounceTimer;
+  SftpBrowserViewStore? _pendingFilterStore;
+  SftpBrowserFilter? _pendingFilterToSave;
+  bool _hasPendingFilterSave = false;
   SftpBrowserViewSettings _viewSettings = const SftpBrowserViewSettings();
   bool _viewSettingsChangedLocally = false;
   bool _filterChangedLocally = false;
@@ -332,6 +338,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     // Work started here stops with the browser rather than running on with
     // no progress, Cancel or results.
     _batchProgress?.cancel();
+    _flushPendingFilterSave();
     _breadcrumbScrollController.dispose();
     _fileListScrollController.dispose();
     _filterController.dispose();
@@ -610,16 +617,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         _syncFilterWithDirectory(path);
         // OpenSSH always lists `.` and `..`; they are not navigable rows, and
         // keeping them would hide the empty state and skew scroll offsets.
+        // Sorting is performed once in `_visibleFiles` (`applySftpBrowserView`)
+        // according to `_viewSettings`, avoiding a redundant O(N log N) pass.
         _files = items
-          ..removeWhere((e) => e.filename == '.' || e.filename == '..')
-          ..sort((a, b) {
-            // Directories first, then by name
-            final aIsDir = a.attr.isDirectory;
-            final bIsDir = b.attr.isDirectory;
-            if (aIsDir && !bIsDir) return -1;
-            if (!aIsDir && bIsDir) return 1;
-            return a.filename.compareTo(b.filename);
-          });
+          ..removeWhere((e) => e.filename == '.' || e.filename == '..');
         if (nextHistory != null) {
           _pathHistory
             ..clear()
@@ -1105,8 +1106,18 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       );
 
   bool _isRemoteFileSelected(SftpName file) {
-    final remotePath = joinRemotePath(_currentPath, file.filename);
-    return _selectedFiles.any((entry) => entry.remotePath == remotePath);
+    if (_selectedFiles.isEmpty) {
+      return false;
+    }
+    if (!identical(_selectedFilePathsSource, _selectedFiles)) {
+      _selectedFilePathsSource = _selectedFiles;
+      _selectedFilePathsCache = {
+        for (final entry in _selectedFiles) entry.remotePath,
+      };
+    }
+    return _selectedFilePathsCache.contains(
+      joinRemotePath(_currentPath, file.filename),
+    );
   }
 
   String? _selectionDisabledReasonForFile(SftpName file) {

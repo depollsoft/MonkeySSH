@@ -174,6 +174,11 @@ class ShellCompletionService {
   _historyInFlight = <String, Future<List<_PreparedShellHistoryCommand>>>{};
   // Connection/shell pairs whose interactive zsh probe exited as unsupported.
   final Set<String> _interactiveZshUnsupported = <String>{};
+  // Connection/shell pairs whose interactive zsh probe timed out recently,
+  // avoiding a 1 s stall on every keystroke on hosts with slow `.zshrc`.
+  final Map<String, DateTime> _interactiveZshTimeoutBackoffUntil =
+      <String, DateTime>{};
+  static const _interactiveZshTimeoutBackoff = Duration(minutes: 2);
 
   /// Runs a completion query for [invocation].
   Future<List<ShellCompletionSuggestion>> complete(
@@ -461,14 +466,19 @@ class ShellCompletionService {
     ShellCompletionInvocation invocation,
   ) async {
     final zshProbeKey = _connectionShellKey(session, invocation);
+    final backoffUntil = _interactiveZshTimeoutBackoffUntil[zshProbeKey];
+    final inTimeoutBackoff =
+        backoffUntil != null && DateTime.now().isBefore(backoffUntil);
     if (!session.remoteIsWindows &&
         _shouldTryInteractiveZshCompletion(invocation) &&
-        !_interactiveZshUnsupported.contains(zshProbeKey)) {
+        !_interactiveZshUnsupported.contains(zshProbeKey) &&
+        !inTimeoutBackoff) {
       try {
         final result = await _runInteractiveZshCompletionCommand(
           session,
           invocation,
         );
+        _interactiveZshTimeoutBackoffUntil.remove(zshProbeKey);
         if (result.didComplete) {
           return result.output;
         }
@@ -479,6 +489,14 @@ class ShellCompletionService {
           _interactiveZshUnsupported.add(zshProbeKey);
         }
       } on Object catch (error) {
+        if (error is TimeoutException) {
+          if (_interactiveZshTimeoutBackoffUntil.length >= 64) {
+            _interactiveZshTimeoutBackoffUntil.clear();
+          }
+          _interactiveZshTimeoutBackoffUntil[zshProbeKey] = DateTime.now().add(
+            _interactiveZshTimeoutBackoff,
+          );
+        }
         DiagnosticsLogService.instance.debug(
           'shell_completion',
           'interactive_zsh_unavailable',

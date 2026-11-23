@@ -993,7 +993,10 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     }
 
     _syncGraphicsAnimationTicker();
-    _scheduleGraphicsAnimationSync();
+    if (widget.terminal.graphics.hasActiveAnimations ||
+        _graphicsAnimationTicker.isActive) {
+      _scheduleGraphicsAnimationSync();
+    }
     final currentViewWidth = widget.terminal.viewWidth;
     if (currentViewWidth == _lastTerminalViewWidth) {
       return;
@@ -2136,10 +2139,21 @@ class MonkeyTerminalPainter extends TerminalPainter {
   // theme or text scale changes (the same triggers that clear the paragraph
   // cache), since those change how a given cell content renders.
   final _foregroundPictureCache = <int, Picture>{};
-  // Keep enough unique transcript lines for repeated page/fling navigation in
-  // long text sessions while retaining a hard memory bound on mobile. The old
-  // 512-line window thrashed after only a handful of terminal-sized jumps.
   static const _maxForegroundPictureCacheEntries = 2048;
+
+  // Per-line cached background runs keyed weakly by BufferLine identity and
+  // validated against `(line.revision, _cacheGeneration)` in O(1), avoiding
+  // per-cell scanning and color resolution on static/unchanged colored rows.
+  final _backgroundRunsCache =
+      Expando<
+        ({
+          int revision,
+          int generation,
+          bool skipBase,
+          List<({double left, double width, Color color})> runs,
+        })
+      >();
+  int _cacheGeneration = 0;
 
   /// Number of foreground style-run paragraphs currently cached. A coalesced
   /// line of N same-style cells caches a single N-glyph run paragraph here (not
@@ -2186,6 +2200,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
   }
 
   void _clearCaches() {
+    _cacheGeneration++;
     _paragraphCache.clear();
     _inlineUnderlineParagraphCache.clear();
     _runParagraphCache.clear();
@@ -2371,16 +2386,99 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// or two below the cell box, and the old single per-line pass clipped it
   /// behind the next row's background.
   void paintLineBackgrounds(Canvas canvas, Offset offset, BufferLine line) {
-    paintLineBackground(canvas, offset, line);
-    final cellData = _scratchCellData;
-    final cellWidth = cellSize.width;
-    for (var i = 0; i < line.length; i++) {
-      line.getCellData(i, cellData);
-      final charWidth = cellData.content >> CellContent.widthShift;
-      paintCellBackground(canvas, offset.translate(i * cellWidth, 0), cellData);
-      if (charWidth == 2) {
-        i++;
+    final length = line.length;
+    if (length == 0) {
+      return;
+    }
+    if (!line.hasNonDefaultBackground) {
+      paintLineBackground(canvas, offset, line);
+      return;
+    }
+
+    final revision = line.revision;
+    final generation = _cacheGeneration;
+    var cached = _backgroundRunsCache[line];
+    if (cached == null ||
+        cached.revision != revision ||
+        cached.generation != generation) {
+      final cellData = _scratchCellData;
+      final cellWidth = cellSize.width;
+      final runs = <({double left, double width, Color color})>[];
+      var runStart = -1;
+      var runEnd = 0;
+      Color? runColor;
+
+      void flushRun() {
+        final color = runColor;
+        if (color == null || runStart < 0) {
+          return;
+        }
+        runs.add((
+          left: runStart * cellWidth,
+          width: (runEnd - runStart) * cellWidth + (runEnd < length ? 1 : 0),
+          color: color,
+        ));
+        runStart = -1;
+        runColor = null;
       }
+
+      for (var i = 0; i < length; i++) {
+        line.getCellData(i, cellData);
+        final charWidth = cellData.content >> CellContent.widthShift;
+        final widthScale = charWidth == 2 ? 2 : 1;
+        final colorType = _cellBackgroundColorType(cellData);
+        if (cellData.flags & CellFlags.inverse == 0 &&
+            colorType == CellColor.normal) {
+          flushRun();
+        } else {
+          final charCode = cellData.content & CellContent.codepointMask;
+          final color = _resolveCellBackgroundPaintColor(
+            cellData,
+            toneNeutralBackgrounds: !_isRectPaintedBlockElement(charCode),
+          );
+          if (runColor == color && runEnd == i) {
+            runEnd = i + widthScale;
+          } else {
+            flushRun();
+            runStart = i;
+            runEnd = i + widthScale;
+            runColor = color;
+          }
+        }
+        if (charWidth == 2) {
+          i++;
+        }
+      }
+      flushRun();
+      final skipBase =
+          runs.length == 1 && runs[0].left == 0 && runEnd >= length;
+      cached = (
+        revision: revision,
+        generation: generation,
+        skipBase: skipBase,
+        runs: runs,
+      );
+      _backgroundRunsCache[line] = cached;
+    }
+
+    if (!cached.skipBase) {
+      paintLineBackground(canvas, offset, line);
+    }
+    final runs = cached.runs;
+    if (runs.isEmpty) {
+      return;
+    }
+    final paint = _rectPaint;
+    final dy = offset.dy;
+    final dx = offset.dx;
+    final cellHeight = cellSize.height;
+    for (var i = 0; i < runs.length; i++) {
+      final run = runs[i];
+      paint.color = run.color;
+      canvas.drawRect(
+        Rect.fromLTWH(dx + run.left, dy, run.width, cellHeight),
+        paint,
+      );
     }
   }
 
@@ -2389,20 +2487,32 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// clipped by the next row's background.
   void paintLineForegrounds(Canvas canvas, Offset offset, BufferLine line) {
     final hash = _lineForegroundHash(line);
-    // remove+reinsert keeps the map in least-recently-used order (oldest first).
-    var picture = _foregroundPictureCache.remove(hash);
-    if (picture == null) {
-      final recorder = PictureRecorder();
-      _paintLineForegroundsInto(Canvas(recorder), line);
-      picture = recorder.endRecording();
-    }
-    _foregroundPictureCache[hash] = picture;
-    if (_foregroundPictureCache.length > _maxForegroundPictureCacheEntries) {
-      // Drop the least-recently-used entry. The picture is not disposed: a
-      // still-in-flight frame may reference it, and a raster of a disposed
-      // picture crashes; dropping the reference lets the GC finalizer reclaim it
-      // once nothing can draw it.
-      _foregroundPictureCache.remove(_foregroundPictureCache.keys.first);
+    Picture? picture;
+    if (_foregroundPictureCache.length <
+        ((_maxForegroundPictureCacheEntries * 3) >> 2)) {
+      picture = _foregroundPictureCache[hash];
+      if (picture == null) {
+        final recorder = PictureRecorder();
+        _paintLineForegroundsInto(Canvas(recorder), line);
+        picture = recorder.endRecording();
+        _foregroundPictureCache[hash] = picture;
+      }
+    } else {
+      // remove+reinsert keeps the map in least-recently-used order (oldest first).
+      picture = _foregroundPictureCache.remove(hash);
+      if (picture == null) {
+        final recorder = PictureRecorder();
+        _paintLineForegroundsInto(Canvas(recorder), line);
+        picture = recorder.endRecording();
+      }
+      _foregroundPictureCache[hash] = picture;
+      if (_foregroundPictureCache.length > _maxForegroundPictureCacheEntries) {
+        // Drop the least-recently-used entry. The picture is not disposed: a
+        // still-in-flight frame may reference it, and a raster of a disposed
+        // picture crashes; dropping the reference lets the GC finalizer reclaim it
+        // once nothing can draw it.
+        _foregroundPictureCache.remove(_foregroundPictureCache.keys.first);
+      }
     }
     canvas
       ..save()
@@ -2617,22 +2727,32 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// `background`, since the readable-foreground resolution tints the glyph
   /// against the cell's background.
   int _lineForegroundHash(BufferLine line) {
-    final cellData = _scratchCellData;
+    final revision = line.revision;
+    if (line.cachedForegroundHashRevision == revision) {
+      return line.cachedForegroundHash;
+    }
     const mask = 0x3FFFFFFFFFFFFFFF;
     const prime = 0x100000001b3;
+    const semanticMask = 3 << 16;
     final length = line.length;
+    final data = line.data;
     var hash = (0xcbf29ce484222325 ^ length) & mask;
     for (var i = 0; i < length; i++) {
-      line.getCellData(i, cellData);
-      hash = ((hash ^ cellData.content) * prime) & mask;
-      hash = ((hash ^ cellData.foreground) * prime) & mask;
-      hash = ((hash ^ cellData.background) * prime) & mask;
-      hash = ((hash ^ cellData.flags) * prime) & mask;
-      hash = ((hash ^ cellData.underlineColor) * prime) & mask;
-      for (final codePoint in cellData.graphemeExtras) {
-        hash = ((hash ^ codePoint) * prime) & mask;
+      final base = i * 5;
+      final content = data[base + 3];
+      hash = ((hash ^ content) * prime) & mask;
+      hash = ((hash ^ data[base]) * prime) & mask;
+      hash = ((hash ^ data[base + 1]) * prime) & mask;
+      hash = ((hash ^ (data[base + 2] & ~semanticMask)) * prime) & mask;
+      hash = ((hash ^ data[base + 4]) * prime) & mask;
+      if ((content & CellContent.graphemeFlag) != 0) {
+        for (final codePoint in line.getGraphemeExtras(i)) {
+          hash = ((hash ^ codePoint) * prime) & mask;
+        }
       }
     }
+    line.cachedForegroundHash = hash;
+    line.cachedForegroundHashRevision = revision;
     return hash;
   }
 
@@ -2641,6 +2761,9 @@ class MonkeyTerminalPainter extends TerminalPainter {
   /// below the cell, so drawing them after every line's opaque background keeps
   /// the next line's background from clipping the wave's lower edge.
   void paintLineCellUnderlines(Canvas canvas, Offset offset, BufferLine line) {
+    if (!line.hasUnderline) {
+      return;
+    }
     final cellData = _scratchCellData;
     final cellWidth = cellSize.width;
     for (var i = 0; i < line.length; i++) {

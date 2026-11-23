@@ -24,6 +24,17 @@ import 'dart:typed_data';
 /// safe to hand to a caller that may hold onto it indefinitely.
 class ChunkBuffer {
   static const int _minCapacity = 4096;
+  static const int _maxRetainedCapacity = 65536;
+
+  /// Creates a [ChunkBuffer].
+  ///
+  /// When [retainBuffer] is true, draining the buffer resets its cursors in
+  /// place (up to 64 KiB) instead of dropping the backing array. Only enable
+  /// this when callers never keep a [view]/[consumeView] slice alive past the
+  /// next [add] call.
+  ChunkBuffer({this.retainBuffer = false});
+
+  final bool retainBuffer;
 
   Uint8List _storage = Uint8List(0);
 
@@ -121,10 +132,11 @@ class ChunkBuffer {
   void _advance(int n) {
     _start += n;
     if (_start == _end) {
-      // Fully drained: release the backing array immediately rather than
-      // waiting for the next add() to replace it, so an idle period after
-      // a large burst doesn't keep a big allocation alive.
-      _storage = Uint8List(0);
+      if (!retainBuffer || _storage.length > _maxRetainedCapacity) {
+        // Release oversized or alias-sensitive backing arrays immediately so an
+        // idle period after a large burst doesn't keep a big allocation alive.
+        _storage = Uint8List(0);
+      }
       _start = 0;
       _end = 0;
     }

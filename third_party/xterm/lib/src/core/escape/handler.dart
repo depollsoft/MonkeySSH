@@ -1,6 +1,12 @@
 import 'package:xterm/src/core/cell.dart';
 import 'package:xterm/src/core/mouse/mode.dart';
 
+/// Optional fast-path interface implemented by handlers (such as [Terminal])
+/// that can ingest a contiguous slice of printable ASCII (`0x20..0x7E`) in bulk.
+abstract class BulkAsciiEscapeHandler {
+  void writeAsciiRun(List<int> units, int start, int end);
+}
+
 abstract class EscapeHandler {
   void writeChar(int char);
 

@@ -172,6 +172,34 @@ void main() {
 
       expect(line.length, equals(20));
     });
+
+    test(
+      'full visible erase after shrink preserves retained grapheme extras and style hints',
+      () {
+        final line = BufferLine(10);
+        final styled = CursorStyle()
+          ..setBackgroundColorRgb(10, 20, 30)
+          ..setUnderline();
+        line.setCell(7, 0x65, 1, styled);
+        line.addGraphemeExtra(7, 0x0301);
+
+        // Shrink below column 7, erase the entire visible portion with empty
+        // default style, then regrow back to 10.
+        line.resize(5);
+        line.eraseRange(0, 5, CursorStyle.empty);
+        line.resize(10);
+
+        expect(line.getGraphemeExtras(7), equals([0x0301]));
+        expect(line.hasNonDefaultBackground, isTrue);
+        expect(line.hasUnderline, isTrue);
+
+        // Erasing through the entire backing storage resets hints and extras.
+        line.eraseRange(0, 10, CursorStyle.empty);
+        expect(line.getGraphemeExtras(7), isEmpty);
+        expect(line.hasNonDefaultBackground, isFalse);
+        expect(line.hasUnderline, isFalse);
+      },
+    );
   });
 
   group('Buffer.createAnchor', () {

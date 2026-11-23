@@ -58,9 +58,16 @@ class BufferLine with IndexedItem {
   BufferLine(
     this._length, {
     this.isWrapped = false,
-  }) : _data = Uint32List(_calcCapacity(_length) * _cellSize);
+  })  : _highWaterLength = _length,
+        _data = Uint32List(_calcCapacity(_length) * _cellSize);
 
   int _length;
+
+  /// Largest [_length] this line has held since the last full-storage erase.
+  /// Columns in `[_length, _highWaterLength)` may hold retained cells from an
+  /// earlier shrink in [resize], while columns `>= _highWaterLength` are
+  /// guaranteed blank zero-initialized storage.
+  int _highWaterLength;
 
   Uint32List _data;
 
@@ -86,6 +93,29 @@ class BufferLine with IndexedItem {
   var semanticPrompt = SemanticPromptRow.none;
 
   int get length => _length;
+
+  /// Monotonically incremented whenever cell content, attributes, or line length
+  /// changes. Painters can key per-line caches on `(line, line.revision)` in O(1)
+  /// without re-scanning every cell of unchanged lines.
+  int _revision = 0;
+  int get revision => _revision;
+
+  /// Conservative hint: `true` if any cell in this line may have a non-default
+  /// background color or inverse attribute. When `false`, painters can skip
+  /// per-cell background scanning entirely.
+  bool _hasNonDefaultBackground = false;
+  bool get hasNonDefaultBackground => _hasNonDefaultBackground;
+
+  /// Conservative hint: `true` if any cell in this line may carry
+  /// [CellFlags.underline]. When `false`, painters can skip the per-cell
+  /// underline pass entirely.
+  bool _hasUnderline = false;
+  bool get hasUnderline => _hasUnderline;
+
+  /// Cached content hash for foreground painting, valid when
+  /// [cachedForegroundHashRevision] equals [revision].
+  int cachedForegroundHash = 0;
+  int cachedForegroundHashRevision = -1;
 
   final _anchors = <CellAnchor>[];
 
@@ -161,6 +191,7 @@ class BufferLine with IndexedItem {
   void setContent(int index, int value) {
     _clearGraphemeExtras(index);
     _data[index * _cellSize + _cellContent] = value & ~CellContent.graphemeFlag;
+    _revision++;
   }
 
   /// Changes the width of the cell at [index] to [width], keeping its code
@@ -171,6 +202,7 @@ class BufferLine with IndexedItem {
     final content = _data[offset];
     _data[offset] = (content & ((1 << CellContent.widthShift) - 1)) |
         (width << CellContent.widthShift);
+    _revision++;
   }
 
   /// Sets the code points the cell at [index] holds after its first one to
@@ -182,10 +214,12 @@ class BufferLine with IndexedItem {
     if (codePoints.isEmpty) {
       _clearGraphemeExtras(index);
       _data[offset] &= ~CellContent.graphemeFlag;
+      _revision++;
       return;
     }
     (_graphemeExtras ??= {})[index] = List.unmodifiable(codePoints);
     _data[offset] |= CellContent.graphemeFlag;
+    _revision++;
   }
 
   /// Joins [codePoint] to the grapheme cluster of the cell at [index], after
@@ -198,6 +232,7 @@ class BufferLine with IndexedItem {
       ..setRange(0, extras.length, extras);
     (_graphemeExtras ??= {})[index] = joined;
     _data[index * _cellSize + _cellContent] |= CellContent.graphemeFlag;
+    _revision++;
   }
 
   bool get _hasAnyGraphemeExtras => _graphemeExtras?.isNotEmpty ?? false;
@@ -215,7 +250,47 @@ class BufferLine with IndexedItem {
     setContent(index, char | (width << CellContent.widthShift));
   }
 
+  /// Writes a contiguous run of printable ASCII code points (`0x20..0x7E`,
+  /// width 1) from `units[srcStart..srcStart+count)` starting at column [col].
+  void setAsciiRun(
+    int col,
+    List<int> units,
+    int srcStart,
+    int count,
+    CursorStyle style,
+    int semanticContent,
+  ) {
+    final extras = _graphemeExtras;
+    final hasExtras = extras != null && extras.isNotEmpty;
+    final fg = style.foreground;
+    final bg = style.background;
+    final attrs = style.attrs;
+    final attrWord = attrs | (semanticContent << _cellSemanticShift);
+    final ulColor = style.underlineColor;
+    const widthWord = 1 << CellContent.widthShift;
+    final data = _data;
+    var offset = col * _cellSize;
+    for (var i = 0; i < count; i++) {
+      if (hasExtras) extras.remove(col + i);
+      data[offset] = fg;
+      data[offset + 1] = bg;
+      data[offset + 2] = attrWord;
+      data[offset + 3] = units[srcStart + i] | widthWord;
+      data[offset + 4] = ulColor;
+      offset += _cellSize;
+    }
+    if ((bg & CellColor.typeMask) != CellColor.normal ||
+        (attrs & CellAttr.inverse) != 0) {
+      _hasNonDefaultBackground = true;
+    }
+    if ((attrs & CellAttr.underline) != 0) {
+      _hasUnderline = true;
+    }
+    _revision++;
+  }
+
   /// Writes a cell. [semanticContent] is the [SemanticContent] in force.
+  @pragma('vm:prefer-inline')
   void setCell(
     int index,
     int char,
@@ -225,26 +300,42 @@ class BufferLine with IndexedItem {
   ]) {
     _clearGraphemeExtras(index);
     final offset = index * _cellSize;
+    final bg = style.background;
+    final attrs = style.attrs;
     _data[offset + _cellForeground] = style.foreground;
-    _data[offset + _cellBackground] = style.background;
+    _data[offset + _cellBackground] = bg;
     _data[offset + _cellAttributes] =
-        style.attrs | (semanticContent << _cellSemanticShift);
+        attrs | (semanticContent << _cellSemanticShift);
     _data[offset + _cellContent] = char | (witdh << CellContent.widthShift);
     _data[offset + _cellUnderlineColor] = style.underlineColor;
+    if ((bg & CellColor.typeMask) != CellColor.normal ||
+        (attrs & CellAttr.inverse) != 0) {
+      _hasNonDefaultBackground = true;
+    }
+    if ((attrs & CellAttr.underline) != 0) {
+      _hasUnderline = true;
+    }
+    _revision++;
   }
 
   /// Erases a cell to a blank in [style]'s background, the only part of the
   /// rendition an erase keeps, as in xterm.js, Ghostty and the MonkeyMux
   /// screen model: a blank painted in an inverse or coloured foreground
   /// would come back without it in a MonkeyMux replay.
+  @pragma('vm:prefer-inline')
   void eraseCell(int index, CursorStyle style) {
     _clearGraphemeExtras(index);
     final offset = index * _cellSize;
+    final bg = style.background;
     _data[offset + _cellForeground] = 0;
-    _data[offset + _cellBackground] = style.background;
+    _data[offset + _cellBackground] = bg;
     _data[offset + _cellAttributes] = 0;
     _data[offset + _cellContent] = 0;
     _data[offset + _cellUnderlineColor] = 0;
+    if ((bg & CellColor.typeMask) != CellColor.normal) {
+      _hasNonDefaultBackground = true;
+    }
+    _revision++;
   }
 
   void resetCell(int index) {
@@ -255,6 +346,7 @@ class BufferLine with IndexedItem {
     _data[offset + _cellAttributes] = 0;
     _data[offset + _cellContent] = 0;
     _data[offset + _cellUnderlineColor] = 0;
+    _revision++;
   }
 
   /// Erase cells whose index satisfies [start] <= index < [end]. Erased cells
@@ -273,18 +365,53 @@ class BufferLine with IndexedItem {
     if (start > 0 && getWidth(start - 1) == 2) start--;
     if (end < _length && getWidth(end - 1) == 2) end++;
 
-    for (var i = start; i < end; i++) {
-      eraseCell(i, style);
+    final bg = style.background;
+    final bgIsNonDefault = (bg & CellColor.typeMask) != CellColor.normal;
+    if (start == 0 && end >= _length) {
+      final endWord = end * _cellSize;
+      // resize() retains cells in [_length, _highWaterLength) for later
+      // regrowth. Only reset the full-line hints and clear all grapheme extras
+      // when erasing through every retained column; otherwise preserve hidden
+      // columns' clusters and keep the hints conservative.
+      if (end >= _highWaterLength) {
+        _hasNonDefaultBackground = bgIsNonDefault;
+        _hasUnderline = false;
+        _graphemeExtras?.clear();
+        _highWaterLength = _length;
+      } else {
+        if (bgIsNonDefault) {
+          _hasNonDefaultBackground = true;
+        }
+        _graphemeExtras?.removeWhere((column, _) => column < end);
+      }
+      if (bg == 0) {
+        _data.fillRange(0, endWord, 0);
+      } else {
+        for (var offset = 0; offset < endWord; offset += _cellSize) {
+          _data[offset + _cellForeground] = 0;
+          _data[offset + _cellBackground] = bg;
+          _data[offset + _cellAttributes] = 0;
+          _data[offset + _cellContent] = 0;
+          _data[offset + _cellUnderlineColor] = 0;
+        }
+      }
+      _revision++;
+    } else {
+      for (var i = start; i < end; i++) {
+        eraseCell(i, style);
+      }
     }
 
     // Erased cells no longer own anchored text/cell-image content. Physical
     // Kitty placements are independent terminal layers and are explicitly
     // preserved by the buffer until a graphics delete or buffer reset.
-    for (final anchor in _anchors.toList()) {
-      if (anchor.x >= start &&
-          anchor.x < end &&
-          !preservedAnchors.contains(anchor)) {
-        anchor.dispose();
+    if (_anchors.isNotEmpty) {
+      for (final anchor in _anchors.toList()) {
+        if (anchor.x >= start &&
+            anchor.x < end &&
+            !preservedAnchors.contains(anchor)) {
+          anchor.dispose();
+        }
       }
     }
   }
@@ -324,15 +451,18 @@ class BufferLine with IndexedItem {
     }
 
     // Update anchors, remove anchors that are inside the removed range.
-    for (final anchor in _anchors.toList()) {
-      if (anchor.x >= start) {
-        if (anchor.x < start + count) {
-          anchor.dispose();
-        } else {
-          anchor.reposition(anchor.x - count);
+    if (_anchors.isNotEmpty) {
+      for (final anchor in _anchors.toList()) {
+        if (anchor.x >= start) {
+          if (anchor.x < start + count) {
+            anchor.dispose();
+          } else {
+            anchor.reposition(anchor.x - count);
+          }
         }
       }
     }
+    _revision++;
   }
 
   /// Inserts [count] cells at [start]. New cells are initialized with [style].
@@ -371,16 +501,19 @@ class BufferLine with IndexedItem {
     }
 
     // Update anchors, move anchors that are after the inserted range.
-    for (final anchor in _anchors.toList()) {
-      if (anchor.x >= start) {
-        anchor.reposition(anchor.x + count);
+    if (_anchors.isNotEmpty) {
+      for (final anchor in _anchors.toList()) {
+        if (anchor.x >= start) {
+          anchor.reposition(anchor.x + count);
 
-        // Remove anchors that are now outside the buffer.
-        if (anchor.x >= _length) {
-          anchor.dispose();
+          // Remove anchors that are now outside the buffer.
+          if (anchor.x >= _length) {
+            anchor.dispose();
+          }
         }
       }
     }
+    _revision++;
   }
 
   void resize(int length) {
@@ -402,6 +535,10 @@ class BufferLine with IndexedItem {
     }
 
     _length = length;
+    if (length > _highWaterLength) {
+      _highWaterLength = length;
+    }
+    _revision++;
     // A wide glyph left in the only column has no second half until the line
     // grows again, which gives it a new one; one kept past the end would come
     // back after the glyph was gone.
@@ -423,6 +560,7 @@ class BufferLine with IndexedItem {
     resize(length);
     _data.fillRange(length * _cellSize, _data.length, 0);
     _graphemeExtras?.removeWhere((column, _) => column >= length);
+    _revision++;
   }
 
   /// Moves [getGraphemeExtras] along with cells that moved: each column's
@@ -501,6 +639,9 @@ class BufferLine with IndexedItem {
     if (copied.isNotEmpty) {
       (_graphemeExtras ??= {}).addEntries(copied);
     }
+    if (src._hasNonDefaultBackground) _hasNonDefaultBackground = true;
+    if (src._hasUnderline) _hasUnderline = true;
+    _revision++;
   }
 
   static int _calcCapacity(int length) {

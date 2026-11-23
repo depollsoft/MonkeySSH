@@ -119,7 +119,10 @@ class SftpFile {
     var bytesRead = 0;
     var nextOutputOffset = offset;
     var pendingReadCount = 0;
-    var activeReadLimit = 1;
+    // Start with up to 8 pipelined reads instead of 1 to avoid wasting several
+    // RTTs ramping up on small/medium files while preserving maxPendingRequests=1
+    // for zero-size/unbounded virtual files.
+    var activeReadLimit = min(maxPendingRequests, 8);
     var effectiveChunkSize = chunkSize;
     var stopScheduling = false;
     var outputEnded = false;
@@ -362,13 +365,25 @@ class SftpFile {
     }
 
     var bytesScheduled = 0;
-    var nextWriteId = 0;
-    final pending = <int, Future<_WriteCompletion>>{};
+    var pendingCount = 0;
     Object? firstError;
     StackTrace? firstErrorStackTrace;
+    Completer<void>? completionSignal;
+
+    void notifyWriteComplete() {
+      final signal = completionSignal;
+      if (signal != null && !signal.isCompleted) {
+        completionSignal = null;
+        signal.complete();
+      }
+    }
+
+    Future<void> waitForWriteComplete() {
+      final signal = completionSignal ??= Completer<void>();
+      return signal.future;
+    }
 
     void scheduleWrite() {
-      final writeId = nextWriteId++;
       final length = min(chunkSize, data.length - bytesScheduled);
       final chunk = Uint8List.sublistView(
         data,
@@ -377,30 +392,35 @@ class SftpFile {
       );
       final writeOffset = offset + bytesScheduled;
       bytesScheduled += length;
+      pendingCount++;
 
-      pending[writeId] = _writeChunk(chunk, offset: writeOffset).then(
-        (_) => _WriteCompletion(writeId),
+      _writeChunk(chunk, offset: writeOffset).then(
+        (_) {
+          pendingCount--;
+          notifyWriteComplete();
+        },
         onError: (Object error, StackTrace stackTrace) {
           firstError ??= error;
           firstErrorStackTrace ??= stackTrace;
-          return _WriteCompletion(writeId);
+          pendingCount--;
+          notifyWriteComplete();
         },
       );
     }
 
     while (bytesScheduled < data.length && firstError == null) {
       while (
-          bytesScheduled < data.length && pending.length < maxPendingRequests) {
+          bytesScheduled < data.length && pendingCount < maxPendingRequests) {
         scheduleWrite();
       }
-
-      final completed = await Future.any(pending.values);
-      pending.remove(completed.id);
+      if (pendingCount >= maxPendingRequests ||
+          (bytesScheduled >= data.length && pendingCount > 0)) {
+        await waitForWriteComplete();
+      }
     }
 
-    while (pending.isNotEmpty) {
-      final completed = await Future.any(pending.values);
-      pending.remove(completed.id);
+    while (pendingCount > 0) {
+      await waitForWriteComplete();
     }
 
     if (firstError != null) {
@@ -474,11 +494,4 @@ class SftpHandsake {
 
   @override
   String toString() => 'SftpHandsake($version, $extensions)';
-}
-
-/// Tracks a pending SFTP read completion for [SftpFile.downloadToRandomAccess].
-class _WriteCompletion {
-  _WriteCompletion(this.id);
-
-  final int id;
 }

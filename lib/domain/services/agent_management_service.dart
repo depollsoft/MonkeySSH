@@ -4,6 +4,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1427,6 +1428,40 @@ class AgentManagementService {
         : const {};
   }
 
+  static String? _cachedUsageProbeSource;
+  static String? _cachedUsageProbeSha256;
+  static final Map<int, String> _remoteCachedUsageProbeSha = <int, String>{};
+
+  Future<({String source, String sha256Hex})> _loadUsageProbeBundle() async {
+    final cachedSource = _cachedUsageProbeSource;
+    final cachedSha = _cachedUsageProbeSha256;
+    if (cachedSource != null && cachedSha != null) {
+      return (source: cachedSource, sha256Hex: cachedSha);
+    }
+    final script = await rootBundle.loadString(
+      'assets/scripts/agent_usage_probe.cjs',
+    );
+    final scriptBytes = utf8.encode(script);
+    final source = base64.encode(scriptBytes);
+    final sha256Hex = sha256.convert(scriptBytes).toString();
+    _cachedUsageProbeSource = source;
+    _cachedUsageProbeSha256 = sha256Hex;
+    return (source: source, sha256Hex: sha256Hex);
+  }
+
+  String _buildCachedPosixUsageCommand({
+    required String sha256Hex,
+    required Map<String, String> agents,
+  }) =>
+      '$_profilePrefix ${buildCachedPosixAgentUsageCommand(sha256Hex: sha256Hex, agents: agents)}';
+
+  String _buildBootstrapPosixUsageCommand({
+    required String source,
+    required String sha256Hex,
+    required Map<String, String> agents,
+  }) =>
+      '$_profilePrefix ${buildBootstrapPosixAgentUsageCommand(source: source, sha256Hex: sha256Hex, agents: agents)}';
+
   Future<Map<String, AgentUsage>> _readUsage(
     SshSession session,
     List<AgentRuntimeInfo> runtimes, {
@@ -1514,18 +1549,23 @@ class AgentManagementService {
     }
     try {
       if (!shouldContinue()) throw const _UsageReadCancelled();
-      final script = await rootBundle.loadString(
-        'assets/scripts/agent_usage_probe.cjs',
-      );
+      final probe = await _loadUsageProbeBundle();
       if (!shouldContinue()) throw const _UsageReadCancelled();
-      final source = base64.encode(utf8.encode(script));
-      final bootstrap =
-          "process.env.MONKEYSSH_USAGE_PROBE='1';"
-          "eval(Buffer.from('$source','base64').toString())";
+      final source = probe.source;
+      final sha256Hex = probe.sha256Hex;
+      final cachedOnRemote =
+          !session.remoteIsWindows &&
+          _remoteCachedUsageProbeSha[session.connectionId] == sha256Hex;
       final command = session.remoteIsWindows
           ? buildWindowsAgentUsageCommand(pending)
-          : '$_profilePrefix ${buildPosixAgentUsageCommand(bootstrap, pending)}';
-      final response = await _run(
+          : cachedOnRemote
+          ? _buildCachedPosixUsageCommand(sha256Hex: sha256Hex, agents: pending)
+          : _buildBootstrapPosixUsageCommand(
+              source: source,
+              sha256Hex: sha256Hex,
+              agents: pending,
+            );
+      var response = await _run(
         session,
         command,
         input: session.remoteIsWindows
@@ -1535,6 +1575,29 @@ class AgentManagementService {
         keepPartialOutputOnTimeout: true,
         shouldContinue: shouldContinue,
       );
+      if (cachedOnRemote &&
+          response.output.contains(posixAgentUsageCacheMissMarker)) {
+        _remoteCachedUsageProbeSha.remove(session.connectionId);
+        if (!shouldContinue()) throw const _UsageReadCancelled();
+        response = await _run(
+          session,
+          _buildBootstrapPosixUsageCommand(
+            source: source,
+            sha256Hex: sha256Hex,
+            agents: pending,
+          ),
+          timeout: _timeouts.install,
+          keepPartialOutputOnTimeout: true,
+          shouldContinue: shouldContinue,
+        );
+      }
+      if (!session.remoteIsWindows &&
+          response.output.contains('__monkeyssh_usage__=')) {
+        if (_remoteCachedUsageProbeSha.length >= 64) {
+          _remoteCachedUsageProbeSha.clear();
+        }
+        _remoteCachedUsageProbeSha[session.connectionId] = sha256Hex;
+      }
       final rawValues = parseAgentUsageOutput(
         response.output,
         checkedAt: _now(),

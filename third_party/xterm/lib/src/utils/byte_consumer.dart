@@ -86,6 +86,36 @@ class ByteConsumer {
     return data[_currentOffset++];
   }
 
+  /// Consumes a maximal contiguous run of printable ASCII code points
+  /// (`0x20..0x7E`) from the front of the current block and passes the slice
+  /// `(data, start, end)` to [onRun]. Returns `true` if at least one byte was
+  /// consumed.
+  @pragma('vm:prefer-inline')
+  bool consumeAsciiRun(
+      void Function(List<int> data, int start, int end) onRun) {
+    var data = _queue.first;
+    while (_currentOffset >= data.length) {
+      _consumed.add(_queue.removeFirst());
+      _currentOffset -= data.length;
+      data = _queue.first;
+    }
+    final start = _currentOffset;
+    final len = data.length;
+    var end = start;
+    while (end < len) {
+      final c = data[end];
+      if (c < 0x20 || c > 0x7E) break;
+      end++;
+    }
+    final count = end - start;
+    if (count == 0) return false;
+    _currentOffset = end;
+    _length -= count;
+    _totalConsumed += count;
+    onRun(data, start, end);
+    return true;
+  }
+
   /// Rolls back the last [n] call.
   void rollback([int n = 1]) {
     _currentOffset -= n;

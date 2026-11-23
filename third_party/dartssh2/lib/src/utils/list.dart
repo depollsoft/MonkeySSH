@@ -3,12 +3,46 @@ import 'dart:math';
 import 'dart:typed_data';
 
 final _secureRandom = Random.secure();
+const _randomPoolSize = 4096;
+final _randomPool = Uint8List(_randomPoolSize);
+var _randomPoolOffset = _randomPoolSize;
+
+void _refillRandomPool() {
+  for (var i = 0; i < _randomPoolSize; i += 4) {
+    final word = _secureRandom.nextInt(0x100000000);
+    _randomPool[i] = word & 0xff;
+    _randomPool[i + 1] = (word >>> 8) & 0xff;
+    _randomPool[i + 2] = (word >>> 16) & 0xff;
+    _randomPool[i + 3] = (word >>> 24) & 0xff;
+  }
+  _randomPoolOffset = 0;
+}
+
+/// Fills [target] from [offset] for [length] bytes with cryptographically
+/// secure random bytes drawn from a batched CSPRNG pool.
+void fillRandomBytes(Uint8List target, int offset, int length) {
+  var written = 0;
+  while (written < length) {
+    if (_randomPoolOffset >= _randomPoolSize) {
+      _refillRandomPool();
+    }
+    final available = _randomPoolSize - _randomPoolOffset;
+    final take =
+        (length - written) < available ? (length - written) : available;
+    target.setRange(
+      offset + written,
+      offset + written + take,
+      _randomPool,
+      _randomPoolOffset,
+    );
+    _randomPoolOffset += take;
+    written += take;
+  }
+}
 
 Uint8List randomBytes(int length) {
   final bytes = Uint8List(length);
-  for (var i = 0; i < length; i++) {
-    bytes[i] = _secureRandom.nextInt(256);
-  }
+  fillRandomBytes(bytes, 0, length);
   return bytes;
 }
 

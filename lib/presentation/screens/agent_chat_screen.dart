@@ -1374,10 +1374,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     );
   }
 
+  static final _nativePreviewMarkdownPunctuationPattern = RegExp('[`*_>#]');
+  static final _nativePreviewWhitespacePattern = RegExp(r'\s+');
+
   String _boundedNativePreviewText(String value) {
     final normalized = value
-        .replaceAll(RegExp('[`*_>#]'), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(_nativePreviewMarkdownPunctuationPattern, '')
+        .replaceAll(_nativePreviewWhitespacePattern, ' ')
         .trim();
     if (normalized.length <= 180) return normalized;
     return '${normalized.substring(0, 179)}…';

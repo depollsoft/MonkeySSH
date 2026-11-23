@@ -1,7 +1,9 @@
 import 'package:dartssh2/src/algorithm/ssh_cipher_type.dart';
+import 'package:dartssh2/src/algorithm/ssh_compression_type.dart';
 import 'package:dartssh2/src/algorithm/ssh_hostkey_type.dart';
 import 'package:dartssh2/src/algorithm/ssh_kex_type.dart';
 import 'package:dartssh2/src/algorithm/ssh_mac_type.dart';
+import 'package:dartssh2/src/utils/ssh_compression.dart';
 
 abstract class SSHAlgorithm {
   /// The name of the algorithm.
@@ -42,6 +44,14 @@ class SSHAlgorithms {
 
   /// Algorithm used for the authentication.
   final List<SSHMacType> mac;
+
+  /// Algorithm used for transport compression. When `null`, uses
+  /// [defaultSSHCompressionAlgorithms] (`zlib@openssh.com`, `none` on IO).
+  final List<SSHCompressionType>? compression;
+
+  /// Resolved compression preference list for the current platform.
+  List<SSHCompressionType> get effectiveCompression =>
+      compression ?? defaultSSHCompressionAlgorithms;
 
   /// Creates an algorithm preference set.
   ///
@@ -87,5 +97,6 @@ class SSHAlgorithms {
       SSHMacType.hmacSha512,
       SSHMacType.hmacSha1,
     ],
+    this.compression,
   });
 }

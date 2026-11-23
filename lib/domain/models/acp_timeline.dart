@@ -191,6 +191,23 @@ final class AcpMessageEntry extends AcpTimelineEntry {
             extensions: last.extensions,
           )
         : null;
+    if (merged != null && last is AcpTextContent && block is AcpTextContent) {
+      // Seed the merged block's cached byte count in O(1) from the previous
+      // block + delta so streaming thousands of chunks never rescans the
+      // growing string. Skip when a split UTF-16 surrogate pair straddles the
+      // join boundary so the fallback recomputes exact UTF-8 bytes.
+      final straddlesSurrogate =
+          last.text.isNotEmpty &&
+          block.text.isNotEmpty &&
+          (last.text.codeUnitAt(last.text.length - 1) & 0xFC00) == 0xD800;
+      if (!straddlesSurrogate) {
+        final prevBytes = _contentBlockByteCache[last];
+        if (prevBytes != null) {
+          _contentBlockByteCache[merged] =
+              prevBytes + (_jsonStringUtf8ByteLength(block.text) - 2);
+        }
+      }
+    }
     return AcpMessageEntry(
       role: role,
       order: order,
@@ -205,10 +222,17 @@ final class AcpMessageEntry extends AcpTimelineEntry {
   }
 
   static bool _sameTextShape(AcpTextContent a, AcpTextContent b) {
+    if (identical(a.meta, b.meta) &&
+        identical(a.extensions, b.extensions) &&
+        identical(a.annotations, b.annotations)) {
+      return true;
+    }
     const equality = DeepCollectionEquality();
-    return equality.equals(a.meta, b.meta) &&
-        equality.equals(a.extensions, b.extensions) &&
-        equality.equals(a.annotations?.toJson(), b.annotations?.toJson());
+    return (identical(a.meta, b.meta) || equality.equals(a.meta, b.meta)) &&
+        (identical(a.extensions, b.extensions) ||
+            equality.equals(a.extensions, b.extensions)) &&
+        (identical(a.annotations, b.annotations) ||
+            equality.equals(a.annotations?.toJson(), b.annotations?.toJson()));
   }
 
   @override
@@ -412,6 +436,65 @@ const _truncationMarkerText = '\n… (truncated to stay within memory limits)';
 final Expando<int> _contentBlockByteCache = Expando<int>(
   'ACP content block approximate bytes',
 );
+final Expando<int> _timelineEntryByteCache = Expando<int>(
+  'ACP timeline entry approximate bytes',
+);
+
+/// Computes the exact UTF-8 byte length of [text] without allocating a buffer.
+int _utf8ByteLength(String text) {
+  final length = text.length;
+  var bytes = 0;
+  for (var i = 0; i < length; i++) {
+    final unit = text.codeUnitAt(i);
+    if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if ((unit & 0xFC00) == 0xD800 &&
+        i + 1 < length &&
+        (text.codeUnitAt(i + 1) & 0xFC00) == 0xDC00) {
+      bytes += 4;
+      i++;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/// Computes the exact UTF-8 byte length of `jsonEncode(text)` without allocating.
+int _jsonStringUtf8ByteLength(String text) {
+  final length = text.length;
+  var bytes = 2; // surrounding quotes
+  for (var i = 0; i < length; i++) {
+    final unit = text.codeUnitAt(i);
+    if (unit < 0x80) {
+      if (unit >= 0x20 && unit != 0x22 && unit != 0x5C) {
+        bytes += 1;
+      } else if (unit == 0x22 ||
+          unit == 0x5C ||
+          unit == 0x08 ||
+          unit == 0x09 ||
+          unit == 0x0A ||
+          unit == 0x0C ||
+          unit == 0x0D) {
+        bytes += 2;
+      } else {
+        bytes += 6; // \u00xx
+      }
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if ((unit & 0xFC00) == 0xD800 &&
+        i + 1 < length &&
+        (text.codeUnitAt(i + 1) & 0xFC00) == 0xDC00) {
+      bytes += 4;
+      i++;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
 
 /// Approximates the retained byte footprint of [block].
 ///
@@ -423,19 +506,20 @@ int approximateContentBlockBytes(AcpContentBlock block) {
   final cached = _contentBlockByteCache[block];
   if (cached != null) return cached;
   final bytes = switch (block) {
+    AcpTextContent() => _approximateTextContentBytes(block),
     // Base64 image data is ASCII. Avoid materializing another multi-megabyte
     // JSON string solely to estimate images this timeline already retains.
     AcpImageContent() =>
       block.data.length +
-          utf8.encode(block.mimeType).length +
-          utf8.encode(block.uri ?? '').length +
+          _utf8ByteLength(block.mimeType) +
+          _utf8ByteLength(block.uri ?? '') +
           _approximateJsonBytes(block.annotations?.toJson()) +
           _approximateJsonBytes(block.meta) +
           _approximateJsonBytes(block.extensions) +
           256,
     AcpAudioContent() =>
       block.data.length +
-          utf8.encode(block.mimeType).length +
+          _utf8ByteLength(block.mimeType) +
           _approximateJsonBytes(block.annotations?.toJson()) +
           _approximateJsonBytes(block.meta) +
           _approximateJsonBytes(block.extensions) +
@@ -446,9 +530,25 @@ int approximateContentBlockBytes(AcpContentBlock block) {
   return bytes;
 }
 
+int _approximateTextContentBytes(AcpTextContent block) {
+  // Exact match for `{"type":"text","text":<json>}` (23 bytes of JSON framing
+  // around the quoted text string), plus optional annotations/meta/extensions.
+  var bytes = 23 + _jsonStringUtf8ByteLength(block.text);
+  if (block.annotations != null) {
+    bytes += 15 + _approximateJsonBytes(block.annotations!.toJson());
+  }
+  if (block.meta.isNotEmpty) {
+    bytes += 9 + _approximateJsonBytes(block.meta);
+  }
+  if (block.extensions.isNotEmpty) {
+    bytes += _approximateJsonBytes(block.extensions);
+  }
+  return bytes;
+}
+
 int _encodedContentBlockBytes(AcpContentBlock block) {
   try {
-    return utf8.encode(jsonEncode(block.toJson())).length;
+    return _utf8ByteLength(jsonEncode(block.toJson()));
   } on Object {
     return 256;
   }
@@ -462,50 +562,62 @@ int _approximateToolContentBytes(AcpToolContent content) =>
         content,
       ),
       AcpToolDiff(:final path, :final oldText, :final newText) =>
-        utf8.encode(path).length +
-            utf8.encode(oldText ?? '').length +
-            utf8.encode(newText).length,
+        _utf8ByteLength(path) +
+            _utf8ByteLength(oldText ?? '') +
+            _utf8ByteLength(newText),
       AcpToolTerminal(:final terminalId) => terminalId.length + 16,
       AcpUnknownToolContent(:final raw) => _approximateJsonBytes(raw),
     };
 
 int _approximateJsonBytes(Object? value) {
+  if (value == null) return 4;
+  if (value is Map && value.isEmpty) return 2;
+  if (value is List && value.isEmpty) return 2;
+  if (value is String) return _jsonStringUtf8ByteLength(value);
   try {
-    return utf8.encode(jsonEncode(value)).length;
+    return _utf8ByteLength(jsonEncode(value));
   } on Object {
     return 256;
   }
 }
 
-int _approximateMessageBytes(AcpMessageEntry entry) =>
-    (entry.messageId?.length ?? 0) +
-    (entry.parentToolCallId?.length ?? 0) +
-    entry.content.fold<int>(
-      0,
-      (total, block) => total + approximateContentBlockBytes(block),
-    );
+int _approximateMessageBytes(AcpMessageEntry entry) {
+  final cached = _timelineEntryByteCache[entry];
+  if (cached != null) return cached;
+  var total =
+      (entry.messageId?.length ?? 0) + (entry.parentToolCallId?.length ?? 0);
+  for (final block in entry.content) {
+    total += approximateContentBlockBytes(block);
+  }
+  _timelineEntryByteCache[entry] = total;
+  return total;
+}
 
 int _approximateToolLocationBytes(AcpToolLocation location) =>
-    utf8.encode(location.path).length +
+    _utf8ByteLength(location.path) +
     32 +
     _approximateJsonBytes(location.meta) +
     _approximateJsonBytes(location.extensions);
 
-int _approximateToolCallBytes(AcpToolCallEntry entry) =>
-    entry.toolCallId.length +
-    (entry.parentToolCallId?.length ?? 0) +
-    utf8.encode(entry.title ?? '').length +
-    utf8.encode(entry.name ?? '').length +
-    entry.content.fold<int>(
-      0,
-      (total, content) => total + _approximateToolContentBytes(content),
-    ) +
-    entry.locations.fold<int>(
-      0,
-      (total, location) => total + _approximateToolLocationBytes(location),
-    ) +
-    _approximateJsonBytes(entry.rawInput) +
-    _approximateJsonBytes(entry.rawOutput);
+int _approximateToolCallBytes(AcpToolCallEntry entry) {
+  final cached = _timelineEntryByteCache[entry];
+  if (cached != null) return cached;
+  var total =
+      entry.toolCallId.length +
+      (entry.parentToolCallId?.length ?? 0) +
+      _utf8ByteLength(entry.title ?? '') +
+      _utf8ByteLength(entry.name ?? '') +
+      _approximateJsonBytes(entry.rawInput) +
+      _approximateJsonBytes(entry.rawOutput);
+  for (final content in entry.content) {
+    total += _approximateToolContentBytes(content);
+  }
+  for (final location in entry.locations) {
+    total += _approximateToolLocationBytes(location);
+  }
+  _timelineEntryByteCache[entry] = total;
+  return total;
+}
 
 /// Approximates the retained byte footprint of one timeline entry.
 int approximateTimelineEntryBytes(AcpTimelineEntry entry) => switch (entry) {
@@ -769,10 +881,17 @@ class AcpTimelineBuilder {
           open.messageId == messageId &&
           ((messageId != null && parentToolCallId == null) ||
               open.parentToolCallId == parentToolCallId)) {
-        const equality = DeepCollectionEquality();
         final coalesce =
-            equality.equals(update.meta, _openTailMeta) &&
-            equality.equals(update.extensions, _openTailExtensions);
+            (identical(update.meta, _openTailMeta) ||
+                const DeepCollectionEquality().equals(
+                  update.meta,
+                  _openTailMeta,
+                )) &&
+            (identical(update.extensions, _openTailExtensions) ||
+                const DeepCollectionEquality().equals(
+                  update.extensions,
+                  _openTailExtensions,
+                ));
         _replaceEntry(
           openIndex,
           open.appendContent(
@@ -823,10 +942,11 @@ class AcpTimelineBuilder {
     _openTailExtensions = update.extensions;
   }
 
-  /// Cap on one coalesced text block. Keeping several blocks per bounded
-  /// entry lets [_boundedMessageEntry] still drop the oldest text first.
+  /// Cap on one coalesced text block. 4 KiB keeps block counts small while
+  /// bounding per-chunk string concatenation work during high-frequency
+  /// token streaming (8x less copying than 32 KiB).
   int get _maxCoalescedTextChars =>
-      math.min(32 * 1024, _limits.maxEntryBytes ~/ 4);
+      math.min(4 * 1024, _limits.maxEntryBytes ~/ 4);
 
   void _applyToolCall(AcpToolCallUpdate update) {
     if (update.toolCallId.isEmpty) return;

@@ -112,6 +112,11 @@ class AcpTimelineMapperCache {
 }
 
 /// Builds a bounded plain-text preview for Hosts/Connections cards.
+final _previewMarkdownImagePattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
+final _previewWhitespacePattern = RegExp(r'\s+');
+
+/// Summarizes the most recent timeline entries into a compact preview string
+/// for window switchers and attention cards.
 String? buildAcpConversationPreview(
   List<AcpTimelineEntry> entries, {
   int maxLines = 8,
@@ -125,8 +130,8 @@ String? buildAcpConversationPreview(
         ? value
         : value.substring(0, scanLimit);
     return sample
-        .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]+\)'), '[image]')
-        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(_previewMarkdownImagePattern, '[image]')
+        .replaceAll(_previewWhitespacePattern, ' ')
         .trim();
   }
 

@@ -79,7 +79,48 @@ void registerRemoteClipboardSyncServiceTests() {
         final result = RemoteClipboardSyncService.parseReadOutput('not-base64');
         expect(result.supported, isFalse);
         expect(result.text, isEmpty);
+        expect(result.unchanged, isFalse);
       });
+
+      test('parseReadOutput detects unchanged marker', () {
+        final result = RemoteClipboardSyncService.parseReadOutput(
+          RemoteClipboardSyncService.unchangedMarker,
+        );
+        expect(result.supported, isTrue);
+        expect(result.unchanged, isTrue);
+      });
+
+      test('read command with expectedSha256 emits unchanged marker on match', () async {
+        const text = 'clipboard payload with newline\nand unicode ☃';
+        final digest = RemoteClipboardSyncService.computeTextHash(text);
+        final matchCmd =
+            r'pbpaste() { printf %s "$CLIPBOARD_TEXT"; };'
+            '\n${RemoteClipboardSyncService.buildReadCommand(expectedSha256: digest)}';
+        final matchResult = await Process.run(
+          '/bin/sh',
+          ['-c', matchCmd],
+          environment: {'CLIPBOARD_TEXT': text},
+        );
+        expect(matchResult.exitCode, 0, reason: '${matchResult.stderr}');
+        final parsedMatch = RemoteClipboardSyncService.parseReadOutput(
+          matchResult.stdout as String,
+        );
+        expect(parsedMatch.supported, isTrue);
+        expect(parsedMatch.unchanged, isTrue);
+
+        final mismatchResult = await Process.run(
+          '/bin/sh',
+          ['-c', matchCmd],
+          environment: {'CLIPBOARD_TEXT': 'different clipboard'},
+        );
+        expect(mismatchResult.exitCode, 0, reason: '${mismatchResult.stderr}');
+        final parsedMismatch = RemoteClipboardSyncService.parseReadOutput(
+          mismatchResult.stdout as String,
+        );
+        expect(parsedMismatch.supported, isTrue);
+        expect(parsedMismatch.unchanged, isFalse);
+        expect(parsedMismatch.text, 'different clipboard');
+      }, skip: Platform.isWindows);
     });
   });
 }

@@ -1282,6 +1282,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
             _activeWireInputChunk = null;
             _activeWireInputOffset = 0;
             if (_wireInputChunks.isEmpty) {
+              _flushPendingAck();
               _logWireInputBurst();
               return;
             }
@@ -1327,6 +1328,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
           }
           if (turn.elapsed >= _wireInputTimeBudget) break;
         }
+        _flushPendingAck();
         _wireInputPumpYieldCount += 1;
         await Future<void>.delayed(Duration.zero);
       }
@@ -1357,6 +1359,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _wireInputPumpStopwatch = null;
     _wireInputPumpYieldCount = 0;
     _wireInputPumpByteCount = 0;
+    _pendingAckSequence = null;
   }
 
   void _discardWireInput() {
@@ -1368,6 +1371,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _wireInputPumpStopwatch = null;
     _wireInputPumpYieldCount = 0;
     _wireInputPumpByteCount = 0;
+    _pendingAckSequence = null;
   }
 
   Future<void> _handleWireFrame(Uint8List bytes) async {
@@ -1741,7 +1745,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _commitSequence(sequence);
     _forgetAnsweredPrompt(data);
     _deliverOutput(output!);
-    _sendAck(sequence);
+    _pendingAckSequence = sequence;
+    // Flush immediately on JSON-RPC responses (turn/load completions) so
+    // request-response boundaries acknowledge promptly, while coalescing
+    // bursts of streaming notifications to one ack per pump turn.
+    if (data['id'] != null && !data.containsKey('method')) {
+      _flushPendingAck();
+    }
     _finishDirectReplayIfComplete();
   }
 
@@ -2137,6 +2147,17 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       ),
     );
     return false;
+  }
+
+  int? _pendingAckSequence;
+
+  void _flushPendingAck() {
+    final seq = _pendingAckSequence;
+    if (seq == null || _closed || _terminalFailure || !_connected) {
+      return;
+    }
+    _pendingAckSequence = null;
+    _sendAck(seq);
   }
 
   void _sendAck(int sequence) {

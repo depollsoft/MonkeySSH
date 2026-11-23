@@ -65,8 +65,12 @@ class SnippetRepository {
   ///
   /// Returns how many snippets changed. Later runs do nothing, so snippets
   /// written with tokens after the upgrade are never touched.
-  Future<int> escapeLegacyKeyTokens() =>
-      _db.transaction(() => escapeLegacySnippetKeyTokensIn(_db));
+  Future<int> escapeLegacyKeyTokens() async {
+    if (await keyTokensReady()) {
+      return 0;
+    }
+    return _db.transaction(() => escapeLegacySnippetKeyTokensIn(_db));
+  }
 
   /// Whether stored snippets are safe to read with key tokens: the upgrade
   /// in [escapeLegacyKeyTokens] has run. Startup runs it. If it failed there,

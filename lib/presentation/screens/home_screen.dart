@@ -3503,13 +3503,26 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final nativeAcpSessions = _badge.muxBackend == RemoteMuxBackend.monkeyMux
         ? () {
             final manager = ref.watch(acpSessionManagerProvider);
+            final targetHostId = activeSession?.hostId;
+            // Scope rebuilds to non-timeline fields of open mux windows for
+            // this host so streamed text chunks never rebuild home badges.
+            ref.watch(
+              acpSessionManagerStateProvider.select((asyncState) {
+                final sessions =
+                    asyncState.asData?.value.sessions ?? manager.state.sessions;
+                return _HostMuxAcpSessionsDigest.fromSessions(
+                  sessions,
+                  hostId: targetHostId,
+                );
+              }),
+            );
             final managerState =
-                ref.watch(acpSessionManagerStateProvider).asData?.value ??
+                ref.read(acpSessionManagerStateProvider).asData?.value ??
                 manager.state;
             return managerState.sessions
                 .where(
                   (session) =>
-                      session.key.hostId == activeSession?.hostId &&
+                      session.key.hostId == targetHostId &&
                       session.isOpenMuxWindow,
                 )
                 .toList(growable: false);
@@ -4328,4 +4341,56 @@ class _HomeTab {
   final IconData icon;
   final IconData selectedIcon;
   final String label;
+}
+
+@immutable
+final class _HostMuxAcpSessionsDigest {
+  const _HostMuxAcpSessionsDigest(this.entries);
+
+  factory _HostMuxAcpSessionsDigest.fromSessions(
+    List<AcpSessionState> sessions, {
+    required int? hostId,
+  }) => _HostMuxAcpSessionsDigest([
+    for (final session in sessions)
+      if (session.key.hostId == hostId && session.isOpenMuxWindow)
+        (
+          session.key,
+          session.status,
+          session.attached,
+          session.promptStatus,
+          session.title,
+          session.providerLabel,
+          session.cwd,
+          session.pendingAuthentication,
+          session.error,
+          session.pendingPermissions.length,
+          session.pendingPermissions.firstOrNull?.requestKey,
+          session.pendingWrites.length,
+          session.pendingWrites.firstOrNull?.requestKey,
+          session.pendingElicitations.length,
+          session.pendingElicitations.firstOrNull?.requestKey,
+          session.awaitingElicitations.length,
+          AcpActivitySnapshot.fromSession(session),
+          session.remoteWriter != null,
+          session.usage,
+        ),
+  ]);
+
+  final List<Object?> entries;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! _HostMuxAcpSessionsDigest ||
+        entries.length != other.entries.length) {
+      return false;
+    }
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] != other.entries[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAll(entries);
 }

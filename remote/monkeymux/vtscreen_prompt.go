@@ -389,6 +389,14 @@ func (l *vtScrollbackLine) decode(decoder *vtLineDecoder, width int) []vtCell {
 	return cells
 }
 
+func (l *vtScrollbackLine) decodeInto(decoder *vtLineDecoder, width int, dst []vtCell) []vtCell {
+	cells := decoder.decodeInto(l.text, width, dst)
+	for i := 0; i < len(l.sem) && i < len(cells); i++ {
+		cells[i].sem = l.sem[i]
+	}
+	return cells
+}
+
 func vtRowHasText(row []vtCell) bool {
 	for _, cell := range row {
 		if cell.r != 0 || len(cell.comb) > 0 {
