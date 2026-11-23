@@ -381,6 +381,14 @@ void main() {
         isNot(contains(r'send-keys -t "$pane" -H 1b 5b 3f 39 39 37')),
       );
       expect(command, isNot(contains(r'send-keys -t "$pane" -H 1b 5d')));
+      expect(
+        command,
+        contains(
+          r"tmux -u if-shell -F -t 'dev'\''s session' "
+          "'#{==:#{allow-passthrough},off}' "
+          "'set-option -gq allow-passthrough on' 2>/dev/null || true;",
+        ),
+      );
       expect(command, contains(r"tmux -u list-clients -t 'dev'\''s session'"));
     });
 
@@ -391,6 +399,16 @@ void main() {
         extraFlags: '-S /tmp/tmux-socket -x 160 -L alerts',
       );
 
+      expect(
+        command,
+        contains(
+          'tmux -u -S '
+          "'/tmp/tmux-socket' -L 'alerts' "
+          "if-shell -F -t 'main' "
+          "'#{==:#{allow-passthrough},off}' "
+          "'set-option -gq allow-passthrough on'",
+        ),
+      );
       expect(
         command,
         contains(

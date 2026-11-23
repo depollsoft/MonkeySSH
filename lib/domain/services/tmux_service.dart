@@ -2964,9 +2964,20 @@ String buildTmuxRefreshTerminalThemeCommand(
     extraFlags: extraFlags,
     forceUtf8: true,
   );
+  // Allow visible panes to pass Kitty graphics APC sequences through tmux when
+  // allow-passthrough is still at its `off` default. Checking for `off` avoids
+  // downgrading a user's `all` setting, and `-gq` keeps tmux < 3.3 quiet.
+  final enableAllowPassthrough = TmuxService._tmuxCommand(
+    'if-shell -F -t ${shellEscapePosix(sessionName)} '
+    "'#{==:#{allow-passthrough},off}' "
+    "'set-option -gq allow-passthrough on'",
+    extraFlags: extraFlags,
+    forceUtf8: true,
+  );
 
   return r'SEP=$(printf "\037"); '
       '$enableFocusEvents 2>/dev/null || true; '
+      '$enableAllowPassthrough 2>/dev/null || true; '
       '$loadThemeReportClients '
       'flutty_set_agent_tool_from_command_name() { '
       r'case "${1##*/}" in '

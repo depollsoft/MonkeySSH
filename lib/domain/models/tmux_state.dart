@@ -1309,6 +1309,13 @@ const tmuxDisableStatusBarCommand = r'\; set status off';
 /// tmux command fragment that lets focus-aware TUIs receive focus events.
 const tmuxEnableFocusEventsCommand = r'\; set-option -g focus-events on';
 
+/// tmux command fragment that enables passthrough for visible panes when tmux
+/// is still at its `off` default, preserving `all` and staying a no-op on tmux
+/// builds older than 3.3.
+const tmuxEnableAllowPassthroughCommand =
+    r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+    "'set-option -gq allow-passthrough on'";
+
 /// Builds a `tmux new-session` command from structured configuration.
 ///
 /// Always uses `-A` (attach-or-create) so reconnecting reuses the session.
@@ -1325,6 +1332,7 @@ String buildTmuxCommand({
     // Extra flags are intentionally raw user input; never populate from imports.
     if (extraFlags != null && extraFlags.trim().isNotEmpty) extraFlags.trim(),
     tmuxEnableFocusEventsCommand,
+    tmuxEnableAllowPassthroughCommand,
   ];
   return parts.join(' ');
 }
