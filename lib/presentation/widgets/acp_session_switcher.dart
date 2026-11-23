@@ -432,30 +432,40 @@ final class _AcpSwitcherSessionsDigest {
 
   factory _AcpSwitcherSessionsDigest.fromSessions(
     List<AcpSessionState> sessions,
-  ) => _AcpSwitcherSessionsDigest([
-    for (final session in sessions)
-      (
-        session.key,
-        session.status,
-        session.attached,
-        session.promptStatus,
-        session.title,
-        session.providerLabel,
-        session.cwd,
-        session.createdAt,
-        session.pendingAuthentication,
-        session.error,
-        session.pendingPermissions.length,
-        session.pendingPermissions.firstOrNull?.requestKey,
-        session.pendingWrites.length,
-        session.pendingWrites.firstOrNull?.requestKey,
-        session.pendingElicitations.length,
-        session.pendingElicitations.firstOrNull?.requestKey,
-        session.awaitingElicitations.length,
-        AcpActivitySnapshot.fromSession(session),
-        session.remoteWriter != null,
-      ),
-  ]);
+  ) {
+    // Capture exact live-session recency order so any session overtaking
+    // another immediately reorders the switcher, while bucketing timestamps
+    // to 5s + rendered relative-time labels avoids per-token rebuilds.
+    final sortedByActivity = [...sessions]
+      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
+    return _AcpSwitcherSessionsDigest([
+      for (final session in sortedByActivity) session.key,
+      for (final session in sessions)
+        (
+          session.key,
+          session.status,
+          session.attached,
+          session.promptStatus,
+          session.title,
+          session.providerLabel,
+          session.cwd,
+          session.createdAt,
+          session.lastActivityAt.millisecondsSinceEpoch ~/ 5000,
+          acpRelativeTime(session.lastActivityAt),
+          session.pendingAuthentication,
+          session.error,
+          session.pendingPermissions.length,
+          session.pendingPermissions.firstOrNull?.requestKey,
+          session.pendingWrites.length,
+          session.pendingWrites.firstOrNull?.requestKey,
+          session.pendingElicitations.length,
+          session.pendingElicitations.firstOrNull?.requestKey,
+          session.awaitingElicitations.length,
+          AcpActivitySnapshot.fromSession(session),
+          session.remoteWriter != null,
+        ),
+    ]);
+  }
 
   final List<Object?> entries;
 

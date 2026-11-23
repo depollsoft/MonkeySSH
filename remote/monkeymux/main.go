@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.260"
+	monkeyMuxVersion                  = "0.1.261"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -1217,21 +1217,28 @@ type terminalOutputParserSnapshot struct {
 }
 
 type windowBroadcastIdentity struct {
-	name                  string
-	cwd                   string
-	command               string
-	paneTitle             string
-	agentTool             string
-	agentModelProvider    string
-	agentSessionTitle     string
-	panePid               int
-	alert                 bool
-	progressActive        bool
-	progressState         int
-	progressPercentage    int
-	progressHasPercentage bool
-	programStatus         programStatusSummary
-	programStatusReporter bool
+	name                      string
+	cwd                       string
+	command                   string
+	paneTitle                 string
+	agentTool                 string
+	agentToolConfirmed        bool
+	agentModelProvider        string
+	agentSessionID            string
+	agentSessionDir           string
+	agentSessionPath          string
+	agentSessionIdentityExact bool
+	agentSessionTitle         string
+	nativeAcpBridgeID         string
+	nativeAcpProviderID       string
+	panePid                   int
+	alert                     bool
+	progressActive            bool
+	progressState             int
+	progressPercentage        int
+	progressHasPercentage     bool
+	programStatus             programStatusSummary
+	programStatusReporter     bool
 }
 
 type controlClient struct {
@@ -18016,16 +18023,23 @@ func agentToolFromRetainedMetadata(
 
 func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 	identity := windowBroadcastIdentity{
-		name:               w.name,
-		cwd:                w.cwd,
-		command:            w.currentCommandLocked(),
-		paneTitle:          w.paneTitle,
-		agentTool:          w.agentToolLocked(),
-		agentModelProvider: w.agentModelProvider,
-		agentSessionTitle:  w.agentSessionTitle,
-		panePid:            w.metadataProcessIDLocked(),
-		alert:              w.alert,
-		programStatus:      w.programStatusSummaryLocked(),
+		name:                      w.name,
+		cwd:                       w.cwd,
+		command:                   w.currentCommandLocked(),
+		paneTitle:                 w.paneTitle,
+		agentTool:                 w.agentToolLocked(),
+		agentToolConfirmed:        w.agentToolConfirmedLocked(),
+		agentModelProvider:        w.agentModelProvider,
+		agentSessionID:            w.agentSessionID,
+		agentSessionDir:           w.agentSessionDir,
+		agentSessionPath:          w.agentSessionPath,
+		agentSessionIdentityExact: w.agentSessionIdentityExact,
+		agentSessionTitle:         w.agentSessionTitle,
+		nativeAcpBridgeID:         w.nativeAcpBridgeID,
+		nativeAcpProviderID:       w.nativeAcpProviderID,
+		panePid:                   w.metadataProcessIDLocked(),
+		alert:                     w.alert,
+		programStatus:             w.programStatusSummaryLocked(),
 	}
 	identity.programStatusReporter = w.programStatusReporter != nil
 	if progress := w.terminalProgress; progress != nil {
