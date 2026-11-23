@@ -3006,7 +3006,6 @@ class SshService {
     onUserInfoRequest: onUserInfoRequest,
     identities: identities,
     keepAliveInterval: keepAliveInterval,
-    pipelineChannelRequests: true,
   );
 
   /// Connects a TCP socket with OS-level keepalive enabled so the connection

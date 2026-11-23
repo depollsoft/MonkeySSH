@@ -205,7 +205,6 @@ SSHClient createAgentForwardingSshClient(
   identities: identities,
   keepAliveInterval: keepAliveInterval,
   agentHandler: agentHandler,
-  pipelineChannelRequests: true,
 );
 
 /// Serves the app's keys to one host connection over SSH agent forwarding.

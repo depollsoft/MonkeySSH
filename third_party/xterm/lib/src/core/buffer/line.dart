@@ -58,9 +58,16 @@ class BufferLine with IndexedItem {
   BufferLine(
     this._length, {
     this.isWrapped = false,
-  }) : _data = Uint32List(_calcCapacity(_length) * _cellSize);
+  })  : _highWaterLength = _length,
+        _data = Uint32List(_calcCapacity(_length) * _cellSize);
 
   int _length;
+
+  /// Largest [_length] this line has held since the last full-storage erase.
+  /// Columns in `[_length, _highWaterLength)` may hold retained cells from an
+  /// earlier shrink in [resize], while columns `>= _highWaterLength` are
+  /// guaranteed blank zero-initialized storage.
+  int _highWaterLength;
 
   Uint32List _data;
 
@@ -361,10 +368,22 @@ class BufferLine with IndexedItem {
     final bg = style.background;
     final bgIsNonDefault = (bg & CellColor.typeMask) != CellColor.normal;
     if (start == 0 && end >= _length) {
-      _hasNonDefaultBackground = bgIsNonDefault;
-      _hasUnderline = false;
-      _graphemeExtras?.clear();
       final endWord = end * _cellSize;
+      // resize() retains cells in [_length, _highWaterLength) for later
+      // regrowth. Only reset the full-line hints and clear all grapheme extras
+      // when erasing through every retained column; otherwise preserve hidden
+      // columns' clusters and keep the hints conservative.
+      if (end >= _highWaterLength) {
+        _hasNonDefaultBackground = bgIsNonDefault;
+        _hasUnderline = false;
+        _graphemeExtras?.clear();
+        _highWaterLength = _length;
+      } else {
+        if (bgIsNonDefault) {
+          _hasNonDefaultBackground = true;
+        }
+        _graphemeExtras?.removeWhere((column, _) => column < end);
+      }
       if (bg == 0) {
         _data.fillRange(0, endWord, 0);
       } else {
@@ -516,6 +535,9 @@ class BufferLine with IndexedItem {
     }
 
     _length = length;
+    if (length > _highWaterLength) {
+      _highWaterLength = length;
+    }
     _revision++;
     // A wide glyph left in the only column has no second half until the line
     // grows again, which gives it a new one; one kept past the end would come

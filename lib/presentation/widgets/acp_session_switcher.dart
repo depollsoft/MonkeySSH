@@ -452,6 +452,8 @@ final class _AcpSwitcherSessionsDigest {
         session.pendingElicitations.length,
         session.pendingElicitations.firstOrNull?.requestKey,
         session.awaitingElicitations.length,
+        AcpActivitySnapshot.fromSession(session),
+        session.remoteWriter != null,
       ),
   ]);
 

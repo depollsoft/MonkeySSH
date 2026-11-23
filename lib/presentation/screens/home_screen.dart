@@ -4370,6 +4370,8 @@ final class _HostMuxAcpSessionsDigest {
           session.pendingElicitations.length,
           session.pendingElicitations.firstOrNull?.requestKey,
           session.awaitingElicitations.length,
+          AcpActivitySnapshot.fromSession(session),
+          session.remoteWriter != null,
           session.usage,
         ),
   ]);

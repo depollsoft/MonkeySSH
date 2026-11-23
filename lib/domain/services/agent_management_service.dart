@@ -1466,7 +1466,9 @@ class AgentManagementService {
     return '$_profilePrefix'
         'if command -v node >/dev/null 2>&1; then '
         'if [ -r $cachePath ]; then '
-        'MONKEYSSH_USAGE_PROBE=1 node $cachePath ${_shellQuote(input)} 2>/dev/null; '
+        // Run with MONKEYSSH_USAGE_PROBE=0 so agent_usage_probe.cjs takes its
+        // require.main === module path and decodes process.argv[2] (not argv[1]).
+        'MONKEYSSH_USAGE_PROBE=0 node $cachePath ${_shellQuote(input)} 2>/dev/null; '
         'else printf ${_shellQuote('$_usageProbeCacheMissMarker\\n')}; fi; '
         "else printf '%s\\n' ${missing.join(' ')}; fi";
   }
