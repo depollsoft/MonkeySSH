@@ -28,6 +28,11 @@ class ParagraphCache {
   /// depends on, such as a record of the cell's fields, never a hash of them:
   /// two cells whose hashes collide would share a glyph.
   Paragraph? getLayoutFromCache(Object key) {
+    // Only pay the LinkedHashMap remove+reinsert LRU promotion cost once the
+    // cache is approaching capacity; below 75% full, nothing can be evicted.
+    if (_cache.length < ((_maximumSize * 3) >> 2)) {
+      return _cache[key];
+    }
     final paragraph = _cache.remove(key);
     if (paragraph != null) {
       _cache[key] = paragraph;

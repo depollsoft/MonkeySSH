@@ -15,8 +15,12 @@ import 'package:xterm/src/utils/lookup_table.dart';
 ///  * No internal state. Same input will always produce same output.
 class EscapeParser {
   final EscapeHandler handler;
+  final BulkAsciiEscapeHandler? _bulkAsciiHandler;
 
-  EscapeParser(this.handler);
+  EscapeParser(this.handler)
+      : _bulkAsciiHandler = handler is BulkAsciiEscapeHandler
+            ? handler as BulkAsciiEscapeHandler
+            : null;
 
   final _queue = ByteConsumer();
 
@@ -33,11 +37,18 @@ class EscapeParser {
   }
 
   void _process() {
+    final bulkHandler = _bulkAsciiHandler;
     while (_queue.isNotEmpty) {
+      if (bulkHandler != null &&
+          _queue.consumeAsciiRun(bulkHandler.writeAsciiRun)) {
+        continue;
+      }
       final tokenBegin = _queue.totalConsumed;
       final char = _queue.consume();
 
-      if (char == Ascii.ESC) {
+      if (char >= 0x20 && char <= 0x7E) {
+        handler.writeChar(char);
+      } else if (char == Ascii.ESC) {
         final processed = _processEscape();
         if (!processed) {
           _queue.rollback(_queue.totalConsumed - tokenBegin);

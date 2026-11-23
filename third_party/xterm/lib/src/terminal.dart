@@ -78,7 +78,9 @@ const _kittyPasteEventsMode = 5522;
 /// [buffer] and events such as [onTitleChange] or [onBell], as well as
 /// translating user input into escape sequences that the application can
 /// understand.
-class Terminal with Observable implements TerminalState, EscapeHandler {
+class Terminal
+    with Observable
+    implements TerminalState, EscapeHandler, BulkAsciiEscapeHandler {
   /// The number of lines that the scrollback buffer can hold. If the buffer
   /// exceeds this size, the lines at the top of the buffer will be removed.
   final int maxLines;
@@ -778,6 +780,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   /* Handlers */
+
+  @override
+  void writeAsciiRun(List<int> units, int start, int end) {
+    if (start >= end) return;
+    _pendingKittyPlaceholder = null;
+    _buffer.writeAsciiRun(units, start, end);
+    _precedingCodepoint = _buffer.charset.translate(units[end - 1]);
+  }
 
   @override
   void writeChar(int char) {
