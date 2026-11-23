@@ -908,14 +908,23 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _resetTouchScrollDispatch();
     }
     if (oldWidget.scrollResetGeneration != widget.scrollResetGeneration) {
-      _wheelCalibrator.reset();
-      _cancelDirectTouchScrollDrag();
-      _stopTouchScrollInertia();
-      _resetTouchScrollDispatch();
+      resetWheelScrollCalibration();
     }
     _shortcutManager.shortcuts = widget.shortcuts ?? defaultTerminalShortcuts;
     super.didUpdateWidget(oldWidget);
     _syncGraphicsAnimationTicker();
+  }
+
+  /// Resets wheel-scroll calibration and transient touch-scroll state.
+  ///
+  /// Pass [forgetEstimate] as true when the viewport switches to a different
+  /// remote program (such as another tmux or MonkeyMux window) without
+  /// replacing [MonkeyTerminalView.terminal].
+  void resetWheelScrollCalibration({bool forgetEstimate = false}) {
+    _wheelCalibrator.reset(forgetEstimate: forgetEstimate);
+    _cancelDirectTouchScrollDrag();
+    _stopTouchScrollInertia();
+    _resetTouchScrollDispatch();
   }
 
   @override

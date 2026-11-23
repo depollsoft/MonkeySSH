@@ -3,9 +3,10 @@ import 'package:xterm/core.dart';
 /// Sends terminal scroll mouse input with corrected SGR wheel button IDs.
 ///
 /// SGR reports from a touch drag ([fromTouch]) write the column with a
-/// leading zero. Every SGR parser reads the same column, but the MonkeyMux Pi
-/// extension uses it to tell touch drags, whose distance the client already
-/// calibrates, from mouse wheel notches that Pi may accelerate.
+/// leading zero. Every SGR parser reads the same column, while MonkeyMux uses
+/// it to tell touch drags, whose distance the client already owns, from
+/// desktop mouse wheel notches (exempting Pi from wheel acceleration and
+/// enabling Copilot CLI's single-row Alt-wheel step).
 bool sendTerminalScrollMouseInput({
   required Terminal terminal,
   required TerminalMouseButton button,

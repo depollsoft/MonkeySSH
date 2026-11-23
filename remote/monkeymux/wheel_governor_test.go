@@ -685,3 +685,93 @@ func TestWheelGovernorsArePerWindow(t *testing.T) {
 		t.Fatal("second window did not flush its own debt")
 	}
 }
+
+func TestCopilotTouchWheelModifier(t *testing.T) {
+	profile := agentRegistry["copilot"].wheelProfile
+	if profile == nil {
+		t.Fatal("copilot wheelProfile is nil")
+	}
+	now := time.Unix(100, 0)
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{name: "touch wheel up", in: "\x1b[<64;012;34M", want: "\x1b[<72;012;34M"},
+		{name: "touch wheel down", in: "\x1b[<65;012;34M", want: "\x1b[<73;012;34M"},
+		{name: "touch col 01", in: "\x1b[<64;01;1M", want: "\x1b[<72;01;1M"},
+		{name: "touch shift wheel up", in: "\x1b[<68;012;34M", want: "\x1b[<76;012;34M"},
+		{name: "touch already alt", in: "\x1b[<72;012;34M", want: "\x1b[<72;012;34M"},
+		{name: "batched touch reports", in: "\x1b[<64;012;34M\x1b[<64;012;34M\x1b[<65;012;34M", want: "\x1b[<72;012;34M\x1b[<72;012;34M\x1b[<73;012;34M"},
+		{name: "desktop wheel up unchanged", in: "\x1b[<64;12;34M", want: "\x1b[<64;12;34M"},
+		{name: "desktop wheel down unchanged", in: "\x1b[<65;12;34M", want: "\x1b[<65;12;34M"},
+		{name: "x10 wheel unchanged", in: "\x1b[M`+,", want: "\x1b[M`+,"},
+		{name: "horizontal wheel and click unchanged", in: "\x1b[<66;012;34M\x1b[<67;012;34M\x1b[<0;012;34M\x1b[<64;012;34m", want: "\x1b[<66;012;34M\x1b[<67;012;34M\x1b[<0;012;34M\x1b[<64;012;34m"},
+		{name: "mixed text and reports", in: "a\x1b[<64;012;34M\x1b[<64;12;34Mb", want: "a\x1b[<72;012;34M\x1b[<64;12;34Mb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := wheelGovernor{profile: profile}
+			if got := string(g.process([]byte(tc.in), now)); got != tc.want {
+				t.Fatalf("process(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if g.owed != 0 {
+				t.Fatalf("owed = %d, want 0", g.owed)
+			}
+		})
+	}
+
+	// A touch report split across writes is reassembled and rewritten.
+	g := wheelGovernor{profile: profile}
+	if got := string(g.process([]byte("\x1b[<64;01"), now)); got != "" {
+		t.Fatalf("first half = %q, want empty", got)
+	}
+	if got := string(g.process([]byte("2;34M"), now)); got != "\x1b[<72;012;34M" {
+		t.Fatalf("second half = %q, want rewritten report", got)
+	}
+}
+
+func TestWriteWindowCopilotTouchWheelGating(t *testing.T) {
+	const touchUp = "\x1b[<64;012;34M"
+	const touchUpAlt = "\x1b[<72;012;34M"
+	const desktopUp = "\x1b[<64;12;34M"
+
+	for _, tc := range []struct {
+		name, tool             string
+		mouse, paste, response bool
+		in, want               string
+	}{
+		{name: "copilot touch", tool: "copilot", mouse: true, in: touchUp, want: touchUpAlt},
+		{name: "copilot desktop", tool: "copilot", mouse: true, in: desktopUp, want: desktopUp},
+		{name: "copilot no mouse", tool: "copilot", mouse: false, in: touchUp, want: touchUp},
+		{name: "copilot bracketed paste", tool: "copilot", mouse: true, paste: true, in: touchUp, want: touchUp},
+		{name: "copilot response", tool: "copilot", mouse: true, response: true, in: touchUp, want: touchUp},
+		{name: "claude touch unchanged", tool: "claude", mouse: true, in: touchUp, want: touchUp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := installWheelTestClock(t)
+			server, window, pty := newWheelTestWindow(tc.tool, tc.mouse)
+			if err := server.writeWindowData(window.id, []byte(tc.in), tc.paste, tc.response); err != nil {
+				t.Fatal(err)
+			}
+			if got := pty.String(); got != tc.want {
+				t.Fatalf("PTY = %q, want %q", got, tc.want)
+			}
+			if len(clock.timers) != 0 || window.wheelGovernor.owed != 0 {
+				t.Fatalf("unexpected flush state: timers=%d owed=%d", len(clock.timers), window.wheelGovernor.owed)
+			}
+		})
+	}
+
+	// A lone Escape on a copilot window still expires as ordinary input.
+	clock := installWheelTestClock(t)
+	server, window, pty := newWheelTestWindow("copilot", true)
+	if err := server.writeWindowInput(window.id, []byte("\x1b"), false); err != nil {
+		t.Fatal(err)
+	}
+	if pty.String() != "" || len(clock.timers) != 1 || clock.timers[0].due != clock.now.Add(wheelCarryExpiry) {
+		t.Fatalf("held Escape: pty=%q timers=%d", pty.String(), len(clock.timers))
+	}
+	clock.now = clock.timers[0].due
+	clock.timers[0].action()
+	if got := pty.String(); got != "\x1b" {
+		t.Fatalf("expired Escape: pty=%q, want Escape", got)
+	}
+}

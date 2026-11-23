@@ -118,6 +118,13 @@ var agentRegistry = map[string]agentDescriptor{
 		nativeTitle: func(state *nativeAgentTitleState, home, sessionID string, _ time.Time) string {
 			return state.copilot.title(home, sessionID)
 		},
+		// Copilot CLI moves three rows per plain wheel report and one row when
+		// Alt (SGR bit 8) is set. Setting Alt on touch-marked SGR reports gives
+		// touch drags one-row tracking while leaving desktop mouse wheels at
+		// Copilot's three-row step.
+		wheelProfile: &wheelAccelerationProfile{
+			touchWheelModifier: 8,
+		},
 	},
 	"codex": {
 		commandNames:      []string{"codex", "codex-cli"},

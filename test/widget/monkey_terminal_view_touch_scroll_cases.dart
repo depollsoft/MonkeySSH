@@ -1384,6 +1384,97 @@ void registerMonkeyTerminalViewTouchScrollTests() {
       expect(scrollable.physics, isNull);
     });
 
+    testWidgets(
+      'resetWheelScrollCalibration forgets prior window cadence without remounting',
+      (tester) async {
+        final terminal = Terminal()
+          ..useAltBuffer()
+          ..setMouseMode(MouseMode.upDownScrollMove)
+          ..setMouseReportMode(MouseReportMode.sgr);
+        var topRow = 40;
+        var rowsPerWheel = 1;
+        var wheelCount = 0;
+        terminal.onOutput = (data) {
+          final upMatches = RegExp(r'\x1b\[<64;').allMatches(data).length;
+          if (upMatches == 0) {
+            return;
+          }
+          wheelCount += upMatches;
+          topRow -= upMatches * rowsPerWheel;
+          _renderAdaptiveScrollRows(terminal, topRow);
+        };
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SizedBox(
+              width: 300,
+              height: 240,
+              child: MonkeyTerminalView(
+                terminal,
+                hardwareKeyboardOnly: true,
+                touchScrollToTerminal: true,
+                simulateScroll: false,
+                forceSgrTouchScroll: true,
+              ),
+            ),
+          ),
+        );
+        _renderAdaptiveScrollRows(terminal, topRow);
+        await tester.pump();
+
+        final state = tester.state<MonkeyTerminalViewState>(
+          find.byType(MonkeyTerminalView),
+        );
+        final lineHeight = state.renderTerminal.lineHeight;
+        final detector = tester.widget<MonkeyTerminalGestureDetector>(
+          find.byType(MonkeyTerminalGestureDetector),
+        );
+
+        Future<void> dragUpRows(int rows) async {
+          detector.onTouchScrollStart!(
+            DragStartDetails(
+              kind: PointerDeviceKind.touch,
+              localPosition: const Offset(150, 100),
+            ),
+          );
+          detector.onTouchScrollUpdate!(
+            DragUpdateDetails(
+              kind: PointerDeviceKind.touch,
+              globalPosition: Offset(150, 100 + lineHeight * rows),
+              localPosition: Offset(150, 100 + lineHeight * rows),
+              delta: Offset(0, lineHeight * rows),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 80));
+          await tester.pumpAndSettle();
+        }
+
+        // Window 1 moves one row per wheel report.
+        await dragUpRows(5);
+        expect(wheelCount, 5);
+
+        // Switching mux windows keeps the same Terminal and mouse mode while
+        // switching to a three-row responder. Resetting calibration must drop
+        // the prior one-row estimate and re-measure three rows per event.
+        rowsPerWheel = 3;
+        wheelCount = 0;
+        state.resetWheelScrollCalibration(forgetEstimate: true);
+        expect(state.mounted, isTrue);
+
+        await dragUpRows(9);
+        expect(wheelCount, 3);
+
+        // Switching back to a one-row responder must likewise re-measure one
+        // row per event instead of staying throttled at three.
+        rowsPerWheel = 1;
+        wheelCount = 0;
+        state.resetWheelScrollCalibration(forgetEstimate: true);
+
+        await dragUpRows(4);
+        expect(wheelCount, 4);
+      },
+    );
+
     testWidgets('scroll reset clears pending touch scroll distance', (
       tester,
     ) async {
