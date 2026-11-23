@@ -549,6 +549,39 @@ String buildGitFileDiffScript({
   return _gitScript(marker, [cd, printDiff, '$diff 2>/dev/null', printExit]);
 }
 
+const _gitUntrackedCountPythonScript = r'''
+import os,sys
+out=sys.stdout.buffer
+for f in sys.argv[1:]:
+  try:
+    if os.path.islink(f):
+      out.write(b"1\t0\t"+os.fsencode(f)+b"\0")
+      continue
+    if not os.path.isfile(f):
+      continue
+    with open(f,"rb") as fp:
+      head=fp.read(8000)
+      if b"\0" in head:
+        out.write(b"-\t-\t"+os.fsencode(f)+b"\0")
+        continue
+      if not head:
+        out.write(b"0\t0\t"+os.fsencode(f)+b"\0")
+        continue
+      lines=head.count(b"\n")
+      last=head[-1]
+      while True:
+        chunk=fp.read(65536)
+        if not chunk:
+          break
+        lines+=chunk.count(b"\n")
+        last=chunk[-1]
+      if last!=10:
+        lines+=1
+      out.write(f"{lines}\t0\t".encode()+os.fsencode(f)+b"\0")
+  except OSError:
+    pass
+''';
+
 /// Builds the read-only `/bin/sh` script that prints numstat for each
 /// untracked path against `/dev/null`, or null when [paths] is empty.
 ///
@@ -584,12 +617,19 @@ String buildGitFileDiffScript({
     script: _gitScript(marker, [
       'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || exit 0',
       r"""printf '%s:counts\n' "$m" """,
-      'for f in ${quoted.join(' ')}; do',
+      // Count all untracked files in a single process when python3 is
+      // available (~50x faster than forking `git diff --no-index` per file),
+      // matching git's NUL-in-first-8000-bytes binary heuristic and line rules.
+      'if command -v python3 >/dev/null 2>&1; then',
+      "  python3 -c '$_gitUntrackedCountPythonScript' -- ${quoted.join(' ')} 2>/dev/null",
+      'else',
+      '  for f in ${quoted.join(' ')}; do',
       // A symlink to a directory adds one line, its target.
-      r'''  if [ -L "$f" ] && [ -d "$f" ]; then printf '1\t0\t%s\0' "$f"''',
-      '  else $_gitDiff --no-index --numstat -z -- /dev/null "\$f" 2>/dev/null',
-      '  fi',
-      'done',
+      r'''    if [ -L "$f" ] && [ -d "$f" ]; then printf '1\t0\t%s\0' "$f"''',
+      '    else $_gitDiff --no-index --numstat -z -- /dev/null "\$f" 2>/dev/null',
+      '    fi',
+      '  done',
+      'fi',
       r"""printf '\n%s:end\n' "$m" """,
     ]),
     marker: marker,

@@ -462,6 +462,12 @@ class AppDatabase extends _$AppDatabase {
     beforeOpen: (details) async {
       final databaseFileFuture = _databaseFileFuture;
       if (databaseFileFuture != null) {
+        // WAL + synchronous=NORMAL removes per-write fsync UI-thread stalls on
+        // iOS/macOS (where Drift runs on the main isolate) and speeds up
+        // concurrent reads/writes across all platforms.
+        await customStatement('PRAGMA journal_mode = WAL');
+        await customStatement('PRAGMA synchronous = NORMAL');
+        await customStatement('PRAGMA busy_timeout = 5000');
         await _applyDatabaseFilePolicy(
           await databaseFileFuture,
           applyFilePolicy: _appleDatabaseFilePolicyApplier,

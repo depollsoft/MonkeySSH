@@ -624,13 +624,80 @@ bool _waitsOnHostRequest(AcpSessionState session, AttentionReason reason) =>
       _ => false,
     };
 
+/// Value-equal projection of the ACP session fields that affect
+/// [waitingOnYouProvider], intentionally excluding streaming timeline content
+/// so streamed text chunks never rebuild waiting-on-you consumers.
+@immutable
+final class _WaitingOnYouSessionsDigest {
+  const _WaitingOnYouSessionsDigest(this.entries);
+
+  factory _WaitingOnYouSessionsDigest.fromSessions(
+    List<AcpSessionState> sessions,
+  ) => _WaitingOnYouSessionsDigest([
+    for (final session in sessions)
+      (
+        session.key,
+        session.status,
+        session.attached,
+        session.promptStatus,
+        session.title,
+        session.providerLabel,
+        session.cwd,
+        session.pendingAuthentication,
+        session.error,
+        session.pendingPermissions.length,
+        session.pendingPermissions.firstOrNull?.requestKey,
+        session.pendingWrites.length,
+        session.pendingWrites.firstOrNull?.requestKey,
+        session.pendingElicitations.length,
+        session.pendingElicitations.firstOrNull?.requestKey,
+        session.awaitingElicitations.length,
+        // Include lastActivityAt only when a session might be waiting, so
+        // ordinary live streaming ticks keep the digest unchanged.
+        (!session.isLive ||
+                session.pendingPermissions.isNotEmpty ||
+                session.pendingWrites.isNotEmpty ||
+                session.pendingElicitations.isNotEmpty ||
+                session.pendingAuthentication ||
+                session.error != null)
+            ? session.lastActivityAt
+            : null,
+      ),
+  ]);
+
+  final List<Object?> entries;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! _WaitingOnYouSessionsDigest ||
+        entries.length != other.entries.length) {
+      return false;
+    }
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] != other.entries[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAll(entries);
+}
+
 /// Native sessions waiting on the user across every connected host.
 ///
 /// Watching this starts [connectionBridgeMetadataProvider] polling.
 final waitingOnYouProvider = Provider.autoDispose<WaitingOnYouSnapshot>((ref) {
   final manager = ref.watch(acpSessionManagerProvider);
+  ref.watch(
+    acpSessionManagerStateProvider.select(
+      (asyncState) => _WaitingOnYouSessionsDigest.fromSessions(
+        asyncState.asData?.value.sessions ?? manager.state.sessions,
+      ),
+    ),
+  );
   final sessions =
-      ref.watch(acpSessionManagerStateProvider).asData?.value.sessions ??
+      ref.read(acpSessionManagerStateProvider).asData?.value.sessions ??
       manager.state.sessions;
   final bridges = ref.watch(connectionBridgeMetadataProvider);
   final states = ref.watch(activeSessionsProvider);

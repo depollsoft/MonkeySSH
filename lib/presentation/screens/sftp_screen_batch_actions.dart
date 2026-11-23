@@ -132,15 +132,47 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     _filterQuery = query;
     if (_filterController.text != query) _filterController.text = query;
     if (remembered != null && query.isEmpty && leavingAppliedFilter) {
-      _rememberFilter(null);
+      _rememberFilter(null, immediate: true);
     }
   }
 
-  void _rememberFilter(SftpBrowserFilter? filter) {
+  void _rememberFilter(SftpBrowserFilter? filter, {bool immediate = false}) {
     _rememberedFilter = filter;
+    final store = ref.read(sftpBrowserViewStoreProvider);
+    _filterSaveDebounceTimer?.cancel();
+    _filterSaveDebounceTimer = null;
+    if (immediate) {
+      _hasPendingFilterSave = false;
+      _pendingFilterStore = null;
+      _pendingFilterToSave = null;
+      _persistFilter(store, filter);
+      return;
+    }
+    _pendingFilterStore = store;
+    _pendingFilterToSave = filter;
+    _hasPendingFilterSave = true;
+    _filterSaveDebounceTimer = Timer(
+      const Duration(milliseconds: 250),
+      _flushPendingFilterSave,
+    );
+  }
+
+  void _flushPendingFilterSave() {
+    _filterSaveDebounceTimer?.cancel();
+    _filterSaveDebounceTimer = null;
+    if (!_hasPendingFilterSave) return;
+    final store = _pendingFilterStore;
+    final filter = _pendingFilterToSave;
+    _hasPendingFilterSave = false;
+    _pendingFilterStore = null;
+    _pendingFilterToSave = null;
+    if (store == null) return;
+    _persistFilter(store, filter);
+  }
+
+  void _persistFilter(SftpBrowserViewStore store, SftpBrowserFilter? filter) {
     unawaited(
-      ref
-          .read(sftpBrowserViewStoreProvider)
+      store
           .saveFilter(widget.hostId, filter)
           .then<void>(
             (_) {},

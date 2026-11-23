@@ -1110,6 +1110,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _remoteClipboardUnsupported = false;
   String? _lastObservedLocalClipboardText;
   String? _lastObservedRemoteClipboardText;
+  String? _lastObservedRemoteClipboardSha256;
+
+  void _setLastObservedRemoteClipboardText(String? text) {
+    if (_lastObservedRemoteClipboardText == text) {
+      return;
+    }
+    _lastObservedRemoteClipboardText = text;
+    _lastObservedRemoteClipboardSha256 = text == null
+        ? null
+        : RemoteClipboardSyncService.computeTextHash(text);
+  }
+
   String? _lastAppliedLocalClipboardText;
   String? _lastAppliedRemoteClipboardText;
   String? _recentLocalClipboardText;
@@ -2066,8 +2078,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _syncShellCompletionOptimisticSnapshotWithTerminal();
     _refilterShellCompletionsForEditedLine();
 
-    _queueVisibleTerminalPathUnderlineRefresh();
-    _scheduleMissingImageRecoveryRequest();
+    _scheduleThrottledTerminalPathUnderlineRefresh();
+    if (_terminal.graphics.hasPlaceholders) {
+      _scheduleMissingImageRecoveryRequest();
+    }
     if (_shellCompletionsEnabled &&
         _shellCompletionPromptPrefix != null &&
         _shellCompletionDebounceTimer == null &&
@@ -3686,7 +3700,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     try {
       final remoteText = await _readRemoteClipboardText(session);
       if (!_ownsClipboardSync(session, generation)) return;
-      _lastObservedRemoteClipboardText = remoteText;
+      _setLastObservedRemoteClipboardText(remoteText);
     } on Object catch (error) {
       if (!_ownsClipboardSync(session, generation)) return;
       _handleSharedClipboardRemoteCommandFailure(
@@ -3779,7 +3793,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
       _lastObservedLocalClipboardText = localText;
-      _lastObservedRemoteClipboardText = localText;
+      _setLastObservedRemoteClipboardText(localText);
       _lastAppliedRemoteClipboardText = localText;
     } on Object catch (error) {
       if (!_ownsClipboardSync(session, generation)) return;
@@ -3801,6 +3815,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _isPollingRemoteClipboard) {
       return;
     }
+    final lifecycleState = WidgetsBinding.instance.lifecycleState;
+    if (lifecycleState != null && lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
 
     final generation = _clipboardSyncGeneration;
     _isPollingRemoteClipboard = true;
@@ -3817,7 +3835,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         now: DateTime.now(),
       )) {
         if (remoteText != null) {
-          _lastObservedRemoteClipboardText = remoteText;
+          _setLastObservedRemoteClipboardText(remoteText);
         }
         return;
       }
@@ -3828,7 +3846,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       await Clipboard.setData(ClipboardData(text: remoteClipboardText));
       if (!_ownsClipboardSync(session, generation)) return;
-      _lastObservedRemoteClipboardText = remoteClipboardText;
+      _setLastObservedRemoteClipboardText(remoteClipboardText);
       _lastObservedLocalClipboardText = remoteClipboardText;
       _lastAppliedLocalClipboardText = remoteClipboardText;
     } on PlatformException {
@@ -3852,7 +3870,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final generation = _clipboardSyncGeneration;
     final output = await _runRemoteCommand(
       session,
-      RemoteClipboardSyncService.buildReadCommand(),
+      RemoteClipboardSyncService.buildReadCommand(
+        expectedSha256: _lastObservedRemoteClipboardSha256,
+      ),
     );
     if (!_ownsClipboardSync(session, generation)) return null;
     final parsed = RemoteClipboardSyncService.parseReadOutput(output);
@@ -3860,6 +3880,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _remoteClipboardUnsupported = true;
       _stopSharedClipboardSync();
       return null;
+    }
+    if (parsed.unchanged) {
+      return _lastObservedRemoteClipboardText;
     }
     return parsed.text;
   }
@@ -3922,6 +3945,31 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// still track the scroll between refreshes; only new-path detection and the
   /// tap target rects lag by up to the throttle window, which is imperceptible
   /// mid-fling. Leading + trailing edges keep the settled position accurate.
+  bool _terminalPathUnderlineCooldownPending = false;
+
+  void _scheduleThrottledTerminalPathUnderlineRefresh() {
+    if (!_isMobilePlatform || !mounted) {
+      return;
+    }
+    if (_terminalPathUnderlineScrollThrottleTimer?.isActive ?? false) {
+      _terminalPathUnderlineCooldownPending = true;
+      return;
+    }
+    _terminalPathUnderlineCooldownPending = false;
+    _queueVisibleTerminalPathUnderlineRefresh();
+    _terminalPathUnderlineScrollThrottleTimer = Timer(
+      const Duration(milliseconds: 120),
+      () {
+        _terminalPathUnderlineScrollThrottleTimer = null;
+        if (!mounted || !_terminalPathUnderlineCooldownPending) {
+          return;
+        }
+        _terminalPathUnderlineCooldownPending = false;
+        _queueVisibleTerminalPathUnderlineRefresh();
+      },
+    );
+  }
+
   void _scheduleScrollTerminalPathUnderlineRefresh() {
     const throttleMs = 120;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -8434,6 +8482,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String sessionName,
     int generation,
   ) async {
+    final lifecycleState = WidgetsBinding.instance.lifecycleState;
+    if (lifecycleState != null && lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
     if (_tmuxForegroundVerificationInFlight ||
         !mounted ||
         generation != _tmuxForegroundVerificationGeneration ||

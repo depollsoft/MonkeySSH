@@ -229,9 +229,17 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final manager = ref.watch(acpSessionManagerProvider);
+    ref.watch(
+      acpSessionManagerStateProvider.select(
+        (asyncState) => _AcpSwitcherSessionsDigest.fromSessions(
+          asyncState.asData?.value.sessions ?? const <AcpSessionState>[],
+        ),
+      ),
+    );
     final sessions =
-        ref.watch(acpSessionManagerStateProvider).asData?.value.sessions ??
-        const <AcpSessionState>[];
+        ref.read(acpSessionManagerStateProvider).asData?.value.sessions ??
+        manager.state.sessions;
     // Under a dialog or a covering route, keep the last order without polling.
     if (attentionSurfaceVisible(context)) {
       _bridges = ref.watch(connectionBridgeMetadataProvider);
@@ -416,4 +424,52 @@ class _AcpSessionRailState extends ConsumerState<AcpSessionRail> {
       ),
     );
   }
+}
+
+@immutable
+final class _AcpSwitcherSessionsDigest {
+  const _AcpSwitcherSessionsDigest(this.entries);
+
+  factory _AcpSwitcherSessionsDigest.fromSessions(
+    List<AcpSessionState> sessions,
+  ) => _AcpSwitcherSessionsDigest([
+    for (final session in sessions)
+      (
+        session.key,
+        session.status,
+        session.attached,
+        session.promptStatus,
+        session.title,
+        session.providerLabel,
+        session.cwd,
+        session.createdAt,
+        session.pendingAuthentication,
+        session.error,
+        session.pendingPermissions.length,
+        session.pendingPermissions.firstOrNull?.requestKey,
+        session.pendingWrites.length,
+        session.pendingWrites.firstOrNull?.requestKey,
+        session.pendingElicitations.length,
+        session.pendingElicitations.firstOrNull?.requestKey,
+        session.awaitingElicitations.length,
+      ),
+  ]);
+
+  final List<Object?> entries;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! _AcpSwitcherSessionsDigest ||
+        entries.length != other.entries.length) {
+      return false;
+    }
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] != other.entries[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAll(entries);
 }

@@ -4,6 +4,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1427,6 +1428,71 @@ class AgentManagementService {
         : const {};
   }
 
+  static String? _cachedUsageProbeSource;
+  static String? _cachedUsageProbeSha16;
+  static final Map<int, String> _remoteCachedUsageProbeSha = <int, String>{};
+  static const _usageProbeCacheMissMarker = '__monkeyssh_usage_cache_miss__';
+
+  Future<({String source, String sha16})> _loadUsageProbeBundle() async {
+    final cachedSource = _cachedUsageProbeSource;
+    final cachedSha = _cachedUsageProbeSha16;
+    if (cachedSource != null && cachedSha != null) {
+      return (source: cachedSource, sha16: cachedSha);
+    }
+    final script = await rootBundle.loadString(
+      'assets/scripts/agent_usage_probe.cjs',
+    );
+    final scriptBytes = utf8.encode(script);
+    final source = base64.encode(scriptBytes);
+    final sha16 = sha256.convert(scriptBytes).toString().substring(0, 16);
+    _cachedUsageProbeSource = source;
+    _cachedUsageProbeSha16 = sha16;
+    return (source: source, sha16: sha16);
+  }
+
+  String _buildCachedPosixUsageCommand({
+    required String sha16,
+    required Map<String, String> agents,
+  }) {
+    final input = base64.encode(utf8.encode(jsonEncode(agents)));
+    final missing = agents.keys.map(
+      (id) => _shellQuote(
+        '__monkeyssh_usage__=${jsonEncode({'id': id, 'status': 'runtimeUnavailable'})}',
+      ),
+    );
+    final cachePath =
+        r'"$HOME/.cache/monkeyssh/usage-probe-'
+        '$sha16.cjs"';
+    return '$_profilePrefix'
+        'if command -v node >/dev/null 2>&1; then '
+        'if [ -r $cachePath ]; then '
+        'MONKEYSSH_USAGE_PROBE=1 node $cachePath ${_shellQuote(input)} 2>/dev/null; '
+        'else printf ${_shellQuote('$_usageProbeCacheMissMarker\\n')}; fi; '
+        "else printf '%s\\n' ${missing.join(' ')}; fi";
+  }
+
+  String _buildBootstrapPosixUsageCommand({
+    required String source,
+    required String sha16,
+    required Map<String, String> agents,
+  }) {
+    // Cache the decoded script under ~/.cache/monkeyssh so subsequent polls
+    // on this connection send ~350 bytes instead of re-uploading ~70 KB.
+    final bootstrap =
+        "process.env.MONKEYSSH_USAGE_PROBE='1';"
+        "const __s=Buffer.from('$source','base64').toString();"
+        'try{'
+        "const __fs=require('fs'),__p=require('path'),__h=process.env.HOME;"
+        "if(__h){const __d=__p.join(__h,'.cache','monkeyssh');"
+        '__fs.mkdirSync(__d,{recursive:true,mode:0o700});'
+        "const __f=__p.join(__d,'usage-probe-$sha16.cjs');"
+        "if(!__fs.existsSync(__f)){const __t=__f+'.'+process.pid;"
+        '__fs.writeFileSync(__t,__s,{mode:0o600});__fs.renameSync(__t,__f);}'
+        '}}catch(_){}'
+        'eval(__s)';
+    return '$_profilePrefix ${buildPosixAgentUsageCommand(bootstrap, agents)}';
+  }
+
   Future<Map<String, AgentUsage>> _readUsage(
     SshSession session,
     List<AgentRuntimeInfo> runtimes, {
@@ -1514,18 +1580,23 @@ class AgentManagementService {
     }
     try {
       if (!shouldContinue()) throw const _UsageReadCancelled();
-      final script = await rootBundle.loadString(
-        'assets/scripts/agent_usage_probe.cjs',
-      );
+      final probe = await _loadUsageProbeBundle();
       if (!shouldContinue()) throw const _UsageReadCancelled();
-      final source = base64.encode(utf8.encode(script));
-      final bootstrap =
-          "process.env.MONKEYSSH_USAGE_PROBE='1';"
-          "eval(Buffer.from('$source','base64').toString())";
+      final source = probe.source;
+      final sha16 = probe.sha16;
+      final cachedOnRemote =
+          !session.remoteIsWindows &&
+          _remoteCachedUsageProbeSha[session.connectionId] == sha16;
       final command = session.remoteIsWindows
           ? buildWindowsAgentUsageCommand(pending)
-          : '$_profilePrefix ${buildPosixAgentUsageCommand(bootstrap, pending)}';
-      final response = await _run(
+          : cachedOnRemote
+          ? _buildCachedPosixUsageCommand(sha16: sha16, agents: pending)
+          : _buildBootstrapPosixUsageCommand(
+              source: source,
+              sha16: sha16,
+              agents: pending,
+            );
+      var response = await _run(
         session,
         command,
         input: session.remoteIsWindows
@@ -1535,6 +1606,29 @@ class AgentManagementService {
         keepPartialOutputOnTimeout: true,
         shouldContinue: shouldContinue,
       );
+      if (cachedOnRemote &&
+          response.output.contains(_usageProbeCacheMissMarker)) {
+        _remoteCachedUsageProbeSha.remove(session.connectionId);
+        if (!shouldContinue()) throw const _UsageReadCancelled();
+        response = await _run(
+          session,
+          _buildBootstrapPosixUsageCommand(
+            source: source,
+            sha16: sha16,
+            agents: pending,
+          ),
+          timeout: _timeouts.install,
+          keepPartialOutputOnTimeout: true,
+          shouldContinue: shouldContinue,
+        );
+      }
+      if (!session.remoteIsWindows &&
+          response.output.contains('__monkeyssh_usage__=')) {
+        if (_remoteCachedUsageProbeSha.length >= 64) {
+          _remoteCachedUsageProbeSha.clear();
+        }
+        _remoteCachedUsageProbeSha[session.connectionId] = sha16;
+      }
       final rawValues = parseAgentUsageOutput(
         response.output,
         checkedAt: _now(),

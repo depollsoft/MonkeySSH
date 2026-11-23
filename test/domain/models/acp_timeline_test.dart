@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
@@ -925,6 +927,29 @@ void main() {
       ]);
       expect(timeline.overflowed, isFalse);
     });
+
+    test(
+      'incremental coalesced text byte estimates match exact JSON UTF-8 length',
+      () {
+        final builder = AcpTimelineBuilder();
+        const chunks = [
+          'hello "world" \\ slash\n',
+          'tab\tctrl\x07 and café ',
+          'emoji 🚀 and CJK 漢字',
+        ];
+        AcpTimeline? timeline;
+        for (final text in chunks) {
+          timeline = builder.apply(_chunk('agent_message_chunk', text));
+        }
+        final entry = timeline!.entries.single as AcpMessageEntry;
+        final block = entry.content.single as AcpTextContent;
+        expect(block.text, chunks.join());
+        expect(
+          approximateContentBlockBytes(block),
+          utf8.encode(jsonEncode(block.toJson())).length,
+        );
+      },
+    );
   });
 
   group('defensive lists', () {

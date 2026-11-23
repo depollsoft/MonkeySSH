@@ -41,14 +41,16 @@ const _cursorPromptLabelCacheMaxEntries = 512;
 /// Cursor records a prompt whose send failed without rewriting meta.json.
 const _cursorPromptLabelMissTtl = Duration(minutes: 2);
 
+const _fastPathPrefix =
+    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 const _profileSourcingPrefix =
-    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
+    '$_fastPathPrefix'
     '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
     r'case "${SHELL##*/}" in '
     'zsh) { . ~/.zshrc; } >/dev/null 2>&1;; '
     'bash) { . ~/.bashrc; } >/dev/null 2>&1;; '
     'esac; '
-    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
+    '$_fastPathPrefix';
 const _remoteFileSnapshotBatchSize = 40;
 
 /// Line-limited snapshot reads also stop at a byte ceiling, because one JSONL
@@ -4032,14 +4034,23 @@ class AgentSessionDiscoveryService {
 
   // ── Helpers ────────────────────────────────────────────────────────────
 
-  Future<String> _exec(SshSession session, String command) {
+  Future<String> _exec(
+    SshSession session,
+    String command, {
+    bool sourceProfile = true,
+  }) {
+    final prefix = sourceProfile ? _profileSourcingPrefix : _fastPathPrefix;
     final controlChannelBackend = _controlChannelCommandBackend(session);
     if (controlChannelBackend != null) {
-      return _execThroughControlChannel(controlChannelBackend, command);
+      return _execThroughControlChannel(
+        controlChannelBackend,
+        command,
+        prefix: prefix,
+      );
     }
     return session.runQueuedExec(() async {
       final execSession = await openSshExec(
-        session.execute(_markCommandDone('$_profileSourcingPrefix$command')),
+        session.execute(_markCommandDone('$prefix$command')),
         _execOutputTimeout,
       );
       try {
@@ -4053,10 +4064,11 @@ class AgentSessionDiscoveryService {
 
   Future<String> _execThroughControlChannel(
     TerminalConnectionBackend backend,
-    String command,
-  ) async {
+    String command, {
+    String prefix = _profileSourcingPrefix,
+  }) async {
     final result = await backend.runClientCommand(
-      _markCommandDone('$_profileSourcingPrefix$command'),
+      _markCommandDone('$prefix$command'),
       priority: SshExecPriority.low,
     );
     return _stripDoneMarker(result.output);
@@ -4310,7 +4322,9 @@ class AgentSessionDiscoveryService {
       scanLimit,
     );
     if (scopedDirectories.isEmpty) {
-      return _parseListedFiles(await _exec(session, globalCommand));
+      return _parseListedFiles(
+        await _exec(session, globalCommand, sourceProfile: false),
+      );
     }
 
     final scopedCommand = StringBuffer()
@@ -4337,11 +4351,12 @@ class AgentSessionDiscoveryService {
     final scopedOutput = await _exec(
       session,
       _newestFilePathsCommand('{ $scopedCommand; }', scanLimit),
+      sourceProfile: false,
     );
     return _parseListedFiles(
       scopedOutput.trim().isNotEmpty
           ? scopedOutput
-          : await _exec(session, globalCommand),
+          : await _exec(session, globalCommand, sourceProfile: false),
     );
   }
 
@@ -4447,7 +4462,11 @@ class AgentSessionDiscoveryService {
 
       command.write(r'''printf "\n"; done''');
 
-      final output = await _exec(session, command.toString());
+      final output = await _exec(
+        session,
+        command.toString(),
+        sourceProfile: false,
+      );
       snapshots.addAll(await _parseRemoteFileSnapshotOutput(output, ceiling));
     }
     return snapshots;
@@ -4489,6 +4508,7 @@ class AgentSessionDiscoveryService {
               r' \)',
               names.length,
             ),
+            sourceProfile: false,
           );
 
     final filesById = <String, _ListedFile>{};
@@ -4524,6 +4544,7 @@ class AgentSessionDiscoveryService {
       final output = await _exec(
         session,
         r'''[ -n "${HOME:-}" ] && printf '__monkeyssh_agent_discovery_home__:%s\n' "$HOME"''',
+        sourceProfile: false,
       );
       final home = const LineSplitter()
           .convert(output)

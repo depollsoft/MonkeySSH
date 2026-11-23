@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'clipboard_sharing_service.dart';
 import 'remote_file_service.dart';
 
@@ -15,6 +17,14 @@ class RemoteClipboardSyncService {
   /// Marker emitted when the remote host does not expose a supported clipboard.
   static const unsupportedMarker = '__FLUTTY_REMOTE_CLIPBOARD_UNSUPPORTED__';
 
+  /// Marker emitted when the remote clipboard hash matches the last observed
+  /// clipboard text, avoiding re-transmitting unchanged clipboard payloads.
+  static const unchangedMarker = '__FLUTTY_REMOTE_CLIPBOARD_UNCHANGED__';
+
+  /// Computes the lowercase hex SHA-256 digest of [text] as UTF-8 bytes.
+  static String computeTextHash(String text) =>
+      sha256.convert(utf8.encode(text)).toString();
+
   /// Returns whether [text] is small enough to sync safely.
   static bool canSyncText(String text) =>
       utf8.encode(text).length <= ClipboardSharingService.maxPayloadBytes;
@@ -22,8 +32,21 @@ class RemoteClipboardSyncService {
   /// Builds a remote command that reads the remote clipboard and prints it as
   /// a single base64 line. A trailing sentinel protects clipboard newlines
   /// from shell command substitution and is removed before encoding.
-  static String buildReadCommand() =>
-      '''
+  ///
+  /// When [expectedSha256] is provided, the remote command hashes the
+  /// clipboard first and emits [unchangedMarker] (~38 bytes) instead of
+  /// re-transmitting the full base64 payload when nothing changed.
+  static String buildReadCommand({String? expectedSha256}) {
+    final hashCheck = expectedSha256 != null && expectedSha256.isNotEmpty
+        ? '''
+flutty_clipboard_hash="\$(if command -v sha256sum >/dev/null 2>&1; then printf %s "\${flutty_clipboard_data%.}" | sha256sum | cut -d' ' -f1; elif command -v shasum >/dev/null 2>&1; then printf %s "\${flutty_clipboard_data%.}" | shasum -a 256 | cut -d' ' -f1; fi)"
+if [ "\$flutty_clipboard_hash" = ${shellEscapePosix(expectedSha256)} ]; then
+  printf %s ${shellEscapePosix(unchangedMarker)}
+  exit 0
+fi
+'''
+        : '';
+    return '''
 if command -v pbpaste >/dev/null 2>&1; then
   flutty_clipboard_data="\$(pbpaste 2>/dev/null; printf .)"
 elif command -v wl-paste >/dev/null 2>&1; then
@@ -36,8 +59,9 @@ else
   printf %s ${shellEscapePosix(unsupportedMarker)}
   exit 0
 fi
-printf %s "\${flutty_clipboard_data%.}" | base64 | tr -d '\\r\\n'
+${hashCheck}printf %s "\${flutty_clipboard_data%.}" | base64 | tr -d '\\r\\n'
 ''';
+  }
 
   /// Builds a remote command that writes [text] into the remote clipboard.
   static String buildWriteCommand(String text) {
@@ -47,10 +71,10 @@ printf %s "\${flutty_clipboard_data%.}" | base64 | tr -d '\\r\\n'
     final unsupported = shellEscapePosix(unsupportedMarker);
     return '''
 flutty_clipboard_payload=$payload
-if command -v python3 >/dev/null 2>&1; then
-  flutty_clipboard_data="\$(python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode("utf-8","ignore"))' "\$flutty_clipboard_payload"; printf .)"
-elif command -v base64 >/dev/null 2>&1; then
+if command -v base64 >/dev/null 2>&1; then
   flutty_clipboard_data="\$(printf %s "\$flutty_clipboard_payload" | base64 -d 2>/dev/null || printf %s "\$flutty_clipboard_payload" | base64 -D 2>/dev/null; printf .)"
+elif command -v python3 >/dev/null 2>&1; then
+  flutty_clipboard_data="\$(python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.argv[1]).decode("utf-8","ignore"))' "\$flutty_clipboard_payload"; printf .)"
 else
   printf %s $unsupported
   exit 0
@@ -70,16 +94,21 @@ fi
   }
 
   /// Parses the stdout from [buildReadCommand].
-  static ({bool supported, String text}) parseReadOutput(String output) {
+  static ({bool supported, String text, bool unchanged}) parseReadOutput(
+    String output,
+  ) {
     final trimmed = output.trim();
     if (trimmed == unsupportedMarker) {
-      return (supported: false, text: '');
+      return (supported: false, text: '', unchanged: false);
+    }
+    if (trimmed == unchangedMarker) {
+      return (supported: true, text: '', unchanged: true);
     }
     final decoded = ClipboardSharingService.decodePayload(trimmed);
     if (decoded == null) {
-      return (supported: false, text: '');
+      return (supported: false, text: '', unchanged: false);
     }
-    return (supported: true, text: decoded);
+    return (supported: true, text: decoded, unchanged: false);
   }
 
   /// Returns whether a remote write command reported an unsupported clipboard.
