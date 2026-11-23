@@ -91,7 +91,8 @@ class ByteConsumer {
   /// `(data, start, end)` to [onRun]. Returns `true` if at least one byte was
   /// consumed.
   @pragma('vm:prefer-inline')
-  bool consumeAsciiRun(void Function(List<int> data, int start, int end) onRun) {
+  bool consumeAsciiRun(
+      void Function(List<int> data, int start, int end) onRun) {
     var data = _queue.first;
     while (_currentOffset >= data.length) {
       _consumed.add(_queue.removeFirst());

@@ -181,7 +181,8 @@ class Buffer {
         _blankHalf(line, lastCol + 1);
       }
       if (line.anchors.isNotEmpty) {
-        graphics.removePlaceholdersInLineRange(line, _cursorX, _cursorX + count);
+        graphics.removePlaceholdersInLineRange(
+            line, _cursorX, _cursorX + count);
       }
       line.setAsciiRun(_cursorX, units, pos, count, style, semantic);
       _cursorX += count;

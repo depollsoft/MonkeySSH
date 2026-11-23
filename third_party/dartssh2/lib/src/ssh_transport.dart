@@ -829,7 +829,9 @@ class SSHTransport {
     }
     if (rawPayload == null) return null;
     final decompressor = _remoteDecompressor;
-    return decompressor != null ? decompressor.decompress(rawPayload) : rawPayload;
+    return decompressor != null
+        ? decompressor.decompress(rawPayload)
+        : rawPayload;
   }
 
   /// Consumes and decrypts one OpenSSH ChaCha20-Poly1305 packet.

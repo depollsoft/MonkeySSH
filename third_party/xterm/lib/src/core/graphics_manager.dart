@@ -1368,9 +1368,7 @@ class GraphicsManager {
   /// Removes Unicode placeholders attached to [line] within `[start, end)`.
   /// Physical placement anchors are independent layers and are left intact.
   void removePlaceholdersInLineRange(BufferLine line, int start, int end) {
-    if (_placeholdersByAnchor.isEmpty ||
-        line.anchors.isEmpty ||
-        end <= start) {
+    if (_placeholdersByAnchor.isEmpty || line.anchors.isEmpty || end <= start) {
       return;
     }
     for (final anchor in line.anchors.toList()) {

@@ -25,8 +25,10 @@ class OpenSSHChaCha20Poly1305 {
     }
 
     // PROTOCOL.chacha20poly1305 names these K_2 and K_1 respectively.
-    _payloadKeyParam = KeyParameter(Uint8List.fromList(keyMaterial.sublist(0, 32)));
-    _lengthKeyParam = KeyParameter(Uint8List.fromList(keyMaterial.sublist(32, 64)));
+    _payloadKeyParam =
+        KeyParameter(Uint8List.fromList(keyMaterial.sublist(0, 32)));
+    _lengthKeyParam =
+        KeyParameter(Uint8List.fromList(keyMaterial.sublist(32, 64)));
   }
 
   late final KeyParameter _payloadKeyParam;
@@ -40,7 +42,8 @@ class OpenSSHChaCha20Poly1305 {
   late final ByteData _nonceView = ByteData.sublistView(_nonceBuf);
   final _zeroBlock = Uint8List(64);
   final _polyKeyBlock = Uint8List(64);
-  late final Uint8List _polyKeyView = Uint8List.sublistView(_polyKeyBlock, 0, 32);
+  late final Uint8List _polyKeyView =
+      Uint8List.sublistView(_polyKeyBlock, 0, 32);
   final _lenScratch = Uint8List(encryptedLengthSize);
   late final ByteData _lenScratchView = ByteData.sublistView(_lenScratch);
   final _tagScratch = Uint8List(tagSize);

@@ -409,8 +409,8 @@ class SftpFile {
     }
 
     while (bytesScheduled < data.length && firstError == null) {
-      while (bytesScheduled < data.length &&
-          pendingCount < maxPendingRequests) {
+      while (
+          bytesScheduled < data.length && pendingCount < maxPendingRequests) {
         scheduleWrite();
       }
       if (pendingCount >= maxPendingRequests ||

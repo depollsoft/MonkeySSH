@@ -27,7 +27,8 @@ void fillRandomBytes(Uint8List target, int offset, int length) {
       _refillRandomPool();
     }
     final available = _randomPoolSize - _randomPoolOffset;
-    final take = (length - written) < available ? (length - written) : available;
+    final take =
+        (length - written) < available ? (length - written) : available;
     target.setRange(
       offset + written,
       offset + written + take,
