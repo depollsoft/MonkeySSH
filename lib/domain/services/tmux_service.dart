@@ -2965,19 +2965,26 @@ String buildTmuxRefreshTerminalThemeCommand(
     forceUtf8: true,
   );
   // Allow visible panes to pass Kitty graphics APC sequences through tmux when
-  // allow-passthrough is still at its `off` default. Checking for `off` avoids
-  // downgrading a user's `all` setting, and `-gq` keeps tmux < 3.3 quiet.
+  // global allow-passthrough is still at its `off` default. Querying the global
+  // table in the outer shell with `show-options -gqv` uses the login PATH and
+  // client socket flags, avoids mistaking a pane or window override for the
+  // global setting, prints `off` on both tmux 3.3 (flag) and 3.4+ (choice),
+  // preserves `all`, and stays a quiet no-op on tmux < 3.3.
+  final showAllowPassthrough = TmuxService._tmuxCommand(
+    'show-options -gqv allow-passthrough',
+    extraFlags: extraFlags,
+    forceUtf8: true,
+  );
   final enableAllowPassthrough = TmuxService._tmuxCommand(
-    'if-shell -F -t ${shellEscapePosix(sessionName)} '
-    "'#{==:#{allow-passthrough},off}' "
-    "'set-option -gq allow-passthrough on'",
+    'set-option -gq allow-passthrough on',
     extraFlags: extraFlags,
     forceUtf8: true,
   );
 
   return r'SEP=$(printf "\037"); '
       '$enableFocusEvents 2>/dev/null || true; '
-      '$enableAllowPassthrough 2>/dev/null || true; '
+      'if [ "\$($showAllowPassthrough 2>/dev/null)" = off ]; then '
+      '$enableAllowPassthrough 2>/dev/null || true; fi; '
       '$loadThemeReportClients '
       'flutty_set_agent_tool_from_command_name() { '
       r'case "${1##*/}" in '

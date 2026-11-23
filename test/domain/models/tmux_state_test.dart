@@ -1384,6 +1384,18 @@ void main() {
     const tmuxOptionsSuffix =
         '$tmuxEnableFocusEventsCommand $tmuxEnableAllowPassthroughCommand';
 
+    test(
+      'guards allow-passthrough against the global option on the same server',
+      () {
+        expect(
+          tmuxEnableAllowPassthroughCommand,
+          r'\; if-shell '
+          r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
+          "'set-option -gq allow-passthrough on'",
+        );
+      },
+    );
+
     test('builds basic command', () {
       expect(
         buildTmuxCommand(sessionName: 'dev'),

@@ -1309,11 +1309,16 @@ const tmuxDisableStatusBarCommand = r'\; set status off';
 /// tmux command fragment that lets focus-aware TUIs receive focus events.
 const tmuxEnableFocusEventsCommand = r'\; set-option -g focus-events on';
 
-/// tmux command fragment that enables passthrough for visible panes when tmux
-/// is still at its `off` default, preserving `all` and staying a no-op on tmux
-/// builds older than 3.3.
+/// tmux command fragment that enables passthrough for visible panes when tmux's
+/// global `allow-passthrough` option is still at its `off` default.
+///
+/// Queries the global option table directly via `show-options -gqv` on the same
+/// server (`#{q:socket_path}`) so a pane or window override cannot downgrade
+/// global `all` or mask global `off`, prints `off` on both tmux 3.3 (flag) and
+/// 3.4+ (choice), and stays a quiet no-op on tmux builds older than 3.3.
 const tmuxEnableAllowPassthroughCommand =
-    r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+    r'\; if-shell '
+    r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
     "'set-option -gq allow-passthrough on'";
 
 /// Builds a `tmux new-session` command from structured configuration.

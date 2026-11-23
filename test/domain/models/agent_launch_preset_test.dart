@@ -283,7 +283,8 @@ void main() {
         'tmux new-session -A -s \'nightly review\' -c '
         '"\$HOME/src/app" -x 160 -y 48 \'codex --message "hello"\' '
         r'\; set-option -g focus-events on '
-        r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+        r'\; if-shell '
+        r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
         "'set-option -gq allow-passthrough on'",
       );
     });
@@ -331,7 +332,8 @@ void main() {
           'tmux new-session -A -s \'nightly review\' '
           '-x 160 -y 48 \'codex\' '
           r'\; set-option -g focus-events on '
-          r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+          r'\; if-shell '
+          r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
           "'set-option -gq allow-passthrough on'",
         );
       },
@@ -348,7 +350,8 @@ void main() {
         buildAgentLaunchCommand(preset),
         "tmux new-session -A -s 'nightly review' -n 'review window' "
         r"'codex' \; set-option -g focus-events on "
-        r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+        r'\; if-shell '
+        r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
         "'set-option -gq allow-passthrough on'",
       );
     });
@@ -383,7 +386,8 @@ void main() {
         buildAgentLaunchCommand(preset),
         r"tmux new-session -A -s 'copilot' 'copilot' \; set status off "
         r'\; set-option -g focus-events on '
-        r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+        r'\; if-shell '
+        r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
         "'set-option -gq allow-passthrough on'",
       );
     });
@@ -409,7 +413,8 @@ void main() {
         "tmux new-session -A -s 'oc-session' -c "
         '"\$HOME/work" \'opencode\' '
         r'\; set-option -g focus-events on '
-        r"\; if-shell -F '#{==:#{allow-passthrough},off}' "
+        r'\; if-shell '
+        r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
         "'set-option -gq allow-passthrough on'",
       );
     });
