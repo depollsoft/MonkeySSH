@@ -33,7 +33,8 @@ type terminalScreen struct {
 	scratchRows [][]vtCell
 
 	// scrollback holds main-screen lines that scrolled off the top.
-	scrollback vtScrollback
+	scrollback        vtScrollback
+	scrollbackScratch []byte
 
 	attrs      vtAttrs
 	top        int // scroll region, 0-based inclusive
@@ -209,13 +210,42 @@ func clampVTSize(width, height int) (int, int) {
 	return width, height
 }
 
+const (
+	vtScrollbackSlabSize    = 16 * 1024
+	vtScrollbackSlabMaxLine = 2048
+)
+
 // vtScrollback holds scrolled-off lines, oldest first, in a ring, so evicting
 // the oldest line from a full history costs the same however long it is.
 type vtScrollback struct {
-	lines []vtScrollbackLine
-	head  int // index in lines of the oldest line
-	n     int
-	bytes int
+	lines   []vtScrollbackLine
+	head    int // index in lines of the oldest line
+	n       int
+	bytes   int
+	slab    []byte
+	slabOff int
+}
+
+// copyBytes returns an immutable copy of src, carving from a shared slab for
+// typical lines so steady-state scrolling avoids per-line heap allocations.
+func (b *vtScrollback) copyBytes(src []byte) []byte {
+	n := len(src)
+	if n == 0 {
+		return nil
+	}
+	if n > vtScrollbackSlabMaxLine {
+		return bytes.Clone(src)
+	}
+	if len(b.slab)-b.slabOff < n {
+		b.slab = make([]byte, vtScrollbackSlabSize)
+		b.slabOff = 0
+	}
+	start := b.slabOff
+	end := start + n
+	b.slabOff = end
+	dst := b.slab[start:end:end]
+	copy(dst, src)
+	return dst
 }
 
 // vtScrollbackLine is one line rendered to escape sequences (attributes
@@ -278,6 +308,7 @@ func (b *vtScrollback) popBack() vtScrollbackLine {
 func (b *vtScrollback) clear() {
 	clear(b.lines)
 	b.head, b.n, b.bytes = 0, 0, 0
+	b.slab, b.slabOff = nil, 0
 }
 
 // clone copies the ring; the rendered lines are never mutated and are shared.
@@ -601,6 +632,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.main = s.main.clone()
 	c.alt = s.alt.clone()
 	c.scratchRows = nil
+	c.scrollbackScratch = nil
 	c.scrollback = s.scrollback.clone()
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
@@ -860,10 +892,15 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	g := &s.main
 	history := s.scrollback.len()
 	lines := make([]vtLine, 0, history+len(g.rows))
+	var backing []vtCell
+	if history > 0 {
+		backing = make([]vtCell, history*s.width)
+	}
 	var decoder vtLineDecoder
 	for i := range history {
 		line := s.scrollback.at(i)
-		lines = append(lines, vtLine{cells: line.decode(&decoder, s.width), wrapped: line.wrapped, prompt: line.prompt})
+		dst := backing[i*s.width : (i+1)*s.width : (i+1)*s.width]
+		lines = append(lines, vtLine{cells: line.decodeInto(&decoder, s.width, dst), wrapped: line.wrapped, prompt: line.prompt})
 	}
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i], prompt: g.prompt[i]})
@@ -887,7 +924,13 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	g.wrapped = make([]bool, height)
 	g.prompt = make([]uint8, height)
 	for i, line := range lines[screenStart:] {
-		g.rows[i] = line.cells
+		if history > 0 {
+			// Detach live grid rows from the temporary decode slab so it is
+			// eligible for collection as soon as reflowMain returns.
+			g.rows[i] = cloneVTRow(line.cells)
+		} else {
+			g.rows[i] = line.cells
+		}
 		g.wrapped[i] = line.wrapped
 		g.prompt[i] = line.prompt
 	}
@@ -932,6 +975,16 @@ type vtLineDecoder struct {
 }
 
 func (d *vtLineDecoder) decode(line []byte, width int) []vtCell {
+	return d.decodeInto(line, width, make([]vtCell, width))
+}
+
+func (d *vtLineDecoder) decodeInto(line []byte, width int, dst []vtCell) []vtCell {
+	if len(line) == 0 {
+		for i := range dst {
+			dst[i] = vtCell{width: 1}
+		}
+		return dst
+	}
 	columns := max(width, renderedLineColumns(line))
 	if d.scratch == nil || d.scratch.width < columns {
 		d.scratch = newTerminalScreen(columns, 1)
@@ -944,15 +997,27 @@ func (d *vtLineDecoder) decode(line []byte, width int) []vtCell {
 		d.scratch.attrs = vtAttrs{}
 	}
 	d.scratch.Write(line)
-	return resizeVTRow(cloneVTRow(d.scratch.main.rows[0]), width)
+	src := d.scratch.main.rows[0][:width]
+	copy(dst, src)
+	for i := range dst {
+		if len(dst[i].comb) > 0 {
+			dst[i].comb = append([]rune(nil), dst[i].comb...)
+		}
+	}
+	// A wide glyph cut in half becomes a blank, as in resizeVTRow.
+	if width > 1 && dst[width-1].width == 2 {
+		dst[width-1] = vtCell{width: 1}
+	}
+	return dst
 }
 
 // renderedLineColumns bounds the columns a rendered scrollback line covers:
-// two per glyph, skipping its SGR sequences.
+// one per ASCII byte, two per multi-byte glyph, skipping its SGR sequences.
 func renderedLineColumns(line []byte) int {
 	columns := 0
 	for i := 0; i < len(line); {
-		if line[i] == 0x1b {
+		b := line[i]
+		if b == 0x1b {
 			i++
 			if i < len(line) && line[i] == '[' {
 				i++
@@ -961,6 +1026,11 @@ func renderedLineColumns(line []byte) int {
 				}
 			}
 			i++
+			continue
+		}
+		if b < 0x80 {
+			i++
+			columns++
 			continue
 		}
 		_, size := utf8.DecodeRune(line[i:])
@@ -1007,8 +1077,9 @@ func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool, prompt uint8
 }
 
 func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool, prompt uint8) {
+	s.scrollbackScratch = renderVTCells(s.scrollbackScratch[:0], row)
 	s.scrollback.push(vtScrollbackLine{
-		text:    renderVTCells(make([]byte, 0, 64), row),
+		text:    s.scrollback.copyBytes(s.scrollbackScratch),
 		wrapped: wrapped,
 		prompt:  prompt,
 		sem:     vtScrollbackSem(row),

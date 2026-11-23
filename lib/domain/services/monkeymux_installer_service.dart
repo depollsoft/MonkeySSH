@@ -354,6 +354,7 @@ class MonkeyMuxInstallerService {
     _installCache.remove(connectionId);
     _installRequests.remove(connectionId);
     _passiveInstallFailures.remove(connectionId);
+    _probedPosixHomeDirectories.remove(connectionId);
     _setUploadProgress(connectionId, null);
   }
 
@@ -390,13 +391,20 @@ class MonkeyMuxInstallerService {
         'MonkeyMux is not bundled for $platform.',
       );
     }
-    final sftp = await session.openStandaloneSftp();
+    final isWindows = _isWindowsPlatform(platform);
+    SftpClient? sftp;
+    Future<SftpClient> ensureSftp() async =>
+        sftp ??= await session.openStandaloneSftp();
     var reportsUploadProgress = false;
     try {
-      final homeDirectory = await _remoteFileService.resolveInitialDirectory(
-        sftp,
-      );
-      final isWindows = _isWindowsPlatform(platform);
+      // Reuse the $HOME resolved during the POSIX platform probe so already-
+      // installed hosts never pay for a standalone SFTP open+realpath+close.
+      final probedHome = isWindows
+          ? null
+          : _probedPosixHomeDirectories[session.connectionId];
+      final homeDirectory =
+          probedHome ??
+          await _remoteFileService.resolveInitialDirectory(await ensureSftp());
       // Windows locks running executables. Builds with the same helper version
       // can have different bytes, so version alone is not a safe install key.
       // Leave older builds available to their running server and attach clients.
@@ -501,7 +509,11 @@ class MonkeyMuxInstallerService {
             'size': entry.size,
           },
         );
-        await _remoteFileService.ensureDirectoryExists(sftp, installDirectory);
+        final activeSftp = await ensureSftp();
+        await _remoteFileService.ensureDirectoryExists(
+          activeSftp,
+          installDirectory,
+        );
         final temporaryExecutablePath = joinRemotePath(
           installDirectory,
           '.monkeymux.${session.connectionId}.'
@@ -513,7 +525,7 @@ class MonkeyMuxInstallerService {
         var installStage = 'upload';
         try {
           await _remoteFileService.uploadBytes(
-            sftp: sftp,
+            sftp: activeSftp,
             remotePath: temporaryExecutablePath,
             bytes: assetBytes,
             onProgress: (uploadedBytes) => _setUploadProgress(
@@ -541,14 +553,17 @@ class MonkeyMuxInstallerService {
             // Keep real permission errors visible; only absence is harmless.
             installStage = 'remove_target';
             try {
-              await sftp.remove(executableSftpPath);
+              await activeSftp.remove(executableSftpPath);
             } on SftpStatusError catch (error) {
               if (error.code != SftpStatusCode.noSuchFile) {
                 rethrow;
               }
             }
             installStage = 'rename_upload';
-            await sftp.rename(temporaryExecutablePath, executableSftpPath);
+            await activeSftp.rename(
+              temporaryExecutablePath,
+              executableSftpPath,
+            );
           } else {
             installStage = 'finalize_upload';
             await _runRemoteCommand(
@@ -579,7 +594,7 @@ class MonkeyMuxInstallerService {
           await _removeRemoteTemporaryFile(
             session,
             temporaryExecutablePath,
-            sftp: sftp,
+            sftp: activeSftp,
           );
           Error.throwWithStackTrace(error, stackTrace);
         }
@@ -624,7 +639,7 @@ class MonkeyMuxInstallerService {
       if (reportsUploadProgress) {
         _setUploadProgress(session.connectionId, null);
       }
-      await sftp.close();
+      await sftp?.close();
     }
   }
 
@@ -809,6 +824,8 @@ class MonkeyMuxInstallerService {
     return platform;
   }
 
+  static final _probedPosixHomeDirectories = <int, String>{};
+
   Future<String> _probePosixPlatform(
     SshSession session, {
     required SshExecPriority priority,
@@ -817,7 +834,7 @@ class MonkeyMuxInstallerService {
     try {
       output = await _runRemoteCommand(
         session,
-        r'printf "%s\n%s\n" "$(uname -s 2>/dev/null)" "$(uname -m 2>/dev/null)"',
+        r'printf "%s\n%s\n%s\n" "$(uname -s 2>/dev/null)" "$(uname -m 2>/dev/null)" "$HOME"',
         priority: priority,
       );
     } on MonkeyMuxInstallException {
@@ -825,6 +842,12 @@ class MonkeyMuxInstallerService {
     }
     final platform = _parsePosixPlatform(output);
     if (platform != null) {
+      final home = _parsePosixHomeDirectory(output);
+      if (home != null) {
+        _probedPosixHomeDirectories[session.connectionId] = home;
+      } else {
+        _probedPosixHomeDirectories.remove(session.connectionId);
+      }
       return platform;
     }
     // The POSIX probe produced nothing usable. The host may be a Windows SSH
@@ -862,6 +885,22 @@ class MonkeyMuxInstallerService {
       return null;
     }
     return '$osName-$arch';
+  }
+
+  String? _parsePosixHomeDirectory(String output) {
+    final lines = output
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList(growable: false);
+    if (lines.length < 3) {
+      return null;
+    }
+    final home = lines[2];
+    if (!home.startsWith('/') || home.contains('\r') || home.contains('\x00')) {
+      return null;
+    }
+    return home;
   }
 
   Future<String> _probeWindowsPlatform(

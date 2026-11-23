@@ -2005,16 +2005,18 @@ func (b *acpBridge) writeClientReplay(client *acpBridgeClient) bool {
 			b.mu.Unlock()
 		}()
 	}
+	bw := bufio.NewWriterSize(client.conn, 32*1024)
 	write := func(message acpWireMessage) bool {
 		select {
 		case <-client.done:
 			return false
 		case <-client.displaced:
+			_ = bw.Flush()
 			writeLeaseNotice(client)
 			return false
 		default:
 		}
-		if err := writeAcpWireFrame(client.conn, message); err != nil {
+		if err := writeAcpWireFrame(bw, message); err != nil {
 			b.detachClient(client.id)
 			return false
 		}
@@ -2033,6 +2035,10 @@ func (b *acpBridge) writeClientReplay(client *acpBridgeClient) bool {
 		if !write(replay[index].message) {
 			return false
 		}
+	}
+	if err := bw.Flush(); err != nil {
+		b.detachClient(client.id)
+		return false
 	}
 	return true
 }

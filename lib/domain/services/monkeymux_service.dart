@@ -337,6 +337,12 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     if (isAppReviewDemoSession(session)) {
       return null;
     }
+    final cachedVersion = _stateFor(
+      _MonkeyMuxWatchKey(session.connectionId, sessionName),
+    ).serverStatus?.version?.trim();
+    if (cachedVersion != null && cachedVersion.isNotEmpty) {
+      return cachedVersion;
+    }
     try {
       final installation = await _installer.ensureInstalled(session);
       final status = await runningServerStatus(

@@ -907,6 +907,12 @@ type muxServer struct {
 	closed         bool
 	closeDone      chan struct{}
 
+	// Single-flight background process metadata refresh state so attach,
+	// control connect, and window switches never stall on synchronous ps/lsof.
+	metadataRefreshMu      sync.Mutex
+	metadataRefreshRunning bool
+	metadataRefreshPending bool
+
 	// restoreRedrawPending tracks windows recreated from a restore snapshot
 	// whose freshly-launched foreground process (an agent that was just
 	// relaunched, for example) may not have been ready to repaint when it first
@@ -933,6 +939,10 @@ type muxServer struct {
 	// socketRepublishers tracks the path-healing goroutine so close cannot
 	// return while it still owns a replacement listener with unlink disabled.
 	socketRepublishers sync.WaitGroup
+	// metadataRefreshes tracks the single-flight background process-metadata
+	// refresh goroutine so close waits for it before returning. Add is guarded
+	// by s.mu and !s.closed && s.listener != nil.
+	metadataRefreshes sync.WaitGroup
 	// beforeInstallRepublishedSocket is a test seam for the narrow interval
 	// after a replacement is bound but before it is installed under s.mu.
 	beforeInstallRepublishedSocket func()
@@ -1102,6 +1112,10 @@ type muxWindow struct {
 	// current redraw pause began so a screen-model fallback can still include
 	// store-only images uploaded during the pause whose a=p arrives after it.
 	redrawForwardingStartKittySeq uint64
+	// redrawForwardingClientHas retains the client's cached Kitty image tokens
+	// from select_window so a screen-model fallback skips re-transmitting images
+	// the client already holds.
+	redrawForwardingClientHas map[string]uint32
 	// redrawForwardingClipboard holds the OSC 5522 packets forwarded during
 	// the pause apart from the redraw; see forwardKittyClipboardLocked.
 	redrawForwardingClipboard kittyClipboardDelivery
@@ -1233,9 +1247,10 @@ type controlClient struct {
 	finishOnce sync.Once
 	finished   chan struct{}
 
-	commandsMu sync.Mutex
-	commands   map[string]context.CancelFunc
-	closed     bool
+	commandsMu   sync.Mutex
+	commands     map[string]context.CancelFunc
+	closed       bool
+	deliveryOnly atomic.Bool
 }
 
 // controlFrame is one encoded control message. windowID marks a replaceable
@@ -2787,6 +2802,13 @@ func queryRunningServerStatusWithRetry(
 			return status, nil
 		}
 		lastErr = err
+		// Fast path for cold start: if the socket path does not exist and no
+		// live server owns the session PID, do not waste 350 ms retrying.
+		if attempt == 0 && errors.Is(err, os.ErrNotExist) {
+			if _, ownership := sessionServerOwner(session); ownership == pidOwnershipGone {
+				break
+			}
+		}
 		if attempt+1 < ensureServerDialAttempts {
 			time.Sleep(ensureServerDialInterval)
 		}
@@ -10001,7 +10023,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	if sendFocusTransition {
 		s.sendFocusTransition(themeHintWindowID)
 	}
-	s.broadcastWindowList("active_window_changed")
+	s.broadcastWindowListCached("active_window_changed")
 	if redrew {
 		signalForegroundResize(foregroundProcessGroup)
 	}
@@ -10107,7 +10129,7 @@ func (s *muxServer) handleControl(conn net.Conn, reader *bufio.Reader) {
 		Type:    "window_list",
 		Status:  "ok",
 		Session: s.session,
-		Windows: s.snapshots(),
+		Windows: s.snapshotsCached(),
 	})
 
 	scanner := bufio.NewScanner(reader)
@@ -10225,7 +10247,11 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		}
 	case attachDeliveredRequest:
 		// A client reports after every write to its terminal, so this is not
-		// answered: the reply would only be read and dropped.
+		// answered: the reply would only be read and dropped. Mark it
+		// delivery-only so window_updated broadcasts skip this connection.
+		if client != nil {
+			client.deliveryOnly.Store(true)
+		}
 		if attach := s.attachClientByDeliveryToken(request.AttachToken); attach != nil {
 			attach.markOutputDelivered(request.Delivered)
 		}
@@ -10729,7 +10755,7 @@ func (s *muxServer) broadcast(response controlResponse) {
 	s.mu.Lock()
 	clients := make([]*controlClient, 0, len(s.controls))
 	for client := range s.controls {
-		if client.conn != nil {
+		if client.conn != nil && !client.deliveryOnly.Load() {
 			clients = append(clients, client)
 		}
 	}
@@ -10754,11 +10780,95 @@ func (s *muxServer) broadcastWindowList(eventType string) {
 	})
 }
 
+func (s *muxServer) broadcastWindowListCached(eventType string) {
+	s.broadcast(controlResponse{
+		Type:    eventType,
+		Session: s.session,
+		Windows: s.snapshotsCached(),
+	})
+}
+
 func (s *muxServer) snapshots() []windowSnapshot {
 	s.refreshAllProcessMetadata()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshotsLocked()
+}
+
+// snapshotsCached returns the current window snapshots immediately without
+// blocking on synchronous ps/lsof probes, and triggers a single-flight
+// deterministic-order background refresh on running servers that broadcasts
+// updates for any window whose metadata changes.
+func (s *muxServer) snapshotsCached() []windowSnapshot {
+	s.mu.Lock()
+	snaps := s.snapshotsLocked()
+	canRefreshInBackground := !s.closed && s.listener != nil
+	if canRefreshInBackground {
+		s.triggerBackgroundMetadataRefreshLocked()
+	}
+	s.mu.Unlock()
+	return snaps
+}
+
+func (s *muxServer) triggerBackgroundMetadataRefreshLocked() {
+	s.metadataRefreshMu.Lock()
+	if s.metadataRefreshRunning {
+		s.metadataRefreshPending = true
+		s.metadataRefreshMu.Unlock()
+		return
+	}
+	s.metadataRefreshRunning = true
+	s.metadataRefreshMu.Unlock()
+
+	s.metadataRefreshes.Add(1)
+	go func() {
+		defer s.metadataRefreshes.Done()
+		for {
+			s.refreshAllProcessMetadataAndBroadcastChanges()
+			s.metadataRefreshMu.Lock()
+			if !s.metadataRefreshPending {
+				s.metadataRefreshRunning = false
+				s.metadataRefreshMu.Unlock()
+				return
+			}
+			s.metadataRefreshPending = false
+			s.metadataRefreshMu.Unlock()
+		}
+	}()
+}
+
+func (s *muxServer) refreshAllProcessMetadataAndBroadcastChanges() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	windows := append([]*muxWindow(nil), s.windows...)
+	s.mu.Unlock()
+	for _, window := range windows {
+		s.mu.Lock()
+		if s.closed || window.closed {
+			s.mu.Unlock()
+			continue
+		}
+		before := window.broadcastIdentityLocked()
+		s.mu.Unlock()
+
+		s.refreshProcessMetadata(window.id)
+
+		s.mu.Lock()
+		if !s.closed && !window.closed && window.broadcastIdentityLocked() != before {
+			snap := s.snapshotLocked(window)
+			s.mu.Unlock()
+			s.broadcast(controlResponse{
+				Type:    "window_updated",
+				Session: s.session,
+				Window:  &snap,
+			})
+			continue
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *muxServer) snapshotsLocked() []windowSnapshot {
@@ -11011,7 +11121,7 @@ func (s *muxServer) selectWindowWithoutReplay(windowID string) error {
 	window.notificationOscs = nil
 	s.mu.Unlock()
 	s.attachMu.Unlock()
-	s.broadcastWindowList("active_window_changed")
+	s.broadcastWindowListCached("active_window_changed")
 	return nil
 }
 
@@ -11123,6 +11233,7 @@ func (s *muxServer) selectWindowWithSkip(
 		clientHas = nil
 	}
 	primary = s.attachConn
+	window.redrawForwardingClientHas = clientHas
 	replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, clientHas)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	redrawWindow = window
@@ -11143,7 +11254,7 @@ func (s *muxServer) selectWindowWithSkip(
 	}
 	s.flushPendingTerminalQueriesLocked(primary, windowID)
 	s.attachMu.Unlock()
-	s.broadcastWindowList("active_window_changed")
+	s.broadcastWindowListCached("active_window_changed")
 	if redrew {
 		signalForegroundResize(foregroundProcessGroup)
 	}
@@ -12415,6 +12526,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingAnsweredCursor = false
 	w.redrawForwardingStartKittySeq = 0
+	w.redrawForwardingClientHas = nil
 	w.redrawForwardingClipboard = kittyClipboardDelivery{}
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
@@ -12433,7 +12545,8 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	if window == nil || screen == nil {
 		return nil
 	}
-	images, replayed := window.kittyImageReplaySelectionLocked(nil)
+	clientHas := window.redrawForwardingClientHas
+	images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
 	// The frame is rendered from the screen model, which drops the APC image
 	// transmissions, so every image its placeholder cells reference must travel
 	// with it — not just the few most recently mutated ones — and so must the
@@ -12442,7 +12555,7 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	// store-only uploads completed during an active redraw pause.
 	frameImages, served := window.kittyFrameImageReplayLocked(
 		replayed,
-		nil,
+		clientHas,
 		maxKittyImageRepairBytes-len(images),
 		screen.KittyPlacementImageIDs(),
 	)
@@ -12462,7 +12575,7 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 		if len(unplacedPauseIDs) > 0 && len(images) < maxKittyImageRepairBytes {
 			pauseImages, _ := window.kittyFrameImageReplayLocked(
 				replayed,
-				nil,
+				clientHas,
 				maxKittyImageRepairBytes-len(images),
 				unplacedPauseIDs,
 			)
@@ -16410,7 +16523,14 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 		}
 		numberReplay := w.kittyImageNumberReplayLocked(id)
 		numberReplays[id] = numberReplay
-		imageBytes := len(w.kittyImages[id]) +
+		rootBytes := len(w.kittyImages[id])
+		if len(clientHas) > 0 {
+			if token, ok := clientHas[id]; ok && token == w.kittyImageToken[id] {
+				// Already cached on the client: root bytes will not be sent.
+				rootBytes = 0
+			}
+		}
+		imageBytes := rootBytes +
 			len(numberReplay) +
 			len(w.kittyImageAnimations[id])
 		if imageBytes > maxReplayedKittyImageBytes ||
@@ -19384,6 +19504,7 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		// Unlike normal watchers, unpublished children have no useful work to
 		// preserve: join their forced cleanup through Wait before closing closeDone.
 		s.pendingWindowStarts.Wait()
+		s.metadataRefreshes.Wait()
 		// Let queued control frames (the shutdown reply among them) reach their
 		// clients within the same budget, then drop whatever a stalled one left.
 		for _, control := range controls {

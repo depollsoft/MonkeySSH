@@ -4099,6 +4099,9 @@ class _TmuxWindowChangeObserver {
       _stopHeartbeat();
       return;
     }
+    if (!service._isAppForeground()) {
+      return;
+    }
     final lastActivity = _lastControlActivity;
     if (lastActivity == null) return;
     final action = decideTmuxHeartbeatAction(

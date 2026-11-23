@@ -543,9 +543,17 @@ func renderVTCells(out []byte, row []vtCell) []byte {
 // prompt being painted, if any, put before the written cells they change, for
 // a client whose mode 2027 is clustered.
 func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clustered bool) []byte {
+	var defaultAttrs vtAttrs
 	end := len(row)
-	for end > 0 && row[end-1].isDefaultUnwritten() {
+	for end > 0 {
+		c := &row[end-1]
+		if c.r != 0 || c.width == 0 || len(c.comb) != 0 || c.attrs != defaultAttrs {
+			break
+		}
 		end--
+	}
+	if end == 0 {
+		return out
 	}
 	current := vtAttrs{}
 	// left is the glyph the client holds before the cursor.
@@ -594,11 +602,46 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clust
 		return vtColumnAt(len(row), col)
 	}
 	for i := 0; i < end; {
-		cell := row[i]
-		if cell.width == 0 {
+		c := &row[i]
+		if c.width == 0 {
 			i++
 			continue
 		}
+		// Fast path for contiguous plain ASCII runs with uniform attributes
+		// when no semantic prompt marks are active (100% of scrollback lines).
+		if marks == nil && c.r > 0 && c.r < 0x80 && len(c.comb) == 0 && c.width == 1 {
+			j := i + 1
+			attrs := c.attrs
+			for j < end {
+				nc := &row[j]
+				if nc.r <= 0 || nc.r >= 0x80 || len(nc.comb) != 0 || nc.width != 1 || nc.attrs != attrs {
+					break
+				}
+				j++
+			}
+			// Leave the last ASCII cell before a non-ASCII cell for the full
+			// grapheme-joining check below.
+			if j < end && row[j].r >= 0x80 {
+				j--
+			}
+			if j > i {
+				if attrs != current {
+					out = appendVTSGR(out, attrs)
+					current = attrs
+				}
+				start := len(out)
+				runLen := j - i
+				out = slices.Grow(out, runLen)[:start+runLen]
+				dst := out[start:]
+				for k := 0; k < runLen; k++ {
+					dst[k] = byte(row[i+k].r)
+				}
+				left = row[j-1]
+				i = j
+				continue
+			}
+		}
+		cell := *c
 		if cell.unwritten() {
 			run := i + 1
 			for run < end && row[run].unwritten() && row[run].attrs == cell.attrs {
@@ -783,10 +826,14 @@ func appendVTStandaloneRun(
 // would widen it, or not at all.
 func vtMovedRun(row []vtCell, clustered bool) int {
 	edge := len(row) - 1
-	if edge < 1 || row[edge].width != 1 || row[edge].r == 0 {
+	if edge < 1 {
 		return len(row)
 	}
-	cell := row[edge]
+	ec := &row[edge]
+	if ec.width != 1 || ec.r == 0 || (ec.r < 0x80 && len(ec.comb) == 0) {
+		return len(row)
+	}
+	cell := *ec
 	fit := planVTGlyph(cell, vtGlyphBefore(row, edge), clustered, vtLastColumn)
 	if fit.whole(cell) || planVTGlyph(cell, vtGlyphBefore(row, edge-1), clustered, vtMidRow).n <= fit.n {
 		return len(row)
@@ -909,6 +956,9 @@ func encodeRuneInto(buf []byte, r rune) int {
 // appendVTSGR emits a full reset+set rendition so the result never depends on
 // earlier state.
 func appendVTSGR(out []byte, a vtAttrs) []byte {
+	if a == (vtAttrs{}) {
+		return append(out, "\x1b[0m"...)
+	}
 	out = append(out, "\x1b[0"...)
 	if a.flags&vtAttrBold != 0 {
 		out = append(out, ";1"...)
@@ -924,7 +974,7 @@ func appendVTSGR(out []byte, a vtAttrs) []byte {
 		out = append(out, ";4"...)
 	case 2, 3, 4, 5:
 		out = append(out, ";4:"...)
-		out = strconv.AppendInt(out, int64(a.ulStyle), 10)
+		out = append(out, '0'+a.ulStyle)
 	}
 	if a.flags&vtAttrBlink != 0 {
 		out = append(out, ";5"...)
@@ -946,30 +996,40 @@ func appendVTSGR(out []byte, a vtAttrs) []byte {
 	return append(out, 'm')
 }
 
+func appendVTUint8(out []byte, v uint8) []byte {
+	if v >= 100 {
+		return append(out, '0'+v/100, '0'+(v/10)%10, '0'+v%10)
+	}
+	if v >= 10 {
+		return append(out, '0'+v/10, '0'+v%10)
+	}
+	return append(out, '0'+v)
+}
+
 func appendVTColor(out []byte, c vtColor, base int, extended int) []byte {
 	switch c.kind {
 	case vtColorIndexed:
 		if base > 0 && c.index < 8 {
 			out = append(out, ';')
-			return strconv.AppendInt(out, int64(base+int(c.index)), 10)
+			return appendVTUint8(out, uint8(base)+c.index)
 		}
 		if base > 0 && c.index < 16 {
 			out = append(out, ';')
-			return strconv.AppendInt(out, int64(base+60+int(c.index)-8), 10)
+			return appendVTUint8(out, uint8(base+60)+c.index-8)
 		}
 		out = append(out, ';')
-		out = strconv.AppendInt(out, int64(extended), 10)
+		out = appendVTUint8(out, uint8(extended))
 		out = append(out, ";5;"...)
-		return strconv.AppendInt(out, int64(c.index), 10)
+		return appendVTUint8(out, c.index)
 	case vtColorRGB:
 		out = append(out, ';')
-		out = strconv.AppendInt(out, int64(extended), 10)
+		out = appendVTUint8(out, uint8(extended))
 		out = append(out, ";2;"...)
-		out = strconv.AppendInt(out, int64(c.r), 10)
+		out = appendVTUint8(out, c.r)
 		out = append(out, ';')
-		out = strconv.AppendInt(out, int64(c.g), 10)
+		out = appendVTUint8(out, c.g)
 		out = append(out, ';')
-		return strconv.AppendInt(out, int64(c.b), 10)
+		return appendVTUint8(out, c.b)
 	}
 	return out
 }
