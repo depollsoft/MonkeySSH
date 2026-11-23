@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 
-import 'package:dartssh2/src/utils/cipher_ext.dart';
 import 'package:dartssh2/src/utils/int.dart';
 import 'package:pointycastle/export.dart';
 
@@ -26,12 +25,25 @@ class OpenSSHChaCha20Poly1305 {
     }
 
     // PROTOCOL.chacha20poly1305 names these K_2 and K_1 respectively.
-    _payloadKey = Uint8List.fromList(keyMaterial.sublist(0, 32));
-    _lengthKey = Uint8List.fromList(keyMaterial.sublist(32, 64));
+    _payloadKeyParam = KeyParameter(Uint8List.fromList(keyMaterial.sublist(0, 32)));
+    _lengthKeyParam = KeyParameter(Uint8List.fromList(keyMaterial.sublist(32, 64)));
   }
 
-  late final Uint8List _payloadKey;
-  late final Uint8List _lengthKey;
+  late final KeyParameter _payloadKeyParam;
+  late final KeyParameter _lengthKeyParam;
+
+  // Reusable per-instance cipher/MAC engines and scratch buffers.
+  final _lengthCipher = ChaCha20Engine();
+  final _payloadCipherEngine = ChaCha20Engine();
+  final _poly1305 = Poly1305();
+  final _nonceBuf = Uint8List(8);
+  late final ByteData _nonceView = ByteData.sublistView(_nonceBuf);
+  final _zeroBlock = Uint8List(64);
+  final _polyKeyBlock = Uint8List(64);
+  late final Uint8List _polyKeyView = Uint8List.sublistView(_polyKeyBlock, 0, 32);
+  final _lenScratch = Uint8List(encryptedLengthSize);
+  late final ByteData _lenScratchView = ByteData.sublistView(_lenScratch);
+  final _tagScratch = Uint8List(tagSize);
 
   /// Encrypts `packet_length || padding_length || payload || padding`.
   Uint8List encryptPacket(Uint8List packet, int sequenceNumber) {
@@ -43,37 +55,27 @@ class OpenSSHChaCha20Poly1305 {
       );
     }
 
-    final nonce = _nonce(sequenceNumber);
-    final encryptedLength = _cryptLength(
-      Uint8List.sublistView(packet, 0, encryptedLengthSize),
-      nonce,
-    );
+    final nonce = _prepareNonce(sequenceNumber);
+    final output = Uint8List(packet.length + tagSize);
 
-    final payloadCipher = _payloadCipher(nonce);
-    final poly1305Key = _poly1305Key(payloadCipher);
-    final encryptedBody = Uint8List(packet.length - encryptedLengthSize);
-    payloadCipher.processBytes(
+    _lengthCipher.init(true, ParametersWithIV(_lengthKeyParam, nonce));
+    _lengthCipher.processBytes(packet, 0, encryptedLengthSize, output, 0);
+
+    _payloadCipherEngine.init(true, ParametersWithIV(_payloadKeyParam, nonce));
+    _payloadCipherEngine.processBytes(_zeroBlock, 0, 64, _polyKeyBlock, 0);
+    _payloadCipherEngine.processBytes(
       packet,
       encryptedLengthSize,
-      encryptedBody.length,
-      encryptedBody,
-      0,
+      packet.length - encryptedLengthSize,
+      output,
+      encryptedLengthSize,
     );
 
-    final tag = _authenticationTag(
-      encryptedLength,
-      encryptedBody,
-      poly1305Key,
-    );
+    _poly1305.init(KeyParameter(_polyKeyView));
+    _poly1305.update(output, 0, packet.length);
+    _poly1305.doFinal(output, packet.length);
 
-    return Uint8List(packet.length + tagSize)
-      ..setRange(0, encryptedLengthSize, encryptedLength)
-      ..setRange(
-        encryptedLengthSize,
-        packet.length,
-        encryptedBody,
-      )
-      ..setRange(packet.length, packet.length + tagSize, tag);
+    return output;
   }
 
   /// Decrypts the encrypted four-byte packet length without authenticating it.
@@ -89,18 +91,31 @@ class OpenSSHChaCha20Poly1305 {
       );
     }
 
-    final plaintext = _cryptLength(
-      Uint8List.sublistView(encryptedLength, 0, encryptedLengthSize),
-      _nonce(sequenceNumber),
+    final nonce = _prepareNonce(sequenceNumber);
+    _lengthCipher.init(true, ParametersWithIV(_lengthKeyParam, nonce));
+    _lengthCipher.processBytes(
+      encryptedLength,
+      0,
+      encryptedLengthSize,
+      _lenScratch,
+      0,
     );
-    return ByteData.sublistView(plaintext).getUint32(0);
+    return _lenScratchView.getUint32(0);
   }
 
   /// Authenticates and decrypts a complete OpenSSH ChaCha20-Poly1305 packet.
   ///
   /// The returned bytes include the decrypted four-byte packet length. No
   /// plaintext is returned unless the Poly1305 tag is valid.
-  Uint8List decryptPacket(Uint8List packet, int sequenceNumber) {
+  ///
+  /// When [knownPacketLength] is supplied (already decrypted by
+  /// [decryptPacketLength] for the same [sequenceNumber]), skips re-decrypting
+  /// the 4-byte length header after Poly1305 authentication succeeds.
+  Uint8List decryptPacket(
+    Uint8List packet,
+    int sequenceNumber, {
+    int? knownPacketLength,
+  }) {
     const minimumPacketSize = encryptedLengthSize + tagSize;
     if (packet.length < minimumPacketSize) {
       throw ArgumentError.value(
@@ -111,81 +126,43 @@ class OpenSSHChaCha20Poly1305 {
     }
 
     final ciphertextLength = packet.length - tagSize;
-    final encryptedLength = Uint8List.sublistView(
-      packet,
-      0,
-      encryptedLengthSize,
-    );
-    final encryptedBody = Uint8List.sublistView(
-      packet,
-      encryptedLengthSize,
-      ciphertextLength,
-    );
     final actualTag = Uint8List.sublistView(packet, ciphertextLength);
 
-    final nonce = _nonce(sequenceNumber);
-    final payloadCipher = _payloadCipher(nonce);
-    final expectedTag = _authenticationTag(
-      encryptedLength,
-      encryptedBody,
-      _poly1305Key(payloadCipher),
-    );
+    final nonce = _prepareNonce(sequenceNumber);
+    _payloadCipherEngine.init(true, ParametersWithIV(_payloadKeyParam, nonce));
+    _payloadCipherEngine.processBytes(_zeroBlock, 0, 64, _polyKeyBlock, 0);
 
-    if (!_constantTimeEquals(expectedTag, actualTag)) {
+    _poly1305.init(KeyParameter(_polyKeyView));
+    _poly1305.update(packet, 0, ciphertextLength);
+    _poly1305.doFinal(_tagScratch, 0);
+
+    if (!_constantTimeEquals(_tagScratch, actualTag)) {
       throw InvalidCipherTextException(
         'OpenSSH ChaCha20-Poly1305 authentication failed',
       );
     }
 
-    final plaintextLength = _cryptLength(encryptedLength, nonce);
-    final plaintextBody = Uint8List(encryptedBody.length);
-    payloadCipher.processBytes(
-      encryptedBody,
-      0,
-      encryptedBody.length,
-      plaintextBody,
-      0,
+    final output = Uint8List(ciphertextLength);
+    if (knownPacketLength != null) {
+      ByteData.sublistView(output, 0, encryptedLengthSize)
+          .setUint32(0, knownPacketLength);
+    } else {
+      _lengthCipher.init(true, ParametersWithIV(_lengthKeyParam, nonce));
+      _lengthCipher.processBytes(packet, 0, encryptedLengthSize, output, 0);
+    }
+
+    _payloadCipherEngine.processBytes(
+      packet,
+      encryptedLengthSize,
+      ciphertextLength - encryptedLengthSize,
+      output,
+      encryptedLengthSize,
     );
 
-    return Uint8List(ciphertextLength)
-      ..setRange(0, encryptedLengthSize, plaintextLength)
-      ..setRange(encryptedLengthSize, ciphertextLength, plaintextBody);
-  }
-
-  Uint8List _cryptLength(Uint8List input, Uint8List nonce) {
-    final cipher = ChaCha20Engine()
-      ..init(true, ParametersWithIV(KeyParameter(_lengthKey), nonce));
-    final output = Uint8List(encryptedLengthSize);
-    cipher.processBytes(input, 0, encryptedLengthSize, output, 0);
     return output;
   }
 
-  ChaCha20Engine _payloadCipher(Uint8List nonce) {
-    return ChaCha20Engine()
-      ..init(true, ParametersWithIV(KeyParameter(_payloadKey), nonce));
-  }
-
-  Uint8List _poly1305Key(ChaCha20Engine cipher) {
-    // OpenSSH generates 32 key bytes at counter zero, then explicitly seeks
-    // to counter one for the packet body. Processing a full block here leaves
-    // PointyCastle at exactly the same counter-one position.
-    final firstBlock = Uint8List(64);
-    cipher.processBytes(firstBlock, 0, firstBlock.length, firstBlock, 0);
-    return Uint8List.sublistView(firstBlock, 0, 32);
-  }
-
-  Uint8List _authenticationTag(
-    Uint8List encryptedLength,
-    Uint8List encryptedBody,
-    Uint8List poly1305Key,
-  ) {
-    final mac = Poly1305()..init(KeyParameter(poly1305Key));
-    mac.updateAll(encryptedLength);
-    mac.updateAll(encryptedBody);
-    return mac.finish();
-  }
-
-  Uint8List _nonce(int sequenceNumber) {
+  Uint8List _prepareNonce(int sequenceNumber) {
     if (sequenceNumber < 0 || sequenceNumber > 0xffffffff) {
       throw RangeError.range(
         sequenceNumber,
@@ -195,12 +172,11 @@ class OpenSSHChaCha20Poly1305 {
       );
     }
 
-    final nonce = Uint8List(8);
     // Two 32-bit writes rather than setUint64, which throws when compiled
     // to JavaScript: see utils/int.dart. sequenceNumber is checked above to
     // fit in 32 bits, so this is always exact.
-    ByteData.sublistView(nonce).setUint64Split(0, sequenceNumber);
-    return nonce;
+    _nonceView.setUint64Split(0, sequenceNumber);
+    return _nonceBuf;
   }
 
   bool _constantTimeEquals(Uint8List a, Uint8List b) {

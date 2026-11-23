@@ -689,7 +689,7 @@ class RemoteFileService {
   ///
   /// Source chunks larger than this are split so the progress callback keeps
   /// ticking during a one-chunk upload such as a pasted clipboard image.
-  static const uploadChunkBytes = 256 * 1024;
+  static const uploadChunkBytes = 1024 * 1024;
 
   /// Uploads a stream into a remote file path.
   ///
@@ -787,13 +787,17 @@ class RemoteFileService {
     var target = remotePath;
     SftpFileAttrs? original;
     try {
-      if ((await sftp.stat(remotePath, followLink: false)).isSymbolicLink) {
+      final linkStat = await sftp.stat(remotePath, followLink: false);
+      if (linkStat.isSymbolicLink) {
         target = await sftp.absolute(remotePath);
-        if ((await sftp.stat(target, followLink: false)).isSymbolicLink) {
+        final resolvedStat = await sftp.stat(target, followLink: false);
+        if (resolvedStat.isSymbolicLink) {
           throw FileSystemException('Cannot resolve symbolic link', remotePath);
         }
+        original = resolvedStat;
+      } else {
+        original = linkStat;
       }
-      original = await sftp.stat(target);
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }

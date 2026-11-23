@@ -6,9 +6,10 @@ import 'package:dartssh2/src/utils/stream.dart';
 
 /// The default amount of data to send in a single SFTP packet.
 ///
-/// From the SFTP spec it's safe to send up to 32KB of data in a single packet.
-/// To strike a balance between capability and performance, we choose 16KB.
-const defaultChunkSize = 16 * 1024;
+/// Chosen so each `SSH_FXP_WRITE` packet (data + ~33-byte SFTP header) fits
+/// cleanly inside a single 32 KiB SSH channel packet without splitting across
+/// two SSH packets.
+const defaultChunkSize = 32 * 1024 - 128;
 
 /// The amount of data historically sent in a single SFTP packet.
 @Deprecated('Use defaultChunkSize instead. Will be removed in 5.0.0.')

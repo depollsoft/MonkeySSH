@@ -20,10 +20,12 @@ import 'package:dartssh2/src/utils/cipher_ext.dart';
 import 'package:dartssh2/src/utils/chunk_buffer.dart';
 import 'package:dartssh2/src/ssh_kex_utils.dart';
 import 'package:dartssh2/src/ssh_packet.dart';
+import 'package:dartssh2/src/utils/fast_aes_gcm.dart';
 import 'package:dartssh2/src/utils/int.dart';
 import 'package:dartssh2/src/hostkey/hostkey_ed25519.dart';
 import 'package:dartssh2/src/utils/list.dart';
 import 'package:dartssh2/src/utils/openssh_chacha20_poly1305.dart';
+import 'package:dartssh2/src/utils/ssh_compression.dart';
 import 'package:dartssh2/src/message/msg_ext_info.dart';
 import 'package:dartssh2/src/message/msg_kex.dart';
 import 'package:dartssh2/src/message/msg_kex_dh.dart';
@@ -161,7 +163,11 @@ class SSHTransport {
   final _doneCompleter = Completer<void>();
 
   /// Contains unprocessed data from the socket.
-  final _buffer = ChunkBuffer();
+  ///
+  /// Every packet consumer copies or decrypts out of [_buffer] before returning,
+  /// so retaining up to 64 KiB of backing storage across drains avoids
+  /// reallocating on every socket read without aliasing risks.
+  final _buffer = ChunkBuffer(retainBuffer: true);
 
   /// Contains decrypted packet data. May be partial.
   final _decryptBuffer = ChunkBuffer();
@@ -223,6 +229,22 @@ class SSHTransport {
   /// MAC currently active for packets received from the other side.
   SSHMacType? _remoteMacType;
 
+  /// Negotiated compression algorithms for client->server and server->client.
+  SSHCompressionType? _clientCompressionType;
+  SSHCompressionType? _serverCompressionType;
+
+  /// Active compression algorithms for outgoing and incoming packets.
+  SSHCompressionType? _localCompressionType;
+  SSHCompressionType? _remoteCompressionType;
+
+  /// Active stateful zlib compressor/decompressor (null when `none` or before
+  /// `SSH_MSG_USERAUTH_SUCCESS` for delayed `zlib@openssh.com`).
+  SSHPacketCompressor? _localCompressor;
+  SSHPacketDecompressor? _remoteDecompressor;
+
+  /// Whether user authentication has completed (`SSH_MSG_USERAUTH_SUCCESS`).
+  var _isAuthenticated = false;
+
   /// The active key exchange algorithm implementation instance.
   SSHKex? _kex;
 
@@ -270,17 +292,11 @@ class SSHTransport {
   /// OpenSSH ChaCha20-Poly1305 context for packets received from the other side.
   OpenSSHChaCha20Poly1305? _remoteChaChaCipher;
 
-  /// The cipher key derived for encrypting outgoing data.
-  Uint8List? _localCipherKey;
+  /// Reusable AES-GCM context for packets sent to the other side.
+  FastAesGcm? _localAesGcm;
 
-  /// The cipher key derived for decrypting incoming data.
-  Uint8List? _remoteCipherKey;
-
-  /// The initialization vector (IV) or nonce prefix derived for encrypting outgoing data.
-  Uint8List? _localIV;
-
-  /// The initialization vector (IV) or nonce prefix derived for decrypting incoming data.
-  Uint8List? _remoteIV;
+  /// Reusable AES-GCM context for packets received from the other side.
+  FastAesGcm? _remoteAesGcm;
 
   /// A [Mac] used to authenticate data sent to the other side.
   Mac? _localMac;
@@ -377,6 +393,14 @@ class SSHTransport {
       return;
     }
 
+    final isServerSendingAuthSuccess = isServer &&
+        !_isAuthenticated &&
+        data.isNotEmpty &&
+        data[0] == SSH_Message_Userauth_Success.messageId;
+
+    final payload =
+        _localCompressor != null ? _localCompressor!.compress(data) : data;
+
     // Check if encryption is enabled and if we have MAC types initialized
     final macType = _localMacType;
     final localCipherType = _localCipherType;
@@ -384,17 +408,22 @@ class SSHTransport {
     final localChaChaCipher = _localChaChaCipher;
     if (localCipherType == SSHCipherType.chacha20poly1305 &&
         localChaChaCipher != null) {
-      _sendChaChaPacket(data, localChaChaCipher);
+      _sendChaChaPacket(payload, localChaChaCipher);
       _localPacketSN.increase();
+      if (isServerSendingAuthSuccess) {
+        _activatePostAuthCompression();
+      }
       return;
     }
 
     if (localCipherType != null &&
         localCipherType.isAead &&
-        _localCipherKey != null &&
-        _localIV != null) {
-      _sendAeadPacket(data, localCipherType);
+        _localAesGcm != null) {
+      _sendAeadPacket(payload, localCipherType);
       _localPacketSN.increase();
+      if (isServerSendingAuthSuccess) {
+        _activatePostAuthCompression();
+      }
       return;
     }
 
@@ -416,12 +445,12 @@ class SSHTransport {
       // multiple of the block size (accounting for the 1 byte padding
       // length field), enforcing the SSH-mandated 4 byte minimum.
       final adjustedPaddingLength = _alignedPaddingLength(
-        data.length,
+        payload.length,
         blockSize,
       );
 
       // Calculate the total packet length (excluding the length field itself)
-      final packetLength = 1 + data.length + adjustedPaddingLength;
+      final packetLength = 1 + payload.length + adjustedPaddingLength;
 
       // Create the packet length field (4 bytes)
       final packetLengthBytes = Uint8List(4);
@@ -430,13 +459,13 @@ class SSHTransport {
       // Create the payload to be encrypted (padding length + payload + padding)
       final payloadToEncrypt = Uint8List(packetLength);
       payloadToEncrypt[0] = adjustedPaddingLength; // Set padding length
-      payloadToEncrypt.setRange(1, 1 + data.length, data); // Copy data
+      payloadToEncrypt.setRange(1, 1 + payload.length, payload); // Copy data
 
       // Add random padding (RFC 4253 §6 requires it).
-      payloadToEncrypt.setRange(
-        1 + data.length,
-        packetLength,
-        randomBytes(adjustedPaddingLength),
+      fillRandomBytes(
+        payloadToEncrypt,
+        1 + payload.length,
+        adjustedPaddingLength,
       );
 
       // Verify that the payload length is a multiple of the block size
@@ -456,12 +485,13 @@ class SSHTransport {
       final macBytes = mac.finish();
 
       // Build the final packet: length + encrypted payload + MAC
-      final buffer = BytesBuilder(copy: false);
-      buffer.add(packetLengthBytes);
-      buffer.add(encryptedPayload);
-      buffer.add(macBytes);
+      final outPacket = Uint8List(4 + encryptedPayload.length + macBytes.length)
+        ..setRange(0, 4, packetLengthBytes)
+        ..setRange(4, 4 + encryptedPayload.length, encryptedPayload)
+        ..setRange(4 + encryptedPayload.length,
+            4 + encryptedPayload.length + macBytes.length, macBytes);
 
-      socket.sink.add(buffer.takeBytes());
+      socket.sink.add(outPacket);
     } else {
       // For standard encryption or no encryption:
       // Use the original packet packing logic
@@ -469,7 +499,7 @@ class SSHTransport {
           ? SSHPacket.minAlign
           : max(SSHPacket.minAlign, _encryptCipher!.blockSize);
 
-      final packet = SSHPacket.pack(data, align: packetAlign);
+      final packet = SSHPacket.pack(payload, align: packetAlign);
 
       if (_encryptCipher == null) {
         socket.sink.add(packet);
@@ -477,19 +507,27 @@ class SSHTransport {
         final mac = _localMac!;
         final encryptedPacket = _encryptCipher!.processAll(packet);
 
-        final buffer = BytesBuilder(copy: false);
-        buffer.add(encryptedPacket);
-
         // Calculate MAC on the unencrypted packet
         mac.updateAll(_localPacketSN.value.toUint32());
         mac.updateAll(packet);
-        buffer.add(mac.finish());
+        final macBytes = mac.finish();
 
-        socket.sink.add(buffer.takeBytes());
+        final outPacket = Uint8List(encryptedPacket.length + macBytes.length)
+          ..setRange(0, encryptedPacket.length, encryptedPacket)
+          ..setRange(
+            encryptedPacket.length,
+            encryptedPacket.length + macBytes.length,
+            macBytes,
+          );
+
+        socket.sink.add(outPacket);
       }
     }
 
     _localPacketSN.increase();
+    if (isServerSendingAuthSuccess) {
+      _activatePostAuthCompression();
+    }
   }
 
   /// Sends a packet using the OpenSSH ChaCha20-Poly1305 construction.
@@ -506,46 +544,41 @@ class SSHTransport {
     ByteData.sublistView(packet, 0, 4).setUint32(0, packetLength);
     packet[4] = paddingLength;
     packet.setRange(5, 5 + data.length, data);
-    packet.setRange(
-      5 + data.length,
-      packet.length,
-      randomBytes(paddingLength),
-    );
+    fillRandomBytes(packet, 5 + data.length, paddingLength);
 
     socket.sink.add(cipher.encryptPacket(packet, _localPacketSN.value));
   }
 
   /// Sends a packet encrypted using AEAD (e.g. AES-GCM).
   ///
-  /// Constructs the packet length and padding, generates random padding bytes,
-  /// encrypts the payload with GCM, and writes the packet to the socket.
+  /// Constructs the packet length and padding directly in the final output
+  /// buffer and encrypts in place with [FastAesGcm] to avoid extra copies.
   void _sendAeadPacket(Uint8List data, SSHCipherType cipherType) {
     final paddingLength =
         _alignedPaddingLength(data.length, cipherType.blockSize);
     final packetLength = 1 + data.length + paddingLength;
+    final tagLength = cipherType.aeadTagSize;
 
-    final aad = Uint8List(4)..buffer.asByteData().setUint32(0, packetLength);
+    final packet = Uint8List(4 + packetLength + tagLength);
+    ByteData.sublistView(packet, 0, 4).setUint32(0, packetLength);
+    packet[4] = paddingLength;
+    packet.setRange(5, 5 + data.length, data);
+    // RFC 4253 §6 requires the padding to consist of random bytes.
+    fillRandomBytes(packet, 5 + data.length, paddingLength);
 
-    final plaintext = Uint8List(packetLength)
-      ..[0] = paddingLength
-      ..setRange(1, 1 + data.length, data)
-      // RFC 4253 §6 requires the padding to consist of random bytes.
-      ..setRange(1 + data.length, packetLength, randomBytes(paddingLength));
-
-    final encrypted = _processAead(
-      key: _localCipherKey!,
-      iv: _localIV!,
+    _localAesGcm!.encryptInto(
       sequence: _localAeadPacketCount++,
-      aad: aad,
-      input: plaintext,
-      forEncryption: true,
+      aad: packet,
+      aadOffset: 0,
+      aadLength: 4,
+      plaintext: packet,
+      plaintextOffset: 4,
+      plaintextLength: packetLength,
+      output: packet,
+      outputOffset: 4,
     );
 
-    final buffer = BytesBuilder(copy: false)
-      ..add(aad)
-      ..add(encrypted);
-
-    socket.sink.add(buffer.takeBytes());
+    socket.sink.add(packet);
   }
 
   /// Computes the correct padding length required to align the total packet size to [align] blocks.
@@ -554,41 +587,21 @@ class SSHTransport {
     return paddingLength < 4 ? paddingLength + align : paddingLength;
   }
 
-  /// Encrypts or decrypts [input] using the AES-GCM AEAD block cipher.
-  Uint8List _processAead({
-    required Uint8List key,
-    required Uint8List iv,
-    required int sequence,
-    required Uint8List aad,
-    required Uint8List input,
-    required bool forEncryption,
-  }) {
-    final cipher = GCMBlockCipher(AESEngine());
-    final nonce = _nonceForSequence(iv, sequence);
-    cipher.init(
-      forEncryption,
-      AEADParameters(KeyParameter(key), 128, nonce, aad),
-    );
-    return cipher.process(input);
-  }
-
-  /// Generates the AEAD nonce for a given [iv] and packet [sequence] number.
-  ///
-  /// XORs or appends the sequence number to the IV as specified by the cipher.
-  Uint8List _nonceForSequence(Uint8List iv, int sequence) {
-    if (iv.length != 12) {
-      throw ArgumentError.value(iv, 'iv', 'AEAD IV must be 12 bytes long');
+  /// Activates delayed compression (`zlib@openssh.com`) once authentication
+  /// succeeds (`SSH_MSG_USERAUTH_SUCCESS`).
+  void _activatePostAuthCompression() {
+    if (_isAuthenticated) return;
+    _isAuthenticated = true;
+    final localComp = _localCompressionType;
+    if (localComp != null && localComp.isDelayed && _localCompressor == null) {
+      _localCompressor = createSSHPacketCompressor(localComp);
     }
-
-    final nonce = Uint8List.fromList(iv);
-    final view = ByteData.sublistView(nonce);
-    // Two 32-bit words with carry rather than getUint64/setUint64 (which
-    // throw when compiled to JavaScript): see utils/int.dart. This also
-    // sidesteps combining the counter into a single int, which matters
-    // here because the counter is derived from key material and routinely
-    // has its top bit set.
-    view.addToUint64Split(4, sequence);
-    return nonce;
+    final remoteComp = _remoteCompressionType;
+    if (remoteComp != null &&
+        remoteComp.isDelayed &&
+        _remoteDecompressor == null) {
+      _remoteDecompressor = createSSHPacketDecompressor(remoteComp);
+    }
   }
 
   /// Closes the SSH transport, cancels the socket subscription, and terminates the connection.
@@ -787,7 +800,10 @@ class SSHTransport {
       // message header. [SSHPacket.maxLength] (35000), enforced in
       // [_verifyPacketLength], is the bound that actually applies.
 
-      await _handleMessage(payload);
+      final result = _handleMessage(payload);
+      if (result is Future) {
+        await result;
+      }
 
       if (_resetRemotePacketSN) {
         _resetRemotePacketSN = false;
@@ -802,13 +818,18 @@ class SSHTransport {
   /// WITHOUT `packet length`, `padding length`, `padding` and `MAC`. Returns
   /// `null` if there is not enough data in the buffer to read the packet.
   Uint8List? _consumePacket() {
+    final Uint8List? rawPayload;
     if (_remoteCipherType == SSHCipherType.chacha20poly1305 &&
         _remoteChaChaCipher != null) {
-      return _consumeChaChaPacket();
+      rawPayload = _consumeChaChaPacket();
+    } else if (_decryptCipher == null && _remoteAesGcm == null) {
+      rawPayload = _consumeClearTextPacket();
+    } else {
+      rawPayload = _consumeEncryptedPacket();
     }
-    return (_decryptCipher == null && _remoteCipherKey == null)
-        ? _consumeClearTextPacket()
-        : _consumeEncryptedPacket();
+    if (rawPayload == null) return null;
+    final decompressor = _remoteDecompressor;
+    return decompressor != null ? decompressor.decompress(rawPayload) : rawPayload;
   }
 
   /// Consumes and decrypts one OpenSSH ChaCha20-Poly1305 packet.
@@ -842,6 +863,7 @@ class SSHTransport {
       packet = cipher.decryptPacket(
         _buffer.view(0, encryptedPacketLength),
         _remotePacketSN.value,
+        knownPacketLength: packetLength,
       );
     } on InvalidCipherTextException {
       throw SSHPacketError('AEAD authentication failed');
@@ -908,8 +930,7 @@ class SSHTransport {
     final remoteCipherType = _remoteCipherType;
     if (remoteCipherType != null &&
         remoteCipherType.isAead &&
-        _remoteCipherKey != null &&
-        _remoteIV != null) {
+        _remoteAesGcm != null) {
       return _consumeAeadPacket(remoteCipherType);
     }
 
@@ -940,34 +961,24 @@ class SSHTransport {
         return null;
       }
 
-      // Get the packet length bytes
-      final packetLengthBytes = _buffer.view(0, 4);
-
-      // Get the encrypted payload and MAC
+      // Get contiguous view of packet length + encrypted payload for MAC, plus
+      // separate views for encrypted payload and MAC tag (zero copies).
+      final packetForMac = _buffer.view(0, 4 + packetLength);
       final encryptedPayload = _buffer.view(4, packetLength);
       final mac = _buffer.view(4 + packetLength, macLength);
 
       // Verify the MAC on the packet length and encrypted payload
-      final packetForMac = Uint8List(4 + packetLength);
-      packetForMac.setRange(0, 4, packetLengthBytes);
-      packetForMac.setRange(4, 4 + packetLength, encryptedPayload);
       _verifyPacketMac(packetForMac, mac, isEncrypted: true);
 
-      // Consume the packet and MAC from the buffer. The bytes we actually
-      // need (packetLengthBytes/encryptedPayload/mac) were already taken as
-      // views above and are fully used by this point, so there is nothing
-      // left to allocate here.
-      _buffer.skip(4 + packetLength + macLength);
-
-      // Ensure the encrypted payload length is a multiple of the block size
+      // Decrypt BEFORE skipping _buffer so retainBuffer cannot overwrite views.
       if (encryptedPayload.length % blockSize != 0) {
         throw SSHPacketError(
           'Encrypted payload length ${encryptedPayload.length} is not a multiple of block size $blockSize',
         );
       }
 
-      // Decrypt the payload
       final decryptedPayload = _decryptCipher!.processAll(encryptedPayload);
+      _buffer.skip(4 + packetLength + macLength);
 
       // Process the decrypted payload
       final paddingLength = decryptedPayload[0];
@@ -1061,33 +1072,31 @@ class SSHTransport {
     _verifyPacketLength(packetLength);
 
     final tagLength = cipherType.aeadTagSize;
-    if (_buffer.length < 4 + packetLength + tagLength) {
+    final totalLength = 4 + packetLength + tagLength;
+    if (_buffer.length < totalLength) {
       return null;
     }
 
-    // Views are safe here: aad is only read synchronously by _processAead
-    // below, and ciphertext/tag are copied into encryptedInput immediately.
-    final aad = _buffer.consumeView(4);
-    final ciphertext = _buffer.consumeView(packetLength);
-    final tag = _buffer.consumeView(tagLength);
-
-    final encryptedInput = Uint8List(packetLength + tagLength)
-      ..setRange(0, packetLength, ciphertext)
-      ..setRange(packetLength, packetLength + tagLength, tag);
+    // View the entire frame synchronously for decrypt, then skip so
+    // retainBuffer stays completely alias-free.
+    final frame = _buffer.view(0, totalLength);
 
     late Uint8List plaintext;
     try {
-      plaintext = _processAead(
-        key: _remoteCipherKey!,
-        iv: _remoteIV!,
+      plaintext = _remoteAesGcm!.decrypt(
         sequence: _remoteAeadPacketCount++,
-        aad: aad,
-        input: encryptedInput,
-        forEncryption: false,
+        aad: frame,
+        aadOffset: 0,
+        aadLength: 4,
+        ciphertextAndTag: frame,
+        ciphertextOffset: 4,
+        ciphertextAndTagLength: packetLength + tagLength,
       );
     } on InvalidCipherTextException {
+      _buffer.skip(totalLength);
       throw SSHPacketError('AEAD authentication failed');
     }
+    _buffer.skip(totalLength);
 
     final paddingLength = plaintext[0];
     final payloadLength = packetLength - paddingLength - 1;
@@ -1195,6 +1204,20 @@ class SSHTransport {
     final cipherType = isClient ? _clientCipherType : _serverCipherType;
     if (cipherType == null) throw StateError('No cipher type selected');
 
+    final compressionType =
+        isClient ? _clientCompressionType : _serverCompressionType;
+    _localCompressionType = compressionType;
+    if (compressionType == null || compressionType == SSHCompressionType.none) {
+      _localCompressor?.close();
+      _localCompressor = null;
+    } else if (!compressionType.isDelayed || _isAuthenticated) {
+      _localCompressor?.close();
+      _localCompressor = createSSHPacketCompressor(compressionType);
+    } else {
+      _localCompressor?.close();
+      _localCompressor = null;
+    }
+
     if (cipherType == SSHCipherType.chacha20poly1305) {
       final key = _deriveKey(
         isClient ? SSHDeriveKeyType.clientKey : SSHDeriveKeyType.serverKey,
@@ -1205,8 +1228,7 @@ class SSHTransport {
       _localCipherType = cipherType;
       _localMacType = null;
       _localChaChaCipher = chachaCipher;
-      _localCipherKey = null;
-      _localIV = null;
+      _localAesGcm = null;
       _encryptCipher = null;
       _localMac = null;
       _localAeadPacketCount = 0;
@@ -1226,8 +1248,7 @@ class SSHTransport {
       _localCipherType = cipherType;
       _localMacType = null;
       _localChaChaCipher = null;
-      _localCipherKey = cipherKey;
-      _localIV = iv;
+      _localAesGcm = FastAesGcm(cipherKey, iv);
       _encryptCipher = null;
       _localMac = null;
       _localAeadPacketCount = 0;
@@ -1252,8 +1273,7 @@ class SSHTransport {
     _localCipherType = cipherType;
     _localMacType = macType;
     _localChaChaCipher = null;
-    _localCipherKey = cipherKey;
-    _localIV = iv;
+    _localAesGcm = null;
     _encryptCipher = encryptCipher;
     _localMac = mac;
     _localAeadPacketCount = 0;
@@ -1263,6 +1283,20 @@ class SSHTransport {
   void _applyRemoteKeys() {
     final cipherType = isClient ? _serverCipherType : _clientCipherType;
     if (cipherType == null) throw StateError('No cipher type selected');
+
+    final compressionType =
+        isClient ? _serverCompressionType : _clientCompressionType;
+    _remoteCompressionType = compressionType;
+    if (compressionType == null || compressionType == SSHCompressionType.none) {
+      _remoteDecompressor?.close();
+      _remoteDecompressor = null;
+    } else if (!compressionType.isDelayed || _isAuthenticated) {
+      _remoteDecompressor?.close();
+      _remoteDecompressor = createSSHPacketDecompressor(compressionType);
+    } else {
+      _remoteDecompressor?.close();
+      _remoteDecompressor = null;
+    }
 
     if (cipherType == SSHCipherType.chacha20poly1305) {
       final key = _deriveKey(
@@ -1274,8 +1308,7 @@ class SSHTransport {
       _remoteCipherType = cipherType;
       _remoteMacType = null;
       _remoteChaChaCipher = chachaCipher;
-      _remoteCipherKey = null;
-      _remoteIV = null;
+      _remoteAesGcm = null;
       _decryptCipher = null;
       _remoteMac = null;
       _remoteAeadPacketCount = 0;
@@ -1295,8 +1328,7 @@ class SSHTransport {
       _remoteCipherType = cipherType;
       _remoteMacType = null;
       _remoteChaChaCipher = null;
-      _remoteCipherKey = cipherKey;
-      _remoteIV = iv;
+      _remoteAesGcm = FastAesGcm(cipherKey, iv);
       _decryptCipher = null;
       _remoteMac = null;
       _remoteAeadPacketCount = 0;
@@ -1321,8 +1353,7 @@ class SSHTransport {
     _remoteCipherType = cipherType;
     _remoteMacType = macType;
     _remoteChaChaCipher = null;
-    _remoteCipherKey = cipherKey;
-    _remoteIV = iv;
+    _remoteAesGcm = null;
     _decryptCipher = decryptCipher;
     _remoteMac = mac;
     _remoteAeadPacketCount = 0;
@@ -1425,6 +1456,7 @@ class SSHTransport {
     _kexInProgress = true;
     _sentKexInit = true;
 
+    final compressionNames = algorithms.effectiveCompression.toNameList();
     final message = SSH_Message_KexInit(
       kexAlgorithms: _localKexAlgorithmNames(),
       serverHostKeyAlgorithms: algorithms.hostkey.toNameList(),
@@ -1432,8 +1464,8 @@ class SSHTransport {
       encryptionServerToClient: algorithms.cipher.toNameList(),
       macClientToServer: algorithms.mac.toNameList(),
       macServerToClient: algorithms.mac.toNameList(),
-      compressionClientToServer: ['none'],
-      compressionServerToClient: ['none'],
+      compressionClientToServer: compressionNames,
+      compressionServerToClient: compressionNames,
       firstKexPacketFollows: false,
     );
 
@@ -1531,7 +1563,7 @@ class SSHTransport {
   }
 
   /// Dispatches the incoming decrypted packet payload to the appropriate message handler.
-  Future<void> _handleMessage(Uint8List message) async {
+  FutureOr<void> _handleMessage(Uint8List message) {
     final messageId = SSHMessage.readMessageId(message);
 
     // Under strict key exchange the optional transport messages are not
@@ -1553,16 +1585,17 @@ class SSHTransport {
         printTrace?.call('<- $socket: $disconnect');
         // The peer said why it is going away. Surface that instead of letting
         // the caller see an unexplained disconnection.
-        return closeWithError(
+        closeWithError(
           SSHDisconnectError(
             disconnect.reasonCode,
             disconnect.description,
           ),
         );
+        return null;
       case SSH_Message_Ignore.messageId:
         final ignore = SSH_Message_Ignore.decode(message);
         printTrace?.call('<- $socket: $ignore');
-        return;
+        return null;
       case SSH_Message_Unimplemented.messageId:
         final unimplemented = SSH_Message_Unimplemented.decode(message);
         printTrace?.call('<- $socket: $unimplemented');
@@ -1570,14 +1603,14 @@ class SSHTransport {
           'Received SSH_MSG_UNIMPLEMENTED for packet '
           '${unimplemented.sequenceNumber}',
         );
-        return;
+        return null;
       case SSH_Message_Debug.messageId:
         final debug = SSH_Message_Debug.decode(message);
         printTrace?.call('<- $socket: $debug');
         printDebug?.call(
           'Remote: ${utf8.decode(debug.message, allowMalformed: true)}',
         );
-        return;
+        return null;
       case SSH_Message_KexInit.messageId:
         return _handleMessageKexInit(message);
       case SSH_Message_KexDH_Reply.messageId:
@@ -1587,17 +1620,28 @@ class SSHTransport {
         return _handleMessageNewKeys(message);
       case SSH_Message_ExtInfo.messageId:
         if (_kexInProgress) {
-          return _handleUnexpectedKexMessage(messageId);
+          _handleUnexpectedKexMessage(messageId);
+          return null;
         }
-        return _handleMessageExtInfo(message);
+        _handleMessageExtInfo(message);
+        return null;
       default:
         if (_kexInProgress) {
-          return _handleUnexpectedKexMessage(messageId);
+          _handleUnexpectedKexMessage(messageId);
+          return null;
+        }
+
+        // OpenSSH `zlib@openssh.com` activates compression in both directions
+        // immediately after `SSH_MSG_USERAUTH_SUCCESS` (RFC 4252 §5.1).
+        if (!isServer &&
+            !_isAuthenticated &&
+            messageId == SSH_Message_Userauth_Success.messageId) {
+          _activatePostAuthCompression();
         }
 
         final messageHandler = onMessage;
         if (messageHandler != null) {
-          if (messageHandler(message)) return;
+          if (messageHandler(message)) return null;
         } else {
           // Deprecated path, kept so existing callers keep working. It
           // cannot report whether the message was recognized, so nothing is
@@ -1605,11 +1649,12 @@ class SSHTransport {
           final packetHandler = onPacket;
           if (packetHandler != null) {
             packetHandler(message);
-            return;
+            return null;
           }
         }
 
         _sendUnimplemented(messageId);
+        return null;
     }
   }
 
@@ -1740,6 +1785,16 @@ class SSHTransport {
       remoteAlgorithms: message.macServerToClient,
       isServer: isServer,
     );
+    _clientCompressionType = SSHKexUtils.selectAlgorithm(
+      localAlgorithms: algorithms.effectiveCompression,
+      remoteAlgorithms: message.compressionClientToServer,
+      isServer: isServer,
+    );
+    _serverCompressionType = SSHKexUtils.selectAlgorithm(
+      localAlgorithms: algorithms.effectiveCompression,
+      remoteAlgorithms: message.compressionServerToClient,
+      isServer: isServer,
+    );
 
     if (_kexType == null) {
       throw StateError('No matching key exchange algorithm');
@@ -1758,6 +1813,12 @@ class SSHTransport {
     }
     if (_serverMacType == null && !_serverCipherType!.isAead) {
       throw StateError('No matching server MAC algorithm');
+    }
+    if (_clientCompressionType == null) {
+      throw StateError('No matching client compression algorithm');
+    }
+    if (_serverCompressionType == null) {
+      throw StateError('No matching server compression algorithm');
     }
 
     printDebug?.call('SSHTransport._kexType: $_kexType');
