@@ -704,14 +704,17 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   ScrollHoldController? _directTouchScrollHold;
   Drag? _directTouchScrollDrag;
   Offset _lastTouchScrollPosition = Offset.zero;
-  // One calibrator learns the application's rows-per-wheel-report for both the
-  // trackpad handler and the touch-drag path below; this state feeds it.
-  final _wheelCalibrator = TerminalWheelScrollCalibrator();
+  // Separate calibrators track touch-marked wheel reports and unmarked
+  // trackpad/mouse wheel reports because remote helpers can give them
+  // different row steps (for example Copilot CLI's 1-row touch vs 3-row wheel).
+  final _touchWheelCalibrator = TerminalWheelScrollCalibrator();
+  final _pointerWheelCalibrator = TerminalWheelScrollCalibrator();
+  final _pointerScrollResetGeneration = ValueNotifier<int>(0);
   late final _touchScrollAccumulator = TerminalScrollAccumulator(
     terminal: () => widget.terminal,
     getLineHeight: () => renderTerminal.lineHeight,
     sendScrollEvent: _sendTouchScrollEvent,
-    calibrator: _wheelCalibrator,
+    calibrator: _touchWheelCalibrator,
     onDrained: _drainTouchScrollInput,
   );
   late bool _touchScrollIsAltBuffer;
@@ -864,7 +867,9 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _touchScrollIsAltBuffer = widget.terminal.isUsingAltBuffer;
       _touchScrollMouseMode = widget.terminal.mouseMode;
       _touchScrollMouseReportMode = widget.terminal.mouseReportMode;
-      _wheelCalibrator.reset(forgetEstimate: true);
+      _touchWheelCalibrator.reset(forgetEstimate: true);
+      _pointerWheelCalibrator.reset(forgetEstimate: true);
+      _pointerScrollResetGeneration.value += 1;
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
       _scheduleGraphicsAnimationSync();
@@ -892,18 +897,21 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       _scheduleGraphicsAnimationSync();
     }
     if (oldWidget.simulateScroll != widget.simulateScroll) {
-      _wheelCalibrator.reset();
+      _touchWheelCalibrator.reset();
+      _pointerWheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.touchScrollToTerminal != widget.touchScrollToTerminal) {
-      _wheelCalibrator.reset();
+      _touchWheelCalibrator.reset();
+      _pointerWheelCalibrator.reset();
       _cancelDirectTouchScrollDrag();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
     if (oldWidget.forceSgrTouchScroll != widget.forceSgrTouchScroll) {
-      _wheelCalibrator.reset();
+      _touchWheelCalibrator.reset();
+      _pointerWheelCalibrator.reset();
       _stopTouchScrollInertia();
       _resetTouchScrollDispatch();
     }
@@ -915,13 +923,15 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _syncGraphicsAnimationTicker();
   }
 
-  /// Resets wheel-scroll calibration and transient touch-scroll state.
+  /// Resets wheel-scroll calibration and transient scroll state.
   ///
   /// Pass [forgetEstimate] as true when the viewport switches to a different
   /// remote program (such as another tmux or MonkeyMux window) without
   /// replacing [MonkeyTerminalView.terminal].
   void resetWheelScrollCalibration({bool forgetEstimate = false}) {
-    _wheelCalibrator.reset(forgetEstimate: forgetEstimate);
+    _touchWheelCalibrator.reset(forgetEstimate: forgetEstimate);
+    _pointerWheelCalibrator.reset(forgetEstimate: forgetEstimate);
+    _pointerScrollResetGeneration.value += 1;
     _cancelDirectTouchScrollDrag();
     _stopTouchScrollInertia();
     _resetTouchScrollDispatch();
@@ -935,7 +945,9 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _pendingFocusInReportTimer?.cancel();
     _cancelDirectTouchScrollDrag();
     _touchScrollAccumulator.dispose();
-    _wheelCalibrator.dispose();
+    _touchWheelCalibrator.dispose();
+    _pointerWheelCalibrator.dispose();
+    _pointerScrollResetGeneration.dispose();
     _stopTouchScrollInertia();
     _resetTouchScrollDispatch();
     _touchScrollInertiaTicker.dispose();
@@ -992,13 +1004,19 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     _touchScrollMouseReportMode = nextMouseReportMode;
     if (transportChanged) {
       _cancelDirectTouchScrollDrag();
-      _wheelCalibrator.reset();
+      _touchWheelCalibrator.reset();
+      _pointerWheelCalibrator.reset();
       _resetTouchScrollDispatch();
       _stopTouchScrollInertia();
-    } else if (_wheelCalibrator.observingTerminalOutput) {
-      _wheelCalibrator.terminalChanged(
-        captureTerminalViewportLines(widget.terminal),
-      );
+    } else if (_touchWheelCalibrator.observingTerminalOutput ||
+        _pointerWheelCalibrator.observingTerminalOutput) {
+      final viewportLines = captureTerminalViewportLines(widget.terminal);
+      if (_touchWheelCalibrator.observingTerminalOutput) {
+        _touchWheelCalibrator.terminalChanged(viewportLines);
+      }
+      if (_pointerWheelCalibrator.observingTerminalOutput) {
+        _pointerWheelCalibrator.terminalChanged(viewportLines);
+      }
     }
 
     _syncGraphicsAnimationTicker();
@@ -1270,7 +1288,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         forceSgr: widget.forceSgrTouchScroll,
         getCellOffset: (offset) => renderTerminal.getCellOffset(offset),
         getLineHeight: () => renderTerminal.lineHeight,
-        calibrator: _wheelCalibrator,
+        calibrator: _pointerWheelCalibrator,
+        resetRemainderListenable: _pointerScrollResetGeneration,
         child: child,
       );
     }
@@ -1609,8 +1628,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
   void _onTouchScrollStart(DragStartDetails details) {
     _stopTouchScrollInertia();
     _lastTouchScrollPosition = details.localPosition;
-    if (!_wheelCalibrator.waitingForResponse) {
-      _wheelCalibrator.beginGesture();
+    if (!_touchWheelCalibrator.waitingForResponse) {
+      _touchWheelCalibrator.beginGesture();
       _resetTouchScrollDispatch(preserveRemainder: true);
     }
   }

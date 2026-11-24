@@ -774,4 +774,68 @@ func TestWriteWindowCopilotTouchWheelGating(t *testing.T) {
 	if got := pty.String(); got != "\x1b" {
 		t.Fatalf("expired Escape: pty=%q, want Escape", got)
 	}
+
+	// A window named "copilot" running another mouse-tracking program must not
+	// get Alt-wheel rewrites, whereas a confirmed/titled Copilot process behind
+	// a shell or generic runtime still does.
+	for _, tc := range []struct {
+		name               string
+		windowName         string
+		foregroundCommand  string
+		agentTool          string
+		agentToolConfirmed bool
+		paneTitle          string
+		want               string
+	}{
+		{
+			name:              "vim in window named copilot unchanged",
+			windowName:        "copilot",
+			foregroundCommand: "vim",
+			want:              touchUp,
+		},
+		{
+			name:              "unconfirmed shell named copilot unchanged",
+			windowName:        "copilot",
+			foregroundCommand: "zsh",
+			want:              touchUp,
+		},
+		{
+			name:               "vim after retained copilot unchanged",
+			windowName:         "copilot",
+			foregroundCommand:  "vim",
+			agentTool:          "copilot",
+			agentToolConfirmed: true,
+			want:               touchUp,
+		},
+		{
+			name:               "confirmed copilot behind shell rewritten",
+			windowName:         "shell",
+			foregroundCommand:  "pwsh",
+			agentTool:          "copilot",
+			agentToolConfirmed: true,
+			want:               touchUpAlt,
+		},
+		{
+			name:              "titled copilot behind node rewritten",
+			windowName:        "shell",
+			foregroundCommand: "node",
+			paneTitle:         "Copilot CLI",
+			want:              touchUpAlt,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installWheelTestClock(t)
+			server, window, pty := newWheelTestWindow(tc.foregroundCommand, true)
+			window.name = tc.windowName
+			window.agentTool = tc.agentTool
+			window.agentToolConfirmed = tc.agentToolConfirmed
+			window.paneTitle = tc.paneTitle
+			if err := server.writeWindowInput(window.id, []byte(touchUp), false); err != nil {
+				t.Fatal(err)
+			}
+			if got := pty.String(); got != tc.want {
+				t.Fatalf("PTY = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

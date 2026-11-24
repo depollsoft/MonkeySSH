@@ -1464,14 +1464,207 @@ void registerMonkeyTerminalViewTouchScrollTests() {
         await dragUpRows(9);
         expect(wheelCount, 3);
 
-        // Switching back to a one-row responder must likewise re-measure one
-        // row per event instead of staying throttled at three.
-        rowsPerWheel = 1;
+        // Switching back to a non-responding window must fall back to one row
+        // per event rather than retaining the previous window's three-row step.
+        rowsPerWheel = 0;
         wheelCount = 0;
         state.resetWheelScrollCalibration(forgetEstimate: true);
 
-        await dragUpRows(4);
-        expect(wheelCount, 4);
+        await dragUpRows(1);
+        expect(wheelCount, 1);
+        await tester.pump(const Duration(milliseconds: 350));
+
+        // After the timeout fallback, another one-row drag still uses one row
+        // per event instead of waiting for three rows.
+        wheelCount = 0;
+        await dragUpRows(1);
+        expect(wheelCount, 1);
+        await tester.pump(const Duration(milliseconds: 1000));
+      },
+    );
+
+    testWidgets(
+      'touch and trackpad calibrate independently when alternating on one view',
+      (tester) async {
+        final touchReport = RegExp(r'\x1b\[<64;0\d+;\d+M');
+        final pointerReport = RegExp(r'\x1b\[<64;[1-9]\d*;\d+M');
+
+        Future<void> verifyOrder({required bool trackpadFirst}) async {
+          final terminal = Terminal()
+            ..useAltBuffer()
+            ..setMouseMode(MouseMode.upDownScrollMove)
+            ..setMouseReportMode(MouseReportMode.sgr);
+          var topRow = 80;
+          var touchCount = 0;
+          var pointerCount = 0;
+          terminal.onOutput = (data) {
+            final touchMatches = touchReport.allMatches(data).length;
+            final pointerMatches = pointerReport.allMatches(data).length;
+            if (touchMatches == 0 && pointerMatches == 0) {
+              return;
+            }
+            touchCount += touchMatches;
+            pointerCount += pointerMatches;
+            // Mirrors Copilot CLI behind MonkeyMux: touch-marked reports step
+            // one row while unmarked trackpad/mouse wheel reports step three.
+            topRow -= touchMatches + pointerMatches * 3;
+            _renderAdaptiveScrollRows(terminal, topRow);
+          };
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: SizedBox(
+                width: 300,
+                height: 240,
+                child: MonkeyTerminalView(
+                  terminal,
+                  hardwareKeyboardOnly: true,
+                  simulateScroll: false,
+                ),
+              ),
+            ),
+          );
+          _renderAdaptiveScrollRows(terminal, topRow);
+          await tester.pump();
+
+          final state = tester.state<MonkeyTerminalViewState>(
+            find.byType(MonkeyTerminalView),
+          );
+          final lineHeight = state.renderTerminal.lineHeight;
+          final center = tester.getCenter(find.byType(MonkeyTerminalView));
+          final detector = tester.widget<MonkeyTerminalGestureDetector>(
+            find.byType(MonkeyTerminalGestureDetector),
+          );
+
+          Future<void> trackpadPanUpRows(int rows) async {
+            final gesture = await tester.createGesture(
+              kind: PointerDeviceKind.trackpad,
+            );
+            await gesture.panZoomStart(center);
+            await tester.pump();
+            await gesture.panZoomUpdate(
+              center + Offset(0, lineHeight * rows),
+              pan: Offset(0, lineHeight * rows),
+            );
+            await tester.pump();
+            await gesture.panZoomEnd();
+            await tester.pump(const Duration(milliseconds: 80));
+            await tester.pumpAndSettle();
+          }
+
+          Future<void> touchDragUpRows(int rows) async {
+            detector.onTouchScrollStart!(
+              DragStartDetails(
+                kind: PointerDeviceKind.touch,
+                localPosition: center,
+              ),
+            );
+            detector.onTouchScrollUpdate!(
+              DragUpdateDetails(
+                kind: PointerDeviceKind.touch,
+                globalPosition: center + Offset(0, lineHeight * rows),
+                localPosition: center + Offset(0, lineHeight * rows),
+                delta: Offset(0, lineHeight * rows),
+              ),
+            );
+            await tester.pump(const Duration(milliseconds: 80));
+            await tester.pumpAndSettle();
+          }
+
+          if (trackpadFirst) {
+            await trackpadPanUpRows(9);
+            expect(pointerCount, 3);
+            expect(touchCount, 0);
+
+            // Switching directly to touch without resetting must still move
+            // nine rows at one row per touch report.
+            await touchDragUpRows(9);
+            expect(touchCount, 9);
+            expect(pointerCount, 3);
+          } else {
+            await touchDragUpRows(9);
+            expect(touchCount, 9);
+            expect(pointerCount, 0);
+
+            // Switching directly to trackpad without resetting must calibrate
+            // to three rows per report instead of emitting nine reports.
+            await trackpadPanUpRows(9);
+            expect(pointerCount, 3);
+            expect(touchCount, 9);
+          }
+        }
+
+        await verifyOrder(trackpadFirst: true);
+        await verifyOrder(trackpadFirst: false);
+      },
+    );
+
+    testWidgets(
+      'resetWheelScrollCalibration clears pending trackpad scroll distance without remounting',
+      (tester) async {
+        final terminal = Terminal()
+          ..useAltBuffer()
+          ..setMouseMode(MouseMode.upDownScrollMove)
+          ..setMouseReportMode(MouseReportMode.sgr);
+        final output = <String>[];
+        terminal.onOutput = output.add;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SizedBox(
+              width: 300,
+              height: 240,
+              child: MonkeyTerminalView(
+                terminal,
+                hardwareKeyboardOnly: true,
+                simulateScroll: false,
+              ),
+            ),
+          ),
+        );
+        _renderAdaptiveScrollRows(terminal, 60);
+        await tester.pump();
+
+        final state = tester.state<MonkeyTerminalViewState>(
+          find.byType(MonkeyTerminalView),
+        );
+        final lineHeight = state.renderTerminal.lineHeight;
+        final center = tester.getCenter(find.byType(MonkeyTerminalView));
+
+        // Start a multi-row trackpad pan so the first probe is emitted and the
+        // remaining distance waits for calibration to settle.
+        var gesture = await tester.createGesture(
+          kind: PointerDeviceKind.trackpad,
+        );
+        await gesture.panZoomStart(center);
+        await tester.pump();
+        await gesture.panZoomUpdate(
+          center + Offset(0, lineHeight * 4),
+          pan: Offset(0, lineHeight * 4),
+        );
+        await tester.pump();
+        await gesture.panZoomEnd();
+        await tester.pump();
+        expect(output, hasLength(1));
+
+        // Switch windows while the probe is still pending. The leftover
+        // multi-row distance must not drain into the new window.
+        output.clear();
+        state.resetWheelScrollCalibration(forgetEstimate: true);
+        expect(state.mounted, isTrue);
+
+        gesture = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+        await gesture.panZoomStart(center);
+        await tester.pump();
+        await gesture.panZoomUpdate(
+          center + Offset(0, lineHeight * 0.5),
+          pan: Offset(0, lineHeight * 0.5),
+        );
+        await tester.pump();
+        await gesture.panZoomEnd();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        expect(output, isEmpty);
       },
     );
 

@@ -81,6 +81,12 @@ Widget buildTmuxExpandableBarTestHost({
   required WidgetRef ref,
   required SshSession session,
   required RemoteMultiplexerService remoteMultiplexerService,
+  void Function(
+    SshSession session,
+    String sessionName, {
+    required bool activeWindowChanged,
+  })?
+  onWindowStateChanged,
 }) => _TmuxExpandableBar(
   session: session,
   tmuxSessionName: 'main',
@@ -96,6 +102,7 @@ Widget buildTmuxExpandableBarTestHost({
   onAction: (_) async {},
   onExpandedChanged: (_) {},
   onSidebarDragOffsetChanged: (_) {},
+  onWindowStateChanged: onWindowStateChanged,
 );
 
 /// Expandable tmux bar shown as a bottom overlay or a wide-layout side rail.
@@ -872,7 +879,18 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       if (windows.isNotEmpty) {
         _windowReloadRecoveryRequested = false;
       }
+      final currentWindows = _windows;
+      final activeWindowChanged =
+          currentWindows != null &&
+          didDisplayedMuxWindowChange(
+            currentWindows,
+            windows,
+            backend: widget.activeMuxBackend,
+          );
       _applyWindows(windows);
+      if (activeWindowChanged) {
+        _notifyWindowStateChanged(activeWindowChanged: true);
+      }
       if (windows.isEmpty && _emptyWindowListEndsSession) {
         _notifySessionEnded();
       }

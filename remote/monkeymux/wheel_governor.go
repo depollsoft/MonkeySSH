@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -380,12 +381,35 @@ func wheelReport(data []byte) (length, buttonOffset, button int) {
 	return
 }
 
+// wheelAgentToolLocked identifies the agent currently owning wheel input in
+// the window. Unlike agentToolLocked (which also falls back to window names for
+// display and restore), wheel rewriting ignores a window name alone and rejects
+// specific non-agent foreground programs such as vim so another mouse-tracking
+// TUI in a window named after an agent keeps unmodified wheel reports.
+func (w *muxWindow) wheelAgentToolLocked() string {
+	if tool := agentToolFromCommandName(w.currentCommandLocked()); tool != "" {
+		return tool
+	}
+	if command := strings.TrimSpace(w.foregroundCommand); command != "" &&
+		!isShellCommandName(command) &&
+		!isGenericRuntimeCommandName(command) {
+		return ""
+	}
+	if tool := strings.TrimSpace(w.agentTool); tool != "" {
+		return tool
+	}
+	if w.agentToolConfirmed {
+		return ""
+	}
+	return agentToolFromTerminalTitle(w.paneTitle)
+}
+
 func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
 		w.processWheelProfile.forget()
 		return nil
 	}
-	profile := agentRegistry[w.agentToolLocked()].wheelProfile
+	profile := agentRegistry[w.wheelAgentToolLocked()].wheelProfile
 	if profile == nil || profile.processSpeed == nil {
 		w.processWheelProfile.forget()
 		return profile
