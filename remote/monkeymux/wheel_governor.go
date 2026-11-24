@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +34,11 @@ type wheelAccelerationProfile struct {
 	// TUI counts it: a report it reads as outside the mode while the governor
 	// still bypasses would keep the governor bypassed for the whole drag.
 	precisionSticky time.Duration
+	// touchWheelModifier, when non-zero, ORs those SGR modifier bits (for
+	// example 8 for Alt) into touch-marked SGR wheel reports (column written
+	// with a leading zero, as MonkeySSH sends for touch drags). Desktop mouse
+	// wheel and X10 reports pass through unchanged.
+	touchWheelModifier int
 }
 
 // wheelPrecisionModifiers are the Meta and Ctrl bits of a wheel report's
@@ -92,7 +98,7 @@ func (g *wheelGovernor) cappedSpeed(count int) int {
 
 func (g *wheelGovernor) drain(now time.Time) []byte {
 	var output []byte
-	if g.profile == nil || len(g.template) == 0 {
+	if g.profile == nil || g.profile.speed == nil || len(g.template) == 0 {
 		return output
 	}
 	for g.owed != 0 {
@@ -201,6 +207,13 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 			continue
 		}
 		reorder = false
+		if g.profile.touchWheelModifier != 0 {
+			report, button = applyTouchWheelModifier(report, button, g.profile.touchWheelModifier)
+		}
+		if g.profile.speed == nil {
+			output = append(output, report...)
+			continue
+		}
 		if g.inPrecisionMode(button, now) {
 			// The TUI starts its ramp afresh on entering precision mode, and
 			// rows owed from before could only be paid in it at a row each.
@@ -223,6 +236,33 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 		g.owed = 0
 	}
 	return output
+}
+
+// applyTouchWheelModifier ORs modifier bits into the button field of a
+// touch-marked SGR wheel report (ESC [ < button ; 0col ; row M). Unmarked SGR
+// reports (desktop mouse wheels) and X10 reports are returned unchanged.
+func applyTouchWheelModifier(report []byte, button, modifier int) ([]byte, int) {
+	if len(report) < 9 || report[0] != 0x1b || report[1] != '[' || report[2] != '<' {
+		return report, button
+	}
+	semiOffset := bytes.IndexByte(report[3:], ';')
+	if semiOffset <= 0 {
+		return report, button
+	}
+	colStart := 3 + semiOffset + 1
+	if colStart+1 >= len(report) || report[colStart] != '0' || report[colStart+1] < '0' || report[colStart+1] > '9' {
+		return report, button
+	}
+	updatedButton := button | modifier
+	if updatedButton == button {
+		return report, button
+	}
+	rest := report[3+semiOffset:]
+	out := make([]byte, 0, 3+3+len(rest))
+	out = append(out, "\x1b[<"...)
+	out = strconv.AppendInt(out, int64(updatedButton), 10)
+	out = append(out, rest...)
+	return out, updatedButton
 }
 
 // takeOpaque returns any withheld wheel-report prefix followed by data
@@ -341,12 +381,35 @@ func wheelReport(data []byte) (length, buttonOffset, button int) {
 	return
 }
 
+// wheelAgentToolLocked identifies the agent currently owning wheel input in
+// the window. Unlike agentToolLocked (which also falls back to window names for
+// display and restore), wheel rewriting ignores a window name alone and rejects
+// specific non-agent foreground programs such as vim so another mouse-tracking
+// TUI in a window named after an agent keeps unmodified wheel reports.
+func (w *muxWindow) wheelAgentToolLocked() string {
+	if tool := agentToolFromCommandName(w.currentCommandLocked()); tool != "" {
+		return tool
+	}
+	if command := strings.TrimSpace(w.foregroundCommand); command != "" &&
+		!isShellCommandName(command) &&
+		!isGenericRuntimeCommandName(command) {
+		return ""
+	}
+	if tool := strings.TrimSpace(w.agentTool); tool != "" {
+		return tool
+	}
+	if w.agentToolConfirmed {
+		return ""
+	}
+	return agentToolFromTerminalTitle(w.paneTitle)
+}
+
 func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
 		w.processWheelProfile.forget()
 		return nil
 	}
-	profile := agentRegistry[w.agentToolLocked()].wheelProfile
+	profile := agentRegistry[w.wheelAgentToolLocked()].wheelProfile
 	if profile == nil || profile.processSpeed == nil {
 		w.processWheelProfile.forget()
 		return profile

@@ -18,6 +18,8 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
     this.simulateScroll = true,
     this.forceSgr = false,
     this.calibrator,
+    this.resetRemainderListenable,
+    this.onScrollInputSent,
     required this.child,
   });
 
@@ -41,6 +43,14 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
   /// A wheel calibrator shared with the owner, which then feeds it terminal
   /// output. When null this handler creates and feeds its own.
   final TerminalWheelScrollCalibrator? calibrator;
+
+  /// Notifies this handler to discard buffered scroll remainder without
+  /// remounting the underlying [InfiniteScrollView].
+  final Listenable? resetRemainderListenable;
+
+  /// Called immediately before this handler emits scroll input to [terminal],
+  /// so sibling scroll calibrators can avoid measuring a coalesced redraw.
+  final VoidCallback? onScrollInputSent;
 
   final Widget child;
 
@@ -73,6 +83,7 @@ class _MonkeyTerminalScrollGestureHandlerState
   @override
   void initState() {
     widget.terminal.addListener(_onTerminalUpdated);
+    widget.resetRemainderListenable?.addListener(_handleExternalResetRemainder);
     isAltBuffer = widget.terminal.isUsingAltBuffer;
     mouseMode = widget.terminal.mouseMode;
     mouseReportMode = widget.terminal.mouseReportMode;
@@ -82,12 +93,23 @@ class _MonkeyTerminalScrollGestureHandlerState
   @override
   void dispose() {
     widget.terminal.removeListener(_onTerminalUpdated);
+    widget.resetRemainderListenable?.removeListener(
+      _handleExternalResetRemainder,
+    );
     _accumulator.dispose();
     super.dispose();
   }
 
   @override
   void didUpdateWidget(covariant MonkeyTerminalScrollGestureHandler oldWidget) {
+    if (oldWidget.resetRemainderListenable != widget.resetRemainderListenable) {
+      oldWidget.resetRemainderListenable?.removeListener(
+        _handleExternalResetRemainder,
+      );
+      widget.resetRemainderListenable?.addListener(
+        _handleExternalResetRemainder,
+      );
+    }
     if (oldWidget.terminal != widget.terminal) {
       oldWidget.terminal.removeListener(_onTerminalUpdated);
       widget.terminal.addListener(_onTerminalUpdated);
@@ -100,6 +122,10 @@ class _MonkeyTerminalScrollGestureHandlerState
       _accumulator.resetRemainder();
     }
     super.didUpdateWidget(oldWidget);
+  }
+
+  void _handleExternalResetRemainder() {
+    _accumulator.resetRemainder();
   }
 
   void _onTerminalUpdated() {
@@ -135,6 +161,12 @@ class _MonkeyTerminalScrollGestureHandlerState
     final button = up
         ? TerminalMouseButton.wheelUp
         : TerminalMouseButton.wheelDown;
+
+    final willSendMouse =
+        widget.forceSgr || widget.terminal.mouseMode.reportScroll;
+    if (willSendMouse || widget.simulateScroll) {
+      widget.onScrollInputSent?.call();
+    }
 
     final handled = sendTerminalScrollMouseInput(
       terminal: widget.terminal,
@@ -272,6 +304,12 @@ class TerminalScrollAccumulator {
               scrollRemainder -=
                   scrollDirection * lineHeight * (rows - previousRows);
               _drain(lineHeight);
+            },
+            onAborted: () {
+              if (_disposed) {
+                return;
+              }
+              scrollRemainder = 0;
             },
           );
       final handled = sendScrollEvent(up: scrollUp);

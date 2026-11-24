@@ -1090,6 +1090,98 @@ void registerTmuxWindowNavigatorTests() {
         }
       }
 
+      testWidgets(
+        'fallback reload notifies activeWindowChanged when active window switches',
+        (tester) async {
+          final events = StreamController<TmuxWindowChangeEvent>();
+          addTearDown(events.close);
+          const first = TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'shell',
+            isActive: true,
+          );
+          const second = TmuxWindow(
+            index: 1,
+            id: '@2',
+            name: 'copilot',
+            isActive: false,
+          );
+          var listCall = 0;
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) async {
+                listCall += 1;
+                if (listCall == 1) {
+                  return [first, second];
+                }
+                if (listCall == 2) {
+                  return [first, second];
+                }
+                return [
+                  first.copyWith(isActive: false),
+                  second.copyWith(isActive: true),
+                ];
+              });
+          when(() => tmuxService.watchWindowChanges(session, 'main'))
+              .thenAnswer((_) => events.stream);
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+
+          final activeChanges = <bool>[];
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                agentLaunchPresetServiceProvider.overrideWithValue(
+                  presetService,
+                ),
+                localNotificationServiceProvider.overrideWithValue(
+                  _RecordingNotifications(),
+                ),
+                hostNotificationPrefsProvider.overrideWith(
+                  (ref, hostId) => Stream.value(const HostNotificationPrefs()),
+                ),
+              ],
+              child: MaterialApp(
+                home: Scaffold(
+                  body: Consumer(
+                    builder: (context, ref, _) =>
+                        buildTmuxExpandableBarTestHost(
+                          ref: ref,
+                          session: session,
+                          remoteMultiplexerService: tmuxService,
+                          onWindowStateChanged: (
+                            _,
+                            _, {
+                            required activeWindowChanged,
+                          }) => activeChanges.add(activeWindowChanged),
+                        ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(activeChanges, isEmpty);
+
+          // Reload with unchanged active window reports only the initial
+          // non-active reload notification.
+          events.add(const TmuxWindowReloadEvent());
+          await tester.pumpAndSettle();
+          expect(activeChanges, [false]);
+
+          // Reload that discovers a switched active window must surface
+          // activeWindowChanged so the terminal resets wheel calibration.
+          activeChanges.clear();
+          events.add(const TmuxWindowReloadEvent());
+          await tester.pumpAndSettle();
+          expect(activeChanges, [false, true]);
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        },
+      );
+
       group('bar forwarded notifications', () {
         late _RecordingNotifications notifications;
         late StreamController<TmuxWindowChangeEvent> events;

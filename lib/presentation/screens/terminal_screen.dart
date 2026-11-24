@@ -2667,6 +2667,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _tmuxPostWindowSwitchExecQuietPeriod,
       );
       _terminalTextInputController.resetImeCompletions();
+      _terminalViewKey.currentState?.resetWheelScrollCalibration(
+        forgetEstimate: true,
+      );
     }
     _scheduleTmuxTerminalThemeRefreshAfterWindowStateChange(
       session: session,
@@ -11560,6 +11563,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ..synchronizeProgramStatus(null);
     }
     _terminalTextInputController.resetImeCompletions();
+    _terminalViewKey.currentState?.resetWheelScrollCalibration(
+      forgetEstimate: true,
+    );
     _clearTerminalFollowPauseForMuxWindowChange();
     _tmuxWorkingDirectory = workingDirectory;
     _tmuxCurrentCommand = null;
