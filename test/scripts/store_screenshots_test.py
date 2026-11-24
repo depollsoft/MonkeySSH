@@ -435,17 +435,6 @@ class LiveAgentCaptureTest(unittest.TestCase):
              patch.object(capture.os, 'kill'):
             demo._require_live_agent_windows()
 
-    def test_locked_keychain_stops_capture_with_the_unlock_command(self):
-        locked = subprocess.CompletedProcess(['security'], 36)
-        with patch.object(store_media.sys, 'platform', 'darwin'), \
-             patch.object(store_media.subprocess, 'run', return_value=locked):
-            with self.assertRaisesRegex(RuntimeError, 'security unlock-keychain'):
-                store_media.require_unlocked_keychain()
-        with patch.object(store_media.sys, 'platform', 'linux'), \
-             patch.object(store_media.subprocess, 'run') as run:
-            store_media.require_unlocked_keychain()
-        run.assert_not_called()
-
     def test_preflight_resolves_executable_aliases(self):
         def which(name):
             return None if name in {'agy', 'antigravity', 'hermes'} else '/tools/' + name
@@ -453,7 +442,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
             found = store_media.require_agent_executables()
         self.assertEqual(found['antigravity'], '/tools/antigravity-cli')
         self.assertEqual(found['hermes'], '/tools/hermes-agent')
-        self.assertEqual(len(found), 10)
+        self.assertEqual(len(found), 9)
 
     def test_capture_panes_do_not_inherit_the_running_agent_session(self):
         inherited = {
@@ -933,7 +922,6 @@ class CaptureLaunchTest(unittest.TestCase):
             scratch = Path(directory) / 'demo'
             scratch.mkdir()
             with patch.object(capture, 'require_agent_executables', return_value={}), \
-                 patch.object(capture, 'require_unlocked_keychain'), \
                  patch.object(capture.tempfile, 'mkdtemp', return_value=str(scratch)), \
                  patch.object(capture.StoreDemoEnvironment, '_extract_monkeymux',
                               side_effect=RuntimeError('checksum mismatch')):

@@ -135,7 +135,6 @@ const _requiredStoreAgentWindows = <String>{
   'codex',
   'opencode',
   'antigravity',
-  'cursor-agent',
   'pi',
 };
 

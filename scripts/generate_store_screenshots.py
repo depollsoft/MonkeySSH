@@ -32,7 +32,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 from store_media import (
-    ROOT, float_or_none, require_agent_executables, require_unlocked_keychain,
+    ROOT, float_or_none, require_agent_executables,
 )
 
 ADB: Path | None = None
@@ -200,7 +200,6 @@ def main() -> None:
         return
     if args.check_environment:
         require_agent_executables()
-        require_unlocked_keychain()
         print("All required store-capture agent CLIs are available.")
         if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
             _check_duo_environment()
@@ -433,7 +432,6 @@ def _build_android_screenshot_apk(
 class StoreDemoEnvironment:
     def __init__(self, *, seed_platform: str = 'both') -> None:
         self._agent_executables = require_agent_executables()
-        require_unlocked_keychain()
         self._seed_platform = seed_platform
         self._tmpdir = Path(tempfile.mkdtemp(prefix='monkeyssh-store-demo-'))
         self.username = getpass.getuser()
@@ -819,10 +817,9 @@ class StoreDemoEnvironment:
                     '3. codex   - Codex CLI workspace',
                     '4. opencode - OpenCode CLI workspace',
                     '5. antigravity - Antigravity CLI workspace',
-                    '6. cursor-agent - Cursor Agent workspace',
-                    '7. pi - Pi workspace',
-                    '8. hermes - Hermes workspace',
-                    '9. openclaw - OpenClaw workspace',
+                    '6. pi - Pi workspace',
+                    '7. hermes - Hermes workspace',
+                    '8. openclaw - OpenClaw workspace',
                     '',
                 ]
             )
