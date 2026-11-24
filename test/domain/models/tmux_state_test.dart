@@ -1381,31 +1381,48 @@ void main() {
   });
 
   group('buildTmuxCommand', () {
+    const tmuxOptionsSuffix =
+        '$tmuxEnableFocusEventsCommand $tmuxEnableAllowPassthroughCommand';
+
+    test(
+      'guards allow-passthrough against the global option on the same server',
+      () {
+        expect(
+          tmuxEnableAllowPassthroughCommand,
+          r'\; if-shell '
+          r"""'[ "$(tmux -S #{q:socket_path} show-options -gqv allow-passthrough 2>/dev/null)" = off ]' """
+          "'set-option -gq allow-passthrough on'",
+        );
+      },
+    );
+
     test('builds basic command', () {
       expect(
         buildTmuxCommand(sessionName: 'dev'),
-        r"tmux new-session -A -s 'dev' \; set-option -g focus-events on",
+        "tmux new-session -A -s 'dev' $tmuxOptionsSuffix",
       );
     });
 
     test('includes working directory', () {
       expect(
         buildTmuxCommand(sessionName: 'dev', workingDirectory: '/home/user'),
-        r"tmux new-session -A -s 'dev' -c '/home/user' \; set-option -g focus-events on",
+        "tmux new-session -A -s 'dev' -c '/home/user' $tmuxOptionsSuffix",
       );
     });
 
     test('includes extra flags', () {
       expect(
         buildTmuxCommand(sessionName: 'dev', extraFlags: '-x 200 -y 50'),
-        r"tmux new-session -A -s 'dev' -x 200 -y 50 \; set-option -g focus-events on",
+        "tmux new-session -A -s 'dev' -x 200 -y 50 $tmuxOptionsSuffix",
       );
     });
 
     test('supports tmux commands in extra flags', () {
       expect(
         buildTmuxCommand(sessionName: 'dev', extraFlags: r'\; set status off'),
-        r"tmux new-session -A -s 'dev' \; set status off \; set-option -g focus-events on",
+        "tmux new-session -A -s 'dev' "
+        r'\; set status off '
+        '$tmuxOptionsSuffix',
       );
     });
 
@@ -1416,7 +1433,7 @@ void main() {
           workingDirectory: '/tmp',
           extraFlags: '-n editor',
         ),
-        r"tmux new-session -A -s 'dev' -c '/tmp' -n editor \; set-option -g focus-events on",
+        "tmux new-session -A -s 'dev' -c '/tmp' -n editor $tmuxOptionsSuffix",
       );
     });
   });

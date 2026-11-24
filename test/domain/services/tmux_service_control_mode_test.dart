@@ -18,6 +18,17 @@ String _tmuxSendKeysHex(String value) => value.codeUnits
     .map((codeUnit) => codeUnit.toRadixString(16).padLeft(2, '0'))
     .join(' ');
 
+Future<ProcessResult?> _tryRunProcess(
+  String executable,
+  List<String> arguments,
+) async {
+  try {
+    return await Process.run(executable, arguments);
+  } on ProcessException {
+    return null;
+  }
+}
+
 void main() {
   test('keeps production exec channel backoff schedule', () {
     expect(resolveTmuxExecChannelBackoffDelay(1), const Duration(seconds: 2));
@@ -381,6 +392,13 @@ void main() {
         isNot(contains(r'send-keys -t "$pane" -H 1b 5b 3f 39 39 37')),
       );
       expect(command, isNot(contains(r'send-keys -t "$pane" -H 1b 5d')));
+      expect(
+        command,
+        contains(
+          r'if [ "$(tmux -u show-options -gqv allow-passthrough 2>/dev/null)" = off ]; '
+          'then tmux -u set-option -gq allow-passthrough on 2>/dev/null || true; fi;',
+        ),
+      );
       expect(command, contains(r"tmux -u list-clients -t 'dev'\''s session'"));
     });
 
@@ -391,6 +409,17 @@ void main() {
         extraFlags: '-S /tmp/tmux-socket -x 160 -L alerts',
       );
 
+      expect(
+        command,
+        contains(
+          r'if [ "$(tmux -u -S '
+          "'/tmp/tmux-socket' -L 'alerts' "
+          'show-options -gqv allow-passthrough 2>/dev/null)" = off ]; then '
+          'tmux -u -S '
+          "'/tmp/tmux-socket' -L 'alerts' "
+          'set-option -gq allow-passthrough on 2>/dev/null || true; fi;',
+        ),
+      );
       expect(
         command,
         contains(
@@ -431,6 +460,236 @@ void main() {
           r'refresh-client -t "$client"',
         ),
       );
+    });
+
+    test('allow-passthrough guards preserve global all and local overrides on live tmux', () async {
+      if (Platform.isWindows) {
+        return;
+      }
+      final versionResult = await _tryRunProcess('tmux', const ['-V']);
+      if (versionResult == null || versionResult.exitCode != 0) {
+        return;
+      }
+      final versionMatch = RegExp(r'tmux\s+(\d+)\.(\d+)')
+          .firstMatch(versionResult.stdout as String);
+      if (versionMatch == null) {
+        return;
+      }
+      final major = int.parse(versionMatch.group(1)!);
+      final minor = int.parse(versionMatch.group(2)!);
+      if (major < 3 || (major == 3 && minor < 4)) {
+        return;
+      }
+
+      final tempDir = await Directory.systemTemp.createTemp(
+        "monkeyssh tmux 'kitty' ",
+      );
+      final socketPath = "${tempDir.path}/my sock'1.sock";
+      final quotedSocket = "'${socketPath.replaceAll("'", "'\"'\"'")}'";
+
+      Future<ProcessResult> runTmux(List<String> args) =>
+          Process.run('tmux', ['-S', socketPath, ...args]);
+
+      Future<String> showOption(List<String> args) async {
+        final result = await runTmux(['show-options', ...args]);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        return (result.stdout as String).trim();
+      }
+
+      Future<ProcessResult> runShell(String command) =>
+          Process.run('/bin/sh', ['-c', command]);
+
+      addTearDown(() async {
+        await runTmux(const ['kill-server']);
+        if (tempDir.existsSync()) {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      // 1. Launch-path fragment: default off -> on on a custom socket with
+      //    spaces and a single quote in its path.
+      final startResult = await runShell(
+        'tmux -S $quotedSocket -f /dev/null new-session -d -s s1 '
+        '$tmuxEnableFocusEventsCommand '
+        '$tmuxEnableAllowPassthroughCommand',
+      );
+      expect(startResult.exitCode, 0, reason: '${startResult.stderr}');
+      expect(await showOption(const ['-gqv', 'allow-passthrough']), 'on');
+
+      // 2. Launch-path fragment: global `all` + local window/pane `off` must
+      //    keep global `all` and leave local overrides `off`.
+      await runTmux(const ['set-option', '-gq', 'allow-passthrough', 'all']);
+      await runTmux(const [
+        'set-option',
+        '-w',
+        '-t',
+        's1:0',
+        'allow-passthrough',
+        'off',
+      ]);
+      await runTmux(const [
+        'set-option',
+        '-p',
+        '-t',
+        's1:0.0',
+        'allow-passthrough',
+        'off',
+      ]);
+      final preserveLaunchResult = await runShell(
+        'tmux -S $quotedSocket has-session -t s1 '
+        '$tmuxEnableAllowPassthroughCommand',
+      );
+      expect(
+        preserveLaunchResult.exitCode,
+        0,
+        reason: '${preserveLaunchResult.stderr}',
+      );
+      expect(await showOption(const ['-gqv', 'allow-passthrough']), 'all');
+      expect(
+        await showOption(const ['-wqv', '-t', 's1:0', 'allow-passthrough']),
+        'off',
+      );
+      expect(
+        await showOption(const ['-pqv', '-t', 's1:0.0', 'allow-passthrough']),
+        'off',
+      );
+
+      // 3. Launch-path fragment: global `off` + local window/pane `all` must
+      //    upgrade global to `on` while preserving the local overrides.
+      await runTmux(const ['set-option', '-gq', 'allow-passthrough', 'off']);
+      await runTmux(const [
+        'set-option',
+        '-w',
+        '-t',
+        's1:0',
+        'allow-passthrough',
+        'all',
+      ]);
+      await runTmux(const [
+        'set-option',
+        '-p',
+        '-t',
+        's1:0.0',
+        'allow-passthrough',
+        'all',
+      ]);
+      final upgradeLaunchResult = await runShell(
+        'tmux -S $quotedSocket has-session -t s1 '
+        '$tmuxEnableAllowPassthroughCommand',
+      );
+      expect(
+        upgradeLaunchResult.exitCode,
+        0,
+        reason: '${upgradeLaunchResult.stderr}',
+      );
+      expect(await showOption(const ['-gqv', 'allow-passthrough']), 'on');
+      expect(
+        await showOption(const ['-wqv', '-t', 's1:0', 'allow-passthrough']),
+        'all',
+      );
+      expect(
+        await showOption(const ['-pqv', '-t', 's1:0.0', 'allow-passthrough']),
+        'all',
+      );
+
+      // 4. Refresh-path command: global `all` + local `off` preserves both.
+      final refreshCommand = buildTmuxRefreshTerminalThemeCommand(
+        's1',
+        TerminalThemes.dracula,
+        extraFlags: '-S $quotedSocket',
+      );
+      await runTmux(const ['set-option', '-gq', 'allow-passthrough', 'all']);
+      await runTmux(const [
+        'set-option',
+        '-w',
+        '-t',
+        's1:0',
+        'allow-passthrough',
+        'off',
+      ]);
+      await runTmux(const [
+        'set-option',
+        '-p',
+        '-t',
+        's1:0.0',
+        'allow-passthrough',
+        'off',
+      ]);
+      final preserveRefreshResult = await runShell(refreshCommand);
+      expect(
+        preserveRefreshResult.exitCode,
+        0,
+        reason: '${preserveRefreshResult.stderr}',
+      );
+      expect(await showOption(const ['-gqv', 'allow-passthrough']), 'all');
+      expect(
+        await showOption(const ['-wqv', '-t', 's1:0', 'allow-passthrough']),
+        'off',
+      );
+      expect(
+        await showOption(const ['-pqv', '-t', 's1:0.0', 'allow-passthrough']),
+        'off',
+      );
+
+      // 5. Refresh-path command: global `off` + local `all` upgrades global
+      //    to `on` and preserves local overrides.
+      await runTmux(const ['set-option', '-gq', 'allow-passthrough', 'off']);
+      await runTmux(const [
+        'set-option',
+        '-w',
+        '-t',
+        's1:0',
+        'allow-passthrough',
+        'on',
+      ]);
+      await runTmux(const [
+        'set-option',
+        '-p',
+        '-t',
+        's1:0.0',
+        'allow-passthrough',
+        'all',
+      ]);
+      final upgradeRefreshResult = await runShell(refreshCommand);
+      expect(
+        upgradeRefreshResult.exitCode,
+        0,
+        reason: '${upgradeRefreshResult.stderr}',
+      );
+      expect(await showOption(const ['-gqv', 'allow-passthrough']), 'on');
+      expect(
+        await showOption(const ['-wqv', '-t', 's1:0', 'allow-passthrough']),
+        'on',
+      );
+      expect(
+        await showOption(const ['-pqv', '-t', 's1:0.0', 'allow-passthrough']),
+        'all',
+      );
+
+      // 6. Flag-type option (matching tmux 3.3's OPTIONS_TABLE_FLAG
+      //    allow-passthrough, where `#{option}` formats as `0` while
+      //    `show-options -gqv` prints `off`) upgrades `off` -> `on`.
+      await runTmux(const ['set-option', '-gq', 'focus-events', 'off']);
+      final flagGuard = tmuxEnableAllowPassthroughCommand.replaceAll(
+        'allow-passthrough',
+        'focus-events',
+      );
+      final flagResult = await runShell(
+        'tmux -S $quotedSocket has-session -t s1 $flagGuard',
+      );
+      expect(flagResult.exitCode, 0, reason: '${flagResult.stderr}');
+      expect(await showOption(const ['-gqv', 'focus-events']), 'on');
+
+      // 7. Unknown option (simulating tmux < 3.3) stays a quiet no-op.
+      final unknownGuard = tmuxEnableAllowPassthroughCommand.replaceAll(
+        'allow-passthrough',
+        'nonexistent-monkeyssh-option',
+      );
+      final unknownResult = await runShell(
+        'tmux -S $quotedSocket has-session -t s1 $unknownGuard',
+      );
+      expect(unknownResult.exitCode, 0, reason: '${unknownResult.stderr}');
+      expect(unknownResult.stderr, isEmpty);
     });
 
     test('detectInstalledAgentTools caches empty results', () async {

@@ -2741,6 +2741,29 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       }
     });
 
+    test(
+      'unwraps tmux-passthrough Kitty graphics query and virtual placement',
+      () {
+        final decoder = TerminalTmuxPassthroughDecoder();
+        final responses = <String>[];
+        final terminal = Terminal()
+          ..kittyGraphicsTransmissionReplies = false
+          ..onOutput = responses.add;
+
+        final unwrapped = decoder.add(
+          '\x1bPtmux;\x1b\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\'
+          '\x1bPtmux;\x1b\x1b_Ga=t,U=1,f=32,s=1,v=1,i=42,c=2,r=2,q=2;/wAA/w==\x1b\x1b\\\x1b\\',
+        );
+        terminal.write(unwrapped);
+
+        expect(responses, ['\x1b_Gi=31;OK\x1b\\']);
+        expect(terminal.graphics.hasPendingImage(42), isTrue);
+        final placement = terminal.graphics.virtualPlacementById(42);
+        expect(placement, isNotNull);
+        expect((placement!.cols, placement.rows), (2, 2));
+      },
+    );
+
     test('answers terminal window and cell size reports', () {
       final result = buildTerminalWindowControlQueryResponses(
         input: 'before\x1b[14tmiddle\x1b[16tafter',

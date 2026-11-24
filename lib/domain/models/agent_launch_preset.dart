@@ -721,6 +721,7 @@ String buildAgentLaunchCommand(
       _quoteShellArgument(baseCommand),
       if (preset.tmuxDisableStatusBar) tmuxDisableStatusBarCommand,
       tmuxEnableFocusEventsCommand,
+      tmuxEnableAllowPassthroughCommand,
     ];
     return commandParts.join(' ');
   }

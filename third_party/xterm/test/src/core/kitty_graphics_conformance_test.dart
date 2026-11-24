@@ -1229,6 +1229,92 @@ void main() {
         ]);
       },
     );
+
+    testWidgets(
+      'supports tmux native Kitty graphics query, chunked upload, cropped placements, redraw delete and scroll',
+      (tester) async {
+        await tester.runAsync(() async {
+          final responses = <String>[];
+          final terminal = multiplexed(responses);
+
+          // tmux attach capability probe (`tty.c`).
+          terminal.write('\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\');
+          expect(responses, ['\x1b_Gi=31;OK\x1b\\']);
+          responses.clear();
+
+          // tmux runs in the alternate screen and uploads 4x4 RGBA (with its
+          // 1px border around a 2x2 cell image) in 3-byte-aligned base64 chunks
+          // with q=2 (matching KITTY_CHUNK_SIZE = 3072 in tmux image-kitty.c).
+          final rgba = Uint8List(4 * 4 * 4);
+          for (var i = 0; i < rgba.length; i += 4) {
+            rgba[i] = 255;
+            rgba[i + 3] = 255;
+          }
+          final chunk1 = base64.encode(rgba.sublist(0, 21));
+          final chunk2 = base64.encode(rgba.sublist(21, 42));
+          final chunk3 = base64.encode(rgba.sublist(42));
+          terminal
+            ..write('\x1b[?1049h')
+            ..write('\x1b_Ga=t,f=32,s=4,v=4,i=1,q=2,m=1;$chunk1\x1b\\')
+            ..write('\x1b_Gm=1;$chunk2\x1b\\')
+            ..write('\x1b_Gm=0;$chunk3\x1b\\')
+            ..write(
+              '\x1b[2;3H\x1b_Ga=p,i=1,p=1,x=1,y=1,w=2,h=2,c=1,r=1,C=1,q=2\x1b\\',
+            );
+
+          expect(terminal.buffer.cursorX, 2);
+          expect(terminal.buffer.cursorY, 1);
+          final first = _placementOf(terminal, 1);
+          expect(first, isNotNull);
+          expect(
+            (
+              col: first!.col,
+              row: first.row,
+              p: first.clientPlacementId,
+              srcX: first.srcX,
+              srcY: first.srcY,
+              srcW: first.srcWidth,
+              srcH: first.srcHeight,
+            ),
+            (col: 2, row: 1, p: 1, srcX: 1, srcY: 1, srcW: 2, srcH: 2),
+          );
+
+          // Trigger deferred decode (as the painter does) so the image is in
+          // `_images`, then verify lowercase `d=i,p=1` drops only the
+          // placement while retaining pixels for the replacement placement.
+          await terminal.graphics.resolveImage(1);
+          expect(terminal.graphics.imageById(1), isNotNull);
+
+          terminal
+            ..write('\x1b_Ga=d,d=i,i=1,p=1,q=2\x1b\\')
+            ..write(
+              '\x1b[3;3H\x1b_Ga=p,i=1,p=2,x=1,y=2,w=2,h=1,c=1,r=1,C=1,q=2\x1b\\',
+            );
+
+          final second = _placementOf(terminal, 1);
+          expect(second, isNotNull);
+          expect(
+            (col: second!.col, row: second.row, p: second.clientPlacementId),
+            (col: 2, row: 2, p: 2),
+          );
+
+          // Scroll region up by 1 (`imagescroll` / `Iscrl`): row 2 -> row 1.
+          terminal
+            ..write('\x1b[1;5r')
+            ..write('\x1b[1S');
+          final scrolled = _placementOf(terminal, 1);
+          expect(scrolled, isNotNull);
+          expect((col: scrolled!.col, row: scrolled.row), (col: 2, row: 1));
+
+          // Full delete (`d=I`) drops both placements and uploaded image data.
+          terminal.write('\x1b_Ga=d,d=I,i=1,q=2\x1b\\');
+          expect(terminal.graphics.placements, isEmpty);
+          expect(terminal.graphics.imageById(1), isNull);
+          expect(terminal.graphics.hasPendingImage(1), isFalse);
+          expect(responses, isEmpty);
+        });
+      },
+    );
   });
 
   group('reset and storage', () {
