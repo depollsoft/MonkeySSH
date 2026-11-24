@@ -125,6 +125,7 @@ class TerminalWheelScrollCalibrator {
   List<String>? _before;
   List<String>? _latestAfter;
   TerminalWheelCalibrationSettled? _onSettled;
+  void Function()? _onAborted;
   Timer? _settleTimer;
   Timer? _timeoutTimer;
   Timer? _quarantineTimer;
@@ -164,9 +165,13 @@ class TerminalWheelScrollCalibrator {
 
   /// Starts measuring one wheel report. Returns true when the caller should
   /// wait for the response before emitting another report.
+  ///
+  /// When [onAborted] is provided, it is invoked if an external scroll input
+  /// invalidates this measurement before it settles.
   bool begin({
     required List<String> before,
     required TerminalWheelCalibrationSettled onSettled,
+    void Function()? onAborted,
   }) {
     if (_isCalibrated ||
         waitingForResponse ||
@@ -176,8 +181,33 @@ class TerminalWheelScrollCalibrator {
     }
     _before = before;
     _onSettled = onSettled;
+    _onAborted = onAborted;
     _timeoutTimer = Timer(responseTimeout, _finishAtDeadline);
     return true;
+  }
+
+  /// Aborts any in-flight measurement and defers future probes until terminal
+  /// output from another scroll input path settles.
+  ///
+  /// Preserves an existing valid calibration estimate so already-calibrated
+  /// input paths keep their learned step size.
+  void noteExternalScrollInput() {
+    final wasWaiting = waitingForResponse;
+    final onAborted = _onAborted;
+    if (!wasWaiting &&
+        _isCalibrated &&
+        !_retryMeasurementOnNextGesture &&
+        !_isQuarantined) {
+      return;
+    }
+    if (wasWaiting) {
+      _cancelPending(notify: false);
+    }
+    _retryMeasurementOnNextGesture = true;
+    _startQuarantine();
+    if (wasWaiting) {
+      onAborted?.call();
+    }
   }
 
   /// Supplies the latest parsed screen after terminal output arrives.
@@ -279,6 +309,7 @@ class TerminalWheelScrollCalibrator {
     _latestAfter = null;
     final onSettled = _onSettled;
     _onSettled = null;
+    _onAborted = null;
     if (notify) {
       onSettled?.call(_rowsPerEvent, _rowsPerEvent);
     }

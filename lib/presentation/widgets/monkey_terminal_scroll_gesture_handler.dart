@@ -19,6 +19,7 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
     this.forceSgr = false,
     this.calibrator,
     this.resetRemainderListenable,
+    this.onScrollInputSent,
     required this.child,
   });
 
@@ -46,6 +47,10 @@ class MonkeyTerminalScrollGestureHandler extends StatefulWidget {
   /// Notifies this handler to discard buffered scroll remainder without
   /// remounting the underlying [InfiniteScrollView].
   final Listenable? resetRemainderListenable;
+
+  /// Called immediately before this handler emits scroll input to [terminal],
+  /// so sibling scroll calibrators can avoid measuring a coalesced redraw.
+  final VoidCallback? onScrollInputSent;
 
   final Widget child;
 
@@ -156,6 +161,12 @@ class _MonkeyTerminalScrollGestureHandlerState
     final button = up
         ? TerminalMouseButton.wheelUp
         : TerminalMouseButton.wheelDown;
+
+    final willSendMouse =
+        widget.forceSgr || widget.terminal.mouseMode.reportScroll;
+    if (willSendMouse || widget.simulateScroll) {
+      widget.onScrollInputSent?.call();
+    }
 
     final handled = sendTerminalScrollMouseInput(
       terminal: widget.terminal,
@@ -293,6 +304,12 @@ class TerminalScrollAccumulator {
               scrollRemainder -=
                   scrollDirection * lineHeight * (rows - previousRows);
               _drain(lineHeight);
+            },
+            onAborted: () {
+              if (_disposed) {
+                return;
+              }
+              scrollRemainder = 0;
             },
           );
       final handled = sendScrollEvent(up: scrollUp);

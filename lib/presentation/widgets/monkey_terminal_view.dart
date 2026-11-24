@@ -1290,6 +1290,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         getLineHeight: () => renderTerminal.lineHeight,
         calibrator: _pointerWheelCalibrator,
         resetRemainderListenable: _pointerScrollResetGeneration,
+        onScrollInputSent: _handlePointerScrollInputSent,
         child: child,
       );
     }
@@ -1679,11 +1680,29 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     }
     final handled = _sendTouchScrollMouseInput(button, position);
     if (!handled && widget.simulateScroll) {
+      _notifyExternalScrollInputToPointer();
       widget.terminal.keyInput(
         up ? TerminalKey.arrowUp : TerminalKey.arrowDown,
       );
     }
     return handled;
+  }
+
+  void _handlePointerScrollInputSent() {
+    final wasMeasuringTouch = _touchWheelCalibrator.waitingForResponse;
+    _touchWheelCalibrator.noteExternalScrollInput();
+    if (wasMeasuringTouch ||
+        _pendingTouchScrollRuns.isNotEmpty ||
+        _touchScrollInertiaSimulation != null) {
+      _stopTouchScrollInertia();
+      _resetTouchScrollDispatch();
+    }
+  }
+
+  void _notifyExternalScrollInputToPointer() {
+    if (!widget.touchScrollToTerminal) {
+      _pointerWheelCalibrator.noteExternalScrollInput();
+    }
   }
 
   void _enqueueTouchScrollRun(TerminalMouseButton button, CellOffset position) {
@@ -1811,14 +1830,19 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     TerminalMouseButton button,
     CellOffset position, {
     int repeatCount = 1,
-  }) => sendTerminalScrollMouseInput(
-    terminal: widget.terminal,
-    button: button,
-    position: position,
-    forceSgr: widget.forceSgrTouchScroll,
-    fromTouch: true,
-    repeatCount: repeatCount,
-  );
+  }) {
+    if (widget.forceSgrTouchScroll || widget.terminal.mouseMode.reportScroll) {
+      _notifyExternalScrollInputToPointer();
+    }
+    return sendTerminalScrollMouseInput(
+      terminal: widget.terminal,
+      button: button,
+      position: position,
+      forceSgr: widget.forceSgrTouchScroll,
+      fromTouch: true,
+      repeatCount: repeatCount,
+    );
+  }
 
   CellOffset _resolveViewportMousePosition(Offset localPosition) {
     final cellSize = renderTerminal.cellSize;

@@ -1550,6 +1550,7 @@ void registerMonkeyTerminalViewTouchScrollTests() {
             await gesture.panZoomEnd();
             await tester.pump(const Duration(milliseconds: 80));
             await tester.pumpAndSettle();
+            await tester.pump(const Duration(milliseconds: 80));
           }
 
           Future<void> touchDragUpRows(int rows) async {
@@ -1569,6 +1570,7 @@ void registerMonkeyTerminalViewTouchScrollTests() {
             );
             await tester.pump(const Duration(milliseconds: 80));
             await tester.pumpAndSettle();
+            await tester.pump(const Duration(milliseconds: 80));
           }
 
           if (trackpadFirst) {
@@ -1596,6 +1598,167 @@ void registerMonkeyTerminalViewTouchScrollTests() {
 
         await verifyOrder(trackpadFirst: true);
         await verifyOrder(trackpadFirst: false);
+      },
+    );
+
+    testWidgets(
+      'switching between touch and trackpad before calibration settles ignores coalesced redraw',
+      (tester) async {
+        final touchReport = RegExp(r'\x1b\[<64;0\d+;\d+M');
+        final pointerReport = RegExp(r'\x1b\[<64;[1-9]\d*;\d+M');
+
+        Future<void> verifyOverlap({
+          required bool touchFirst,
+          bool preCalibratePointer = false,
+        }) async {
+          final terminal = Terminal()
+            ..useAltBuffer()
+            ..setMouseMode(MouseMode.upDownScrollMove)
+            ..setMouseReportMode(MouseReportMode.sgr);
+          var topRow = 120;
+          var deferResponses = false;
+          var pendingRows = 0;
+          var touchCount = 0;
+          var pointerCount = 0;
+          terminal.onOutput = (data) {
+            final touchMatches = touchReport.allMatches(data).length;
+            final pointerMatches = pointerReport.allMatches(data).length;
+            if (touchMatches == 0 && pointerMatches == 0) {
+              return;
+            }
+            touchCount += touchMatches;
+            pointerCount += pointerMatches;
+            final deltaRows = touchMatches + pointerMatches * 3;
+            if (deferResponses) {
+              pendingRows += deltaRows;
+            } else {
+              topRow -= deltaRows;
+              _renderAdaptiveScrollRows(terminal, topRow);
+            }
+          };
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: SizedBox(
+                width: 300,
+                height: 240,
+                child: MonkeyTerminalView(
+                  terminal,
+                  hardwareKeyboardOnly: true,
+                  simulateScroll: false,
+                ),
+              ),
+            ),
+          );
+          _renderAdaptiveScrollRows(terminal, topRow);
+          await tester.pump();
+
+          final state = tester.state<MonkeyTerminalViewState>(
+            find.byType(MonkeyTerminalView),
+          );
+          final lineHeight = state.renderTerminal.lineHeight;
+          final center = tester.getCenter(find.byType(MonkeyTerminalView));
+          final detector = tester.widget<MonkeyTerminalGestureDetector>(
+            find.byType(MonkeyTerminalGestureDetector),
+          );
+
+          Future<void> sendTrackpadPan(int rows) async {
+            final gesture = await tester.createGesture(
+              kind: PointerDeviceKind.trackpad,
+            );
+            await gesture.panZoomStart(center);
+            await tester.pump();
+            await gesture.panZoomUpdate(
+              center + Offset(0, lineHeight * rows),
+              pan: Offset(0, lineHeight * rows),
+            );
+            await tester.pump();
+            await gesture.panZoomEnd();
+            await tester.pump();
+          }
+
+          Future<void> sendTouchDrag(int rows) async {
+            detector.onTouchScrollStart!(
+              DragStartDetails(
+                kind: PointerDeviceKind.touch,
+                localPosition: center,
+              ),
+            );
+            detector.onTouchScrollUpdate!(
+              DragUpdateDetails(
+                kind: PointerDeviceKind.touch,
+                globalPosition: center + Offset(0, lineHeight * rows),
+                localPosition: center + Offset(0, lineHeight * rows),
+                delta: Offset(0, lineHeight * rows),
+              ),
+            );
+            await tester.pump();
+          }
+
+          if (preCalibratePointer) {
+            await sendTrackpadPan(6);
+            await tester.pump(const Duration(milliseconds: 80));
+            await tester.pumpAndSettle();
+            await tester.pump(const Duration(milliseconds: 80));
+            expect(pointerCount, 2);
+            expect(touchCount, 0);
+            pointerCount = 0;
+          }
+
+          // Hold SSH redraws so both input methods put a report on the wire
+          // before a single coalesced four-row redraw arrives.
+          deferResponses = true;
+          if (touchFirst) {
+            await sendTouchDrag(4);
+            expect(touchCount, 1);
+            expect(pointerCount, 0);
+
+            await sendTrackpadPan(preCalibratePointer ? 3 : 1);
+            expect(pointerCount, 1);
+          } else {
+            await sendTrackpadPan(4);
+            expect(pointerCount, 1);
+            expect(touchCount, 0);
+
+            await sendTouchDrag(1);
+            expect(touchCount, 1);
+          }
+          expect(pendingRows, 4);
+
+          // Deliver the coalesced four-row redraw and let quarantine settle.
+          // Neither calibrator may persist four rows per report, and aborted
+          // remainder from the first gesture must not drain.
+          topRow -= pendingRows;
+          pendingRows = 0;
+          _renderAdaptiveScrollRows(terminal, topRow);
+          await tester.pump(const Duration(milliseconds: 100));
+          await tester.pumpAndSettle();
+          expect(touchCount, 1);
+          expect(pointerCount, 1);
+
+          // Subsequent clean gestures calibrate to their own true step sizes.
+          deferResponses = false;
+          touchCount = 0;
+          pointerCount = 0;
+
+          await sendTouchDrag(9);
+          await tester.pump(const Duration(milliseconds: 80));
+          await tester.pumpAndSettle();
+          await tester.pump(const Duration(milliseconds: 80));
+          expect(touchCount, 9);
+          expect(pointerCount, 0);
+
+          await sendTrackpadPan(9);
+          await tester.pump(const Duration(milliseconds: 80));
+          await tester.pumpAndSettle();
+          await tester.pump(const Duration(milliseconds: 80));
+          expect(pointerCount, 3);
+          expect(touchCount, 9);
+        }
+
+        await verifyOverlap(touchFirst: true);
+        await verifyOverlap(touchFirst: false);
+        await verifyOverlap(touchFirst: true, preCalibratePointer: true);
       },
     );
 
