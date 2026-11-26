@@ -1129,8 +1129,13 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     return key;
   }
 
-  /// Avoids Copilot's `auto` router when a direct Sonnet model is advertised,
-  /// because `auto` can end a turn after reasoning tokens with no visible text.
+  /// Explicitly locks a direct Sonnet model on the ACP session.
+  ///
+  /// Copilot ACP initially advertises `claude-sonnet-*` as `currentValue` in
+  /// `session/new` before applying user config / admin-managed overrides to
+  /// `auto` on the first turn, and `auto` can end a turn after reasoning tokens
+  /// with no visible text. Calling `setConfigOption` unconditionally pins the
+  /// chosen model before sending the prompt.
   Future<void> _selectNativeCopilotModel(
     AcpSessionManager manager,
     AcpSessionKey key,
@@ -1146,7 +1151,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
           for (final item in group.options) item.value,
       ];
       final preferred = _pickNativeCopilotModelId(candidateIds);
-      if (preferred != null && preferred != option.currentValue) {
+      if (preferred != null) {
         await manager
             .setConfigOption(key, configId: option.id, value: preferred)
             .timeout(const Duration(seconds: 20));
@@ -1158,7 +1163,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     final preferred = _pickNativeCopilotModelId([
       for (final model in modelState.availableModels) model.id,
     ]);
-    if (preferred != null && preferred != modelState.currentModelId) {
+    if (preferred != null) {
       await manager
           .setModel(key, preferred)
           .timeout(const Duration(seconds: 20));
