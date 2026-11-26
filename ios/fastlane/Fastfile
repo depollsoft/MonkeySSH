@@ -178,40 +178,77 @@ platform :ios do
         'Fastlane App#get_edit_app_store_version was not found.',
       )
     end
-
-    next if app_class.method_defined?(
-      :monkeyssh_original_get_edit_app_store_version,
-    )
-
-    app_class.class_eval do
-      alias_method :monkeyssh_original_get_edit_app_store_version,
-                   :get_edit_app_store_version
-
-      def get_edit_app_store_version(
-        client: nil,
-        platform: nil,
-        includes: Spaceship::ConnectAPI::AppStoreVersion::ESSENTIAL_INCLUDES
+    unless app_class.method_defined?(:fetch_edit_app_info)
+      UI.user_error!(
+        'Fastlane App#fetch_edit_app_info was not found.',
       )
-        client ||= Spaceship::ConnectAPI
-        platform ||= Spaceship::ConnectAPI::Platform::IOS
-        current = monkeyssh_original_get_edit_app_store_version(
-          client: client,
-          platform: platform,
-          includes: includes,
-        )
-        ready = get_app_store_versions(
-          client: client,
-          filter: {
-            appVersionState:
-              Spaceship::ConnectAPI::AppStoreVersion::AppVersionState::READY_FOR_REVIEW,
-            platform: platform,
-          },
-          includes: includes,
-        ).max_by { |version| Gem::Version.new(version.version_string) }
+    end
 
-        [current, ready]
-          .compact
-          .max_by { |version| Gem::Version.new(version.version_string) }
+    unless app_class.method_defined?(:monkeyssh_original_get_edit_app_store_version)
+      app_class.class_eval do
+        alias_method :monkeyssh_original_get_edit_app_store_version,
+                     :get_edit_app_store_version
+
+        def get_edit_app_store_version(
+          client: nil,
+          platform: nil,
+          includes: Spaceship::ConnectAPI::AppStoreVersion::ESSENTIAL_INCLUDES
+        )
+          client ||= Spaceship::ConnectAPI
+          platform ||= Spaceship::ConnectAPI::Platform::IOS
+          current = monkeyssh_original_get_edit_app_store_version(
+            client: client,
+            platform: platform,
+            includes: includes,
+          )
+          ready = get_app_store_versions(
+            client: client,
+            filter: {
+              appVersionState:
+                Spaceship::ConnectAPI::AppStoreVersion::AppVersionState::READY_FOR_REVIEW,
+              platform: platform,
+            },
+            includes: includes,
+          ).max_by { |version| Gem::Version.new(version.version_string) }
+
+          [current, ready]
+            .compact
+            .max_by { |version| Gem::Version.new(version.version_string) }
+        end
+      end
+    end
+
+    unless app_class.method_defined?(:monkeyssh_original_fetch_edit_app_info)
+      app_class.class_eval do
+        alias_method :monkeyssh_original_fetch_edit_app_info,
+                     :fetch_edit_app_info
+
+        def fetch_edit_app_info(
+          client: nil,
+          includes: Spaceship::ConnectAPI::AppInfo::ESSENTIAL_INCLUDES
+        )
+          client ||= Spaceship::ConnectAPI
+          current = monkeyssh_original_fetch_edit_app_info(
+            client: client,
+            includes: includes,
+          )
+          return current if current
+
+          models = client.get_app_infos(app_id: id, includes: includes).to_models
+          ready = models.find do |model|
+            model.state == Spaceship::ConnectAPI::AppInfo::State::READY_FOR_REVIEW
+          end
+          return ready if ready
+
+          if defined?(FastlaneCore::UI)
+            states = models.map(&:state).compact.uniq.join(', ')
+            FastlaneCore::UI.important(
+              'No editable AppInfo found; App Store Connect returned states: ' \
+              "#{states.empty? ? 'none' : states}",
+            )
+          end
+          nil
+        end
       end
     end
   end
@@ -913,6 +950,9 @@ platform :ios do
       submission_information: {
         export_compliance_uses_encryption: false,
       },
+      # Cap deliver's nil-backoff retries (~5 min total instead of 20 min) so a
+      # missing AppInfo falls back cleanly instead of timing out the macOS job.
+      version_check_wait_retry_limit: 4,
       force: true,
     }
     deliver_options[:app_version] = app_version unless app_version.empty?

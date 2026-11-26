@@ -134,9 +134,32 @@ class FastfileDeliveryTest < Minitest::Test
       options = harness.calls.assoc(:deliver).last
       assert_equal previews_dir, options[:app_previews_path]
       assert options[:overwrite_preview_videos]
+      assert_equal 4, options[:version_check_wait_retry_limit]
     end
   ensure
     Dir.rmdir(previews_dir) if previews_dir && !existed && Dir.exist?(previews_dir)
+  end
+
+  def test_ready_for_review_lookup_patch_includes_ready_for_review_app_info
+    @harness.patch_app_store_ready_for_review_lookup
+
+    ready_info = Struct.new(:state).new('READY_FOR_REVIEW')
+    live_info = Struct.new(:state).new('READY_FOR_DISTRIBUTION')
+    editable_info = Struct.new(:state).new('PREPARE_FOR_SUBMISSION')
+
+    client_with = Struct.new(:models) do
+      def get_app_infos(app_id:, includes:)
+        Struct.new(:to_models).new(models)
+      end
+    end
+
+    app = Spaceship::ConnectAPI::App.new('app-id', nil)
+    assert_equal ready_info, app.fetch_edit_app_info(client: client_with.new([live_info, ready_info]))
+
+    app_with_editable = Spaceship::ConnectAPI::App.new('app-id', editable_info)
+    assert_equal editable_info, app_with_editable.fetch_edit_app_info(client: client_with.new([live_info]))
+
+    assert_nil app.fetch_edit_app_info(client: client_with.new([live_info]))
   end
 
   def test_ci_beta_upload_passes_notes_to_followup_instead_of_waiting_on_mac
@@ -345,11 +368,41 @@ end
 # External API boundaries only. Lane code above is loaded from the Fastfile.
 module Spaceship
   module ConnectAPI
+    module Platform
+      IOS = 'IOS'
+    end
+
+    class AppStoreVersion
+      ESSENTIAL_INCLUDES = 'appStoreVersionLocalizations'
+      module AppVersionState
+        READY_FOR_REVIEW = 'READY_FOR_REVIEW'
+      end
+    end
+
+    class AppInfo
+      ESSENTIAL_INCLUDES = 'primaryCategory'
+      module State
+        READY_FOR_REVIEW = 'READY_FOR_REVIEW'
+      end
+    end
+
     class App
+      attr_reader :id
+
+      def initialize(id = 'app-id', original_app_info = nil)
+        @id = id
+        @original_app_info = original_app_info
+      end
+
       def self.find(*) = raise('App Store API must be stubbed')
+
+      def get_edit_app_store_version(client: nil, platform: nil, includes: nil) = nil
+
+      def fetch_edit_app_info(client: nil, includes: nil) = @original_app_info
     end
   end
 end
+$LOADED_FEATURES << 'spaceship/connect_api/models/app.rb'
 
 module FastlaneCore
   class BuildWatcher
