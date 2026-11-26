@@ -248,21 +248,37 @@ def _validate_ocr_content(paths: list[Path]) -> None:
 
 
 def _validate_native_copilot_scene(path: Path, text: str) -> None:
-    """Require a visible assistant reply between the prompt/context line and composer."""
+    """Require a visible assistant reply between the prompt and composer."""
     lower = text.casefold()
-    start = lower.find('load skills')
-    context_pos = lower.find('context', max(0, start))
-    if context_pos != -1:
-        start = context_pos + len('context')
-    elif start != -1:
+    end = lower.find('message the agent')
+    prefix = text if end == -1 else text[:end]
+    prefix_lower = prefix.casefold()
+
+    start = prefix_lower.find('load skills')
+    if start != -1:
         start += len('load skills')
     else:
-        start = 0
-    end = lower.find('message the agent', start)
-    reply_slice = text[start:] if end == -1 else text[start:end]
-    # Strip context-bar percentage tokens (e.g. "16%") so a blank chat fails.
-    reply_body = re.sub(r'\b\d{1,3}%\b', '', reply_slice)
-    if len(re.sub(r'\s+', '', reply_body)) < 80:
+        sticky = prefix_lower.find('review this reconnect plan')
+        if sticky != -1:
+            ellipsis = prefix_lower.find('...', sticky)
+            if ellipsis != -1:
+                start = ellipsis + 3
+            else:
+                start = sticky + len('review this reconnect plan')
+        else:
+            start = 0
+
+    reply_slice = prefix[start:]
+    # Strip the context-usage footer (e.g. "32.5k / 200k context 16%") so a
+    # blank reply with only the prompt and usage bar fails.
+    reply_body = re.sub(
+        r'\d+(?:\.\d+)?[km]?\s*/\s*\d+(?:\.\d+)?[km]?\s*context\b[^a-zA-Z]*?(?:\b\d{1,3}%\b)?',
+        '',
+        reply_slice,
+        flags=re.IGNORECASE,
+    )
+    reply_body = re.sub(r'[^a-zA-Z0-9]+', '', reply_body)
+    if len(reply_body) < 80:
         raise ValueError(
             f'{store_media.display_path(path)} shows the native Copilot prompt '
             'without a visible assistant reply; regenerate with a model that '

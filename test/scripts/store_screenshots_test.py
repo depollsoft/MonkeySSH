@@ -1081,15 +1081,28 @@ class CaptureLaunchTest(unittest.TestCase):
         replied_chat = (
             'Review this reconnect plan: keep the remote agent running. '
             'Do not run tools, read files, or load skills. '
-            '32.7k / 200k context 16% '
             '1. Drop SSH mid-task and verify reconnect keeps the session alive. '
             '2. Backoff caps at 30 seconds before resuming by session id. '
             'delay = 1s retry ssh connect resume by id '
+            '32.7k / 200k context 16% '
             'Message the agent'
         )
         validate._validate_native_copilot_scene(
             ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png',
             replied_chat,
+        )
+
+        scrolled_chat = (
+            'Agent MonkeyMux store@local-demo session #1 '
+            'you • Review this reconnect plan: keep the remote agent ru... '
+            '1. Drop SSH mid-task and verify reconnect keeps the session alive. '
+            '2. Backoff caps at 30 seconds before resuming by session id. '
+            '32.4k / 200k context 16% '
+            'Message the agent'
+        )
+        validate._validate_native_copilot_scene(
+            ROOT / 'android/fastlane/metadata-production/android/en-US/images/phoneScreenshots/7.png',
+            scrolled_chat,
         )
 
         with self.assertRaisesRegex(ValueError, 'private local username'):
