@@ -75,6 +75,11 @@ BAD_OCR_PATTERNS = {
         re.IGNORECASE,
     ),
     'private local path': re.compile(r'/Users/depoll|/private/var/folders', re.IGNORECASE),
+    'private local username': re.compile(r'\bdepoll@', re.IGNORECASE),
+    'Copilot admin model override notice': re.compile(
+        r'administrator-managed setting replaced model',
+        re.IGNORECASE,
+    ),
     'disabled streamer mode': re.compile(r'Streamer mode disabled', re.IGNORECASE),
     'enabled streamer mode': re.compile(r'Streamer mode enabled', re.IGNORECASE),
     'visible API key': re.compile(r'ANTHROPIC_API_KEY|sk-ant-', re.IGNORECASE),
@@ -230,6 +235,8 @@ def _validate_ocr_content(paths: list[Path]) -> None:
             monkeymux_texts.setdefault(_monkeymux_scene_group(path), []).append(
                 (path, text),
             )
+        elif scene == 7:
+            _validate_native_copilot_scene(path, text)
 
     for grouped_texts in monkeymux_texts.values():
         paths_description = ', '.join(
@@ -237,6 +244,45 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         )
         store_media.require_agent_family(
             ' '.join(text for _, text in grouped_texts), paths_description,
+        )
+
+
+def _validate_native_copilot_scene(path: Path, text: str) -> None:
+    """Require a visible assistant reply between the prompt and composer."""
+    lower = text.casefold()
+    end = lower.find('message the agent')
+    prefix = text if end == -1 else text[:end]
+    prefix_lower = prefix.casefold()
+
+    start = prefix_lower.find('load skills')
+    if start != -1:
+        start += len('load skills')
+    else:
+        sticky = prefix_lower.find('review this reconnect plan')
+        if sticky != -1:
+            ellipsis = prefix_lower.find('...', sticky)
+            if ellipsis != -1:
+                start = ellipsis + 3
+            else:
+                start = sticky + len('review this reconnect plan')
+        else:
+            start = 0
+
+    reply_slice = prefix[start:]
+    # Strip the context-usage footer (e.g. "32.5k / 200k context 16%") so a
+    # blank reply with only the prompt and usage bar fails.
+    reply_body = re.sub(
+        r'\d+(?:\.\d+)?[km]?\s*/\s*\d+(?:\.\d+)?[km]?\s*context\b[^a-zA-Z]*?(?:\b\d{1,3}%\b)?',
+        '',
+        reply_slice,
+        flags=re.IGNORECASE,
+    )
+    reply_body = re.sub(r'[^a-zA-Z0-9]+', '', reply_body)
+    if len(reply_body) < 80:
+        raise ValueError(
+            f'{store_media.display_path(path)} shows the native Copilot prompt '
+            'without a visible assistant reply; regenerate with a model that '
+            'renders a full response',
         )
 
 
@@ -260,6 +306,9 @@ def _validate_duo_ocr_content(paths: dict[str, Path]) -> None:
         _require_ocr_markers(path, texts[path], markers)
     _validate_copilot_scene(
         paths['duo_closed_terminal'], texts[paths['duo_closed_terminal']],
+    )
+    _validate_native_copilot_scene(
+        paths['duo_open_native'], texts[paths['duo_open_native']],
     )
     window_paths = [paths[scene] for scene in sorted(DUO_WINDOW_SCENES)]
     store_media.require_agent_family(

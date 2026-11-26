@@ -1,12 +1,11 @@
 What's new in this beta
 
-- Emoji, flags, accents, Hangul, and Indic scripts show as whole characters.
-- Tap a fish or Nushell prompt to move the cursor.
-- Programs can copy and paste images through the kitty clipboard protocol.
-- Reconnects after a Mac's FileVault unlock over SSH.
-- Muse Code and OpenCode Go usage rings.
+- Kitty inline images now work in tmux sessions.
+- Redesigned SFTP filter bar with match highlights and live sort options.
+- Swipe left, right, or down to dismiss banners and notifications.
+- Faster SSH compression, crypto, terminal painting, and lower echo latency.
 
 What's fixed in this beta
 
-- MonkeyMux stays attached on stalled networks.
-- Fixes for terminal images and background colors, npm 12 agent installs, and a Codex warning.
+- Restored Copilot CLI inline images and Antigravity usage reporting.
+- Smoother Copilot CLI and Hermes touch scrolling, reliable link taps, and closing stale agent windows.

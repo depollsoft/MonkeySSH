@@ -442,7 +442,9 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
       _sftp = sftp;
       pendingSftp = null;
-      _hostLabel = session.config.hostname;
+      _hostLabel = _redactStoreScreenshotIdentities
+          ? 'local-demo'
+          : session.config.hostname;
       _fallbackDirectoryPath = normalizeSftpAbsolutePath(initialPath) ?? '/';
       _homeDirectoryPath ??= _fallbackDirectoryPath;
       _connectionStartDirectoryPath ??= _fallbackDirectoryPath;

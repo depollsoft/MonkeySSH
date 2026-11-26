@@ -32,7 +32,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 from store_media import (
-    ROOT, float_or_none, require_agent_executables, require_unlocked_keychain,
+    ROOT, float_or_none, require_agent_executables,
 )
 
 ADB: Path | None = None
@@ -200,7 +200,6 @@ def main() -> None:
         return
     if args.check_environment:
         require_agent_executables()
-        require_unlocked_keychain()
         print("All required store-capture agent CLIs are available.")
         if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
             _check_duo_environment()
@@ -433,7 +432,6 @@ def _build_android_screenshot_apk(
 class StoreDemoEnvironment:
     def __init__(self, *, seed_platform: str = 'both') -> None:
         self._agent_executables = require_agent_executables()
-        require_unlocked_keychain()
         self._seed_platform = seed_platform
         self._tmpdir = Path(tempfile.mkdtemp(prefix='monkeyssh-store-demo-'))
         self.username = getpass.getuser()
@@ -711,6 +709,7 @@ class StoreDemoEnvironment:
             f"""
             exec env COPILOT_ALLOW_ALL=false TERM=xterm-kitty \\
               {self._shell_quote(self._copilot)} \\
+              --model auto \\
               --log-level default \\
               --add-dir {self._shell_quote(str(self.demo_dir))} \\
               --secret-env-vars=USER,EMAIL,GITHUB_TOKEN,GH_TOKEN,ANTHROPIC_API_KEY \\
@@ -819,10 +818,9 @@ class StoreDemoEnvironment:
                     '3. codex   - Codex CLI workspace',
                     '4. opencode - OpenCode CLI workspace',
                     '5. antigravity - Antigravity CLI workspace',
-                    '6. cursor-agent - Cursor Agent workspace',
-                    '7. pi - Pi workspace',
-                    '8. hermes - Hermes workspace',
-                    '9. openclaw - OpenClaw workspace',
+                    '6. pi - Pi workspace',
+                    '7. hermes - Hermes workspace',
+                    '8. openclaw - OpenClaw workspace',
                     '',
                 ]
             )
@@ -2436,23 +2434,34 @@ def _ios_simulator_udids(name: str) -> list[str]:
     devices = json.loads(
         subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json'])
     )
-    return [
-        device['udid']
+    matching = [
+        device
         for runtime, runtime_devices in devices['devices'].items()
         if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-')
         for device in runtime_devices
         if device['name'] == name
     ]
+    matching.sort(key=lambda device: device.get('state') != 'Booted')
+    return [device['udid'] for device in matching]
 
 
 def _boot_ios_simulator(name: str) -> str:
     device_ids = _ios_simulator_udids(name)
     if not device_ids:
         raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
-    device_id = device_ids[0]
-    subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
-    subprocess.run(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], check=True)
-    return device_id
+    last_error: subprocess.CalledProcessError | None = None
+    for device_id in device_ids:
+        subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
+        try:
+            subprocess.run(
+                ['xcrun', 'simctl', 'bootstatus', device_id, '-b'],
+                check=True,
+            )
+            return device_id
+        except subprocess.CalledProcessError as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
 
 
 def _ios_simulator_name(target: ScreenshotTarget) -> str:

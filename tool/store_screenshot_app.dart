@@ -21,8 +21,11 @@ import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/key_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
@@ -135,7 +138,6 @@ const _requiredStoreAgentWindows = <String>{
   'codex',
   'opencode',
   'antigravity',
-  'cursor-agent',
   'pi',
 };
 
@@ -1110,11 +1112,91 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
         'Native Copilot session was blocked.',
       ),
     };
+    await _selectNativeCopilotModel(manager, key);
     await manager
         .prompt(key, const [AcpTextContent(_nativeCopilotPrompt)])
         .timeout(const Duration(seconds: 90));
+    final replyText = _nativeCopilotAgentText(
+      manager.state.byKeyValue(key.value),
+    );
+    if (replyText.trim().length < 40) {
+      throw StateError(
+        'Native Copilot prompt completed without a visible assistant reply '
+        '(length=${replyText.trim().length}).',
+      );
+    }
     _nativeCopilotKey = key;
     return key;
+  }
+
+  /// Explicitly locks a direct Sonnet model on the ACP session.
+  ///
+  /// Copilot ACP initially advertises `claude-sonnet-*` as `currentValue` in
+  /// `session/new` before applying user config / admin-managed overrides to
+  /// `auto` on the first turn, and `auto` can end a turn after reasoning tokens
+  /// with no visible text. Calling `setConfigOption` unconditionally pins the
+  /// chosen model before sending the prompt.
+  Future<void> _selectNativeCopilotModel(
+    AcpSessionManager manager,
+    AcpSessionKey key,
+  ) async {
+    final session = manager.state.byKeyValue(key.value);
+    if (session == null) return;
+    for (final option in session.configOptions) {
+      if (option is! AcpSelectConfigOption) continue;
+      if (option.id != 'model' && option.category != 'model') continue;
+      final candidateIds = <String>[
+        for (final item in option.options) item.value,
+        for (final group in option.groups)
+          for (final item in group.options) item.value,
+      ];
+      final preferred = _pickNativeCopilotModelId(candidateIds);
+      if (preferred != null) {
+        await manager
+            .setConfigOption(key, configId: option.id, value: preferred)
+            .timeout(const Duration(seconds: 20));
+      }
+      return;
+    }
+    final modelState = session.modelState;
+    if (modelState == null) return;
+    final preferred = _pickNativeCopilotModelId([
+      for (final model in modelState.availableModels) model.id,
+    ]);
+    if (preferred != null) {
+      await manager
+          .setModel(key, preferred)
+          .timeout(const Duration(seconds: 20));
+    }
+  }
+
+  String? _pickNativeCopilotModelId(List<String> modelIds) {
+    final direct = modelIds
+        .where((id) => id.isNotEmpty && id != 'auto' && !id.contains('/'))
+        .toList(growable: false);
+    for (final id in direct) {
+      if (id.startsWith('claude-sonnet-')) return id;
+    }
+    for (final id in direct) {
+      if (id.startsWith('claude-')) return id;
+    }
+    return direct.isNotEmpty ? direct.first : null;
+  }
+
+  String _nativeCopilotAgentText(AcpSessionState? session) {
+    if (session == null) return '';
+    final buffer = StringBuffer();
+    for (final entry in session.timeline.entries) {
+      if (entry is! AcpMessageEntry || entry.role != AcpMessageRole.agent) {
+        continue;
+      }
+      for (final block in entry.content) {
+        if (block is AcpTextContent) {
+          buffer.write(block.text);
+        }
+      }
+    }
+    return buffer.toString();
   }
 
   void _focusNativeCopilot(AcpSessionKey key) {

@@ -285,6 +285,13 @@ class DuoCaptureTest(unittest.TestCase):
             paths[scene]: ' '.join(markers) + ' Add Host ' + family
             for scene, _, markers in validate.DUO_SCREENSHOTS
         }
+        texts[paths['duo_open_native']] = (
+            'Review this reconnect plan. Do not run tools, read files, or load skills. '
+            '32.1k / 200k context 16% '
+            '1. Drop SSH mid-task and reconnect while the agent keeps running. '
+            '2. Cap exponential backoff at 30s and resume by conversation id. '
+            'Message the agent'
+        )
         with patch.object(validate, '_ocr_texts', return_value=texts), \
              patch.object(validate, '_validate_copilot_image_frame'):
             validate._validate_duo_ocr_content(paths)
@@ -435,17 +442,6 @@ class LiveAgentCaptureTest(unittest.TestCase):
              patch.object(capture.os, 'kill'):
             demo._require_live_agent_windows()
 
-    def test_locked_keychain_stops_capture_with_the_unlock_command(self):
-        locked = subprocess.CompletedProcess(['security'], 36)
-        with patch.object(store_media.sys, 'platform', 'darwin'), \
-             patch.object(store_media.subprocess, 'run', return_value=locked):
-            with self.assertRaisesRegex(RuntimeError, 'security unlock-keychain'):
-                store_media.require_unlocked_keychain()
-        with patch.object(store_media.sys, 'platform', 'linux'), \
-             patch.object(store_media.subprocess, 'run') as run:
-            store_media.require_unlocked_keychain()
-        run.assert_not_called()
-
     def test_preflight_resolves_executable_aliases(self):
         def which(name):
             return None if name in {'agy', 'antigravity', 'hermes'} else '/tools/' + name
@@ -453,7 +449,7 @@ class LiveAgentCaptureTest(unittest.TestCase):
             found = store_media.require_agent_executables()
         self.assertEqual(found['antigravity'], '/tools/antigravity-cli')
         self.assertEqual(found['hermes'], '/tools/hermes-agent')
-        self.assertEqual(len(found), 10)
+        self.assertEqual(len(found), 9)
 
     def test_capture_panes_do_not_inherit_the_running_agent_session(self):
         inherited = {
@@ -693,7 +689,13 @@ class ProCaptionTest(unittest.TestCase):
             {'agent_management', 'duo_closed_agent_management'},
         )
         path = ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png'
-        valid = 'Message the agent reconnect'
+        valid = (
+            'Review this reconnect plan. Do not run tools, read files, or load skills. '
+            '32.1k / 200k context 16% '
+            '1. Drop SSH mid-task and reconnect while the agent keeps running. '
+            '2. Cap exponential backoff at 30s and resume by conversation id. '
+            'Message the agent'
+        )
         with patch.object(validate, '_ocr_texts', return_value={path: valid}):
             validate._validate_ocr_content([path])
         for missing in ('Message the agent', 'reconnect'):
@@ -933,7 +935,6 @@ class CaptureLaunchTest(unittest.TestCase):
             scratch = Path(directory) / 'demo'
             scratch.mkdir()
             with patch.object(capture, 'require_agent_executables', return_value={}), \
-                 patch.object(capture, 'require_unlocked_keychain'), \
                  patch.object(capture.tempfile, 'mkdtemp', return_value=str(scratch)), \
                  patch.object(capture.StoreDemoEnvironment, '_extract_monkeymux',
                               side_effect=RuntimeError('checksum mismatch')):
@@ -1035,6 +1036,89 @@ class CaptureLaunchTest(unittest.TestCase):
         screenshot.assert_called_once_with(target=target, device_id='device', paths=[ROOT / 'capture.png'], scene='hosts', pose=None)
         self.assertIn('--dart-define=STORE_SCREENSHOT_SCENE=hosts', command.call_args.args[3])
         terminate.assert_called_once_with(process, timeout=20)
+
+    def test_ios_simulator_lookup_prefers_booted_and_falls_back_on_boot_error(self):
+        payload = json.dumps({
+            'devices': {
+                'com.apple.CoreSimulator.SimRuntime.iOS-27-0': [
+                    {'name': 'iPad Pro 13-inch (M5)', 'udid': 'BROKEN-27', 'state': 'Shutdown'},
+                ],
+                'com.apple.CoreSimulator.SimRuntime.iOS-26-5': [
+                    {'name': 'iPad Pro 13-inch (M5)', 'udid': 'GOOD-26', 'state': 'Booted'},
+                ],
+            },
+        }).encode()
+        with patch.object(capture.subprocess, 'check_output', return_value=payload):
+            self.assertEqual(
+                capture._ios_simulator_udids('iPad Pro 13-inch (M5)'),
+                ['GOOD-26', 'BROKEN-27'],
+            )
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ['xcrun', 'simctl', 'bootstatus'] and command[3] == 'BROKEN-27':
+                raise subprocess.CalledProcessError(145, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(capture, '_ios_simulator_udids', return_value=['BROKEN-27', 'GOOD-26']), \
+             patch.object(capture.subprocess, 'run', side_effect=fake_run):
+            self.assertEqual(
+                capture._boot_ios_simulator('iPad Pro 13-inch (M5)'),
+                'GOOD-26',
+            )
+
+    def test_validate_rejects_blank_native_copilot_reply_and_local_username(self):
+        blank_chat = (
+            'Review this reconnect plan: keep the remote agent running. '
+            'Do not run tools, read files, or load skills. '
+            '32.7k / 200k context 16% Message the agent'
+        )
+        with self.assertRaisesRegex(ValueError, 'without a visible assistant reply'):
+            validate._validate_native_copilot_scene(
+                ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png',
+                blank_chat,
+            )
+
+        replied_chat = (
+            'Review this reconnect plan: keep the remote agent running. '
+            'Do not run tools, read files, or load skills. '
+            '1. Drop SSH mid-task and verify reconnect keeps the session alive. '
+            '2. Backoff caps at 30 seconds before resuming by session id. '
+            'delay = 1s retry ssh connect resume by id '
+            '32.7k / 200k context 16% '
+            'Message the agent'
+        )
+        validate._validate_native_copilot_scene(
+            ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png',
+            replied_chat,
+        )
+
+        scrolled_chat = (
+            'Agent MonkeyMux store@local-demo session #1 '
+            'you • Review this reconnect plan: keep the remote agent ru... '
+            '1. Drop SSH mid-task and verify reconnect keeps the session alive. '
+            '2. Backoff caps at 30 seconds before resuming by session id. '
+            '32.4k / 200k context 16% '
+            'Message the agent'
+        )
+        validate._validate_native_copilot_scene(
+            ROOT / 'android/fastlane/metadata-production/android/en-US/images/phoneScreenshots/7.png',
+            scrolled_chat,
+        )
+
+        with self.assertRaisesRegex(ValueError, 'private local username'):
+            validate._reject_bad_ocr_content({
+                ROOT / 'ios/fastlane/screenshots/en-US/04_iphone_duo.png': (
+                    'Agent MonkeyMux depoll@127.0.0.1:55828 Connection #1'
+                ),
+            })
+
+        with self.assertRaisesRegex(ValueError, 'admin model override notice'):
+            validate._reject_bad_ocr_content({
+                ROOT / 'ios/fastlane/screenshots/en-US/01_iphone_6_9.png': (
+                    'An administrator-managed setting replaced model '
+                    '"cliproxyapi/agy-acp/gemini-4-neon" with "auto"'
+                ),
+            })
 
 
 if __name__ == '__main__':
