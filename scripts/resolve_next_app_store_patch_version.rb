@@ -12,6 +12,8 @@ module AppStorePatchVersion
     INVALID_BINARY
   ].freeze
 
+  READY_FOR_REVIEW_STATE = 'READY_FOR_REVIEW'
+
   REVIEW_LOCKED_STATES = %w[
     WAITING_FOR_REVIEW
     IN_REVIEW
@@ -100,6 +102,10 @@ module AppStorePatchVersion
     STORE_LISTING_EDITABLE_STATES.include?(state)
   end
 
+  def version_editable_for_delivery?(state)
+    store_listing_editable?(state) && state != READY_FOR_REVIEW_STATE
+  end
+
   def review_locked?(state)
     REVIEW_LOCKED_STATES.include?(state)
   end
@@ -142,6 +148,8 @@ module AppStorePatchVersion
     platform:,
     version_loader:,
     version_creator:,
+    review_submission_items_loader: nil,
+    review_submission_item_deleter: nil,
     review_cancellation_timeout_seconds: REVIEW_CANCELLATION_TIMEOUT_SECONDS,
     version_preparation_timeout_seconds: VERSION_PREPARATION_TIMEOUT_SECONDS,
     clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
@@ -152,9 +160,10 @@ module AppStorePatchVersion
       version.version_string == resolved_version
     end
     if existing
-      return :existing if store_listing_editable?(existing.app_version_state)
+      return :existing if version_editable_for_delivery?(existing.app_version_state)
 
-      unless review_locked?(existing.app_version_state)
+      unless existing.app_version_state == READY_FOR_REVIEW_STATE ||
+             review_locked?(existing.app_version_state)
         raise ResolutionError,
               "App Store version #{resolved_version} cannot be prepared from " \
               "state #{existing.app_version_state}"
@@ -165,7 +174,7 @@ module AppStorePatchVersion
       platform: platform,
       includes: 'appStoreVersionForReview'
     )
-    if existing && submission.nil?
+    if existing && review_locked?(existing.app_version_state) && submission.nil?
       raise ResolutionError,
             "App Store version #{resolved_version} is review-locked but no " \
             'active review submission was found'
@@ -187,11 +196,28 @@ module AppStorePatchVersion
                              sleeper: sleeper,
                              logger: logger
                            )
+                         elsif existing
+                           existing
                          else
                            latest_editable_version(
                              app_store_versions: app_store_versions
                            )
                          end
+
+    if version_to_advance&.app_version_state == READY_FOR_REVIEW_STATE
+      version_to_advance = detach_ready_review_submission!(
+        app: app,
+        version: version_to_advance,
+        platform: platform,
+        version_loader: version_loader,
+        review_submission_items_loader: review_submission_items_loader,
+        review_submission_item_deleter: review_submission_item_deleter,
+        timeout_seconds: version_preparation_timeout_seconds,
+        clock: clock,
+        sleeper: sleeper,
+        logger: logger
+      )
+    end
 
     if version_to_advance
       if version_to_advance.version_string != resolved_version
@@ -213,6 +239,81 @@ module AppStorePatchVersion
     )
     logger.call("Prepared editable App Store version #{resolved_version}")
     :prepared
+  end
+
+  def detach_ready_review_submission!(
+    app:,
+    version:,
+    platform:,
+    version_loader:,
+    review_submission_items_loader:,
+    review_submission_item_deleter:,
+    timeout_seconds:,
+    clock:,
+    sleeper:,
+    logger:
+  )
+    if review_submission_items_loader.nil? || review_submission_item_deleter.nil?
+      raise ResolutionError,
+            'Review submission item callbacks are required to detach a ' \
+            "#{READY_FOR_REVIEW_STATE} App Store version"
+    end
+
+    ready_submissions = if app.respond_to?(:get_review_submissions)
+                          app.get_review_submissions(
+                            filter: {
+                              state: READY_FOR_REVIEW_STATE,
+                              platform: platform
+                            }
+                          )
+                        else
+                          [app.get_ready_review_submission(platform: platform)].compact
+                        end
+    if ready_submissions.empty?
+      raise ResolutionError,
+            "App Store version #{version.version_string} is in " \
+            "#{READY_FOR_REVIEW_STATE} but no #{READY_FOR_REVIEW_STATE} " \
+            'review submission was found'
+    end
+
+    matching_items = ready_submissions.flat_map do |ready_submission|
+      review_submission_items_loader.call(ready_submission.id).select do |item|
+        item.app_store_version&.id == version.id
+      end
+    end
+    if matching_items.empty?
+      raise ResolutionError,
+            "App Store version #{version.version_string} is in " \
+            "#{READY_FOR_REVIEW_STATE} but was not attached to any " \
+            "#{READY_FOR_REVIEW_STATE} review submission"
+    end
+
+    logger.call(
+      "Removing App Store version #{version.version_string} from ready " \
+      'review submission before editing screenshots and metadata'
+    )
+    matching_items.each do |item|
+      review_submission_item_deleter.call(item.id)
+    end
+
+    deadline = clock.call + timeout_seconds
+    loop do
+      reloaded = version_loader.call(version.id)
+      if reloaded.nil?
+        raise ResolutionError,
+              'App Store version disappeared while detaching ready review submission'
+      end
+      return reloaded if version_editable_for_delivery?(reloaded.app_version_state)
+
+      if clock.call >= deadline
+        raise ResolutionError,
+              'Timed out waiting for App Store version ' \
+              "#{version.version_string} to leave #{READY_FOR_REVIEW_STATE}; " \
+              "version state is #{reloaded.app_version_state}"
+      end
+
+      sleeper.call(POLL_INTERVAL_SECONDS)
+    end
   end
 
   def cancel_review!(
@@ -289,7 +390,7 @@ module AppStorePatchVersion
         includes: nil
       ).find { |version| version.version_string == resolved_version }
       prepared = prepared_version &&
-                 store_listing_editable?(prepared_version.app_version_state)
+                 version_editable_for_delivery?(prepared_version.app_version_state)
       return if prepared
 
       if clock.call >= deadline
@@ -364,6 +465,17 @@ if $PROGRAM_NAME == __FILE__
             versionString: version_string,
             platform: version_platform
           }
+        )
+      end,
+      review_submission_items_loader: lambda do |review_submission_id|
+        Spaceship::ConnectAPI::ReviewSubmissionItem.all(
+          review_submission_id: review_submission_id,
+          includes: 'appStoreVersion'
+        )
+      end,
+      review_submission_item_deleter: lambda do |review_submission_item_id|
+        Spaceship::ConnectAPI.tunes_request_client.delete(
+          "v1/reviewSubmissionItems/#{review_submission_item_id}"
         )
       end
     )

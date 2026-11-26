@@ -19,12 +19,44 @@ class FakeAppStoreVersion
   end
 end
 
+class FakeReviewSubmissionItem
+  attr_reader :id, :app_store_version
+
+  def initialize(id:, app_store_version: nil)
+    @id = id
+    @app_store_version = app_store_version
+  end
+end
+
+class FakeReadyReviewSubmission
+  attr_reader :id, :items
+
+  def initialize(id:, items: [], unlock_on_delete: true)
+    @id = id
+    @items = items
+    @unlock_on_delete = unlock_on_delete
+  end
+
+  def delete_item(item_id)
+    item = @items.find { |entry| entry.id == item_id }
+    return false if item.nil?
+
+    @items.delete(item)
+    if @unlock_on_delete && item.app_store_version
+      item.app_store_version.app_version_state = 'PREPARE_FOR_SUBMISSION'
+    end
+    true
+  end
+end
+
 class FakeReviewSubmission
   attr_reader :app_store_version_for_review
 
-  def initialize(version:, unlock_on_cancel: true)
+  def initialize(version:, unlock_on_cancel: true, canceled_state: 'READY_FOR_REVIEW', on_cancel: nil)
     @app_store_version_for_review = version
     @unlock_on_cancel = unlock_on_cancel
+    @canceled_state = canceled_state
+    @on_cancel = on_cancel
     @canceled = false
   end
 
@@ -32,7 +64,8 @@ class FakeReviewSubmission
     @canceled = true
     return unless @unlock_on_cancel
 
-    app_store_version_for_review.app_version_state = 'READY_FOR_REVIEW'
+    app_store_version_for_review.app_version_state = @canceled_state
+    @on_cancel&.call(app_store_version_for_review)
   end
 
   def canceled?
@@ -41,18 +74,40 @@ class FakeReviewSubmission
 end
 
 class FakeAppStoreApp
-  attr_reader :id, :versions
+  attr_reader :id, :versions, :ready_submissions, :deleted_item_ids
 
-  def initialize(versions:, submission: nil)
+  def initialize(versions:, submission: nil, ready_submissions: [])
     @id = 'app-id'
     @versions = versions
     @submission = submission
+    @ready_submissions = ready_submissions
+    @deleted_item_ids = []
   end
 
   def get_in_progress_review_submission(platform:, includes: nil)
     return if @submission&.canceled?
 
     @submission
+  end
+
+  def get_review_submissions(filter: {}, includes: nil)
+    return @ready_submissions if filter[:state] == AppStorePatchVersion::READY_FOR_REVIEW_STATE
+
+    []
+  end
+
+  def get_ready_review_submission(platform:, includes: nil)
+    @ready_submissions.first
+  end
+
+  def items_for_submission(submission_id)
+    submission = @ready_submissions.find { |entry| entry.id == submission_id }
+    submission ? submission.items.dup : []
+  end
+
+  def delete_submission_item(item_id)
+    @deleted_item_ids << item_id
+    @ready_submissions.each { |submission| submission.delete_item(item_id) }
   end
 
   def get_app_store_versions(filter:, includes:)
@@ -255,10 +310,20 @@ class AppStorePatchVersionTest < Minitest::Test
 
   def test_prepare_cancels_review_and_advances_exact_version
     reviewed = fake_version('0.2.1', 'WAITING_FOR_REVIEW')
-    submission = FakeReviewSubmission.new(version: reviewed)
+    ready_submissions = []
+    submission = FakeReviewSubmission.new(
+      version: reviewed,
+      on_cancel: lambda do |version|
+        ready_submissions << FakeReadyReviewSubmission.new(
+          id: 'ready-after-cancel',
+          items: [FakeReviewSubmissionItem.new(id: 'item-1', app_store_version: version)]
+        )
+      end
+    )
     app = FakeAppStoreApp.new(
       versions: [reviewed],
-      submission: submission
+      submission: submission,
+      ready_submissions: ready_submissions
     )
 
     result = prepare(
@@ -269,16 +334,27 @@ class AppStorePatchVersionTest < Minitest::Test
 
     assert_equal(:prepared, result)
     assert(submission.canceled?)
+    assert_equal(['item-1'], app.deleted_item_ids)
     assert_equal('0.2.2', reviewed.version_string)
-    assert_equal('READY_FOR_REVIEW', reviewed.app_version_state)
+    assert_equal('PREPARE_FOR_SUBMISSION', reviewed.app_version_state)
   end
 
   def test_prepare_cancels_review_for_same_exact_version
     reviewed = fake_version('0.2.1', 'WAITING_FOR_REVIEW')
-    submission = FakeReviewSubmission.new(version: reviewed)
+    ready_submissions = []
+    submission = FakeReviewSubmission.new(
+      version: reviewed,
+      on_cancel: lambda do |version|
+        ready_submissions << FakeReadyReviewSubmission.new(
+          id: 'ready-after-cancel',
+          items: [FakeReviewSubmissionItem.new(id: 'item-1', app_store_version: version)]
+        )
+      end
+    )
     app = FakeAppStoreApp.new(
       versions: [reviewed],
-      submission: submission
+      submission: submission,
+      ready_submissions: ready_submissions
     )
 
     result = prepare(
@@ -289,9 +365,118 @@ class AppStorePatchVersionTest < Minitest::Test
 
     assert_equal(:prepared, result)
     assert(submission.canceled?)
+    assert_equal(['item-1'], app.deleted_item_ids)
     assert_equal('0.2.1', reviewed.version_string)
-    assert_equal('READY_FOR_REVIEW', reviewed.app_version_state)
+    assert_equal('PREPARE_FOR_SUBMISSION', reviewed.app_version_state)
     assert_equal([reviewed], app.versions)
+  end
+
+  def test_prepare_returns_existing_when_already_prepare_for_submission
+    editable = fake_version('0.13.0', 'PREPARE_FOR_SUBMISSION')
+    app = FakeAppStoreApp.new(versions: [editable])
+
+    result = prepare(
+      app: app,
+      versions: [editable],
+      resolved_version: '0.13.0'
+    )
+
+    assert_equal(:existing, result)
+    assert_empty(app.deleted_item_ids)
+  end
+
+  def test_prepare_detaches_existing_ready_for_review_version_and_preserves_other_items
+    ready = fake_version('0.13.0', 'READY_FOR_REVIEW')
+    other_item = FakeReviewSubmissionItem.new(id: 'item-event', app_store_version: nil)
+    version_item = FakeReviewSubmissionItem.new(id: 'item-version', app_store_version: ready)
+    empty_submission = FakeReadyReviewSubmission.new(id: 'ready-empty', items: [])
+    populated_submission = FakeReadyReviewSubmission.new(
+      id: 'ready-populated',
+      items: [other_item, version_item]
+    )
+    app = FakeAppStoreApp.new(
+      versions: [ready],
+      ready_submissions: [empty_submission, populated_submission]
+    )
+
+    result = prepare(
+      app: app,
+      versions: [ready],
+      resolved_version: '0.13.0'
+    )
+
+    assert_equal(:prepared, result)
+    assert_equal(['item-version'], app.deleted_item_ids)
+    assert_equal([other_item], populated_submission.items)
+    assert_equal('PREPARE_FOR_SUBMISSION', ready.app_version_state)
+  end
+
+  def test_prepare_detaches_ready_for_review_version_before_advancing_version_string
+    ready = fake_version('0.12.5', 'READY_FOR_REVIEW')
+    ready_submission = FakeReadyReviewSubmission.new(
+      id: 'ready-1',
+      items: [FakeReviewSubmissionItem.new(id: 'item-old', app_store_version: ready)]
+    )
+    app = FakeAppStoreApp.new(
+      versions: [ready],
+      ready_submissions: [ready_submission]
+    )
+
+    result = prepare(
+      app: app,
+      versions: [ready],
+      resolved_version: '0.13.0'
+    )
+
+    assert_equal(:prepared, result)
+    assert_equal(['item-old'], app.deleted_item_ids)
+    assert_equal('0.13.0', ready.version_string)
+    assert_equal('PREPARE_FOR_SUBMISSION', ready.app_version_state)
+  end
+
+  def test_prepare_fails_when_ready_for_review_version_has_no_matching_item
+    ready = fake_version('0.13.0', 'READY_FOR_REVIEW')
+    ready_submission = FakeReadyReviewSubmission.new(id: 'ready-1', items: [])
+    app = FakeAppStoreApp.new(
+      versions: [ready],
+      ready_submissions: [ready_submission]
+    )
+
+    error = assert_raises(AppStorePatchVersion::ResolutionError) do
+      prepare(
+        app: app,
+        versions: [ready],
+        resolved_version: '0.13.0'
+      )
+    end
+
+    assert_includes(error.message, 'was not attached to any READY_FOR_REVIEW review submission')
+  end
+
+  def test_prepare_times_out_when_ready_for_review_does_not_transition
+    ready = fake_version('0.13.0', 'READY_FOR_REVIEW')
+    ready_submission = FakeReadyReviewSubmission.new(
+      id: 'ready-1',
+      items: [FakeReviewSubmissionItem.new(id: 'item-1', app_store_version: ready)],
+      unlock_on_delete: false
+    )
+    app = FakeAppStoreApp.new(
+      versions: [ready],
+      ready_submissions: [ready_submission]
+    )
+    ticks = [0, 2]
+
+    error = assert_raises(AppStorePatchVersion::ResolutionError) do
+      prepare(
+        app: app,
+        versions: [ready],
+        resolved_version: '0.13.0',
+        version_timeout: 1,
+        clock: -> { ticks.shift || 2 }
+      )
+    end
+
+    assert_includes(error.message, 'to leave READY_FOR_REVIEW')
   end
 
   def test_prepare_creates_version_when_no_editable_version_exists
@@ -380,6 +565,7 @@ class AppStorePatchVersionTest < Minitest::Test
     resolved_version:,
     creator: nil,
     review_timeout: 10,
+    version_timeout: 10,
     clock: -> { 0 }
   )
     creator ||= lambda do |_app_id, version_string, _platform|
@@ -394,8 +580,14 @@ class AppStorePatchVersionTest < Minitest::Test
         app.versions.find { |item| item.id == version_id }
       end,
       version_creator: creator,
+      review_submission_items_loader: lambda do |submission_id|
+        app.items_for_submission(submission_id)
+      end,
+      review_submission_item_deleter: lambda do |item_id|
+        app.delete_submission_item(item_id)
+      end,
       review_cancellation_timeout_seconds: review_timeout,
-      version_preparation_timeout_seconds: 10,
+      version_preparation_timeout_seconds: version_timeout,
       clock: clock,
       sleeper: ->(_seconds) {},
       logger: ->(_message) {}
