@@ -1678,7 +1678,9 @@ class _HostRow extends ConsumerWidget {
             final createdAt = sessionsNotifier
                 .getSession(connectionId)
                 ?.createdAt;
-            final endpoint = '${host.username}@${host.hostname}:${host.port}';
+            final endpoint = _redactStoreScreenshotIdentities
+                ? 'store@local-demo'
+                : '${host.username}@${host.hostname}:${host.port}';
             final subtitle = createdAt == null
                 ? endpoint
                 : '$endpoint\nOpened ${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}';
@@ -2117,9 +2119,10 @@ class _ConnectionRow extends ConsumerWidget {
         .getActiveConnection(connectionId);
     if (connection == null) return const SizedBox.shrink();
     final state = connection.state;
-    final endpoint =
-        '${connection.config.username}@'
-        '${connection.config.hostname}:${connection.config.port}';
+    final endpoint = _redactStoreScreenshotIdentities
+        ? 'store@local-demo'
+        : '${connection.config.username}@'
+              '${connection.config.hostname}:${connection.config.port}';
     void openConnection() => _openTerminalRoute(
       context,
       '/terminal/${connection.hostId}?connectionId=$connectionId',

@@ -709,6 +709,7 @@ class StoreDemoEnvironment:
             f"""
             exec env COPILOT_ALLOW_ALL=false TERM=xterm-kitty \\
               {self._shell_quote(self._copilot)} \\
+              --model auto \\
               --log-level default \\
               --add-dir {self._shell_quote(str(self.demo_dir))} \\
               --secret-env-vars=USER,EMAIL,GITHUB_TOKEN,GH_TOKEN,ANTHROPIC_API_KEY \\

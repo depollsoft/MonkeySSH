@@ -285,6 +285,13 @@ class DuoCaptureTest(unittest.TestCase):
             paths[scene]: ' '.join(markers) + ' Add Host ' + family
             for scene, _, markers in validate.DUO_SCREENSHOTS
         }
+        texts[paths['duo_open_native']] = (
+            'Review this reconnect plan. Do not run tools, read files, or load skills. '
+            '32.1k / 200k context 16% '
+            '1. Drop SSH mid-task and reconnect while the agent keeps running. '
+            '2. Cap exponential backoff at 30s and resume by conversation id. '
+            'Message the agent'
+        )
         with patch.object(validate, '_ocr_texts', return_value=texts), \
              patch.object(validate, '_validate_copilot_image_frame'):
             validate._validate_duo_ocr_content(paths)
@@ -682,7 +689,13 @@ class ProCaptionTest(unittest.TestCase):
             {'agent_management', 'duo_closed_agent_management'},
         )
         path = ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png'
-        valid = 'Message the agent reconnect'
+        valid = (
+            'Review this reconnect plan. Do not run tools, read files, or load skills. '
+            '32.1k / 200k context 16% '
+            '1. Drop SSH mid-task and reconnect while the agent keeps running. '
+            '2. Cap exponential backoff at 30s and resume by conversation id. '
+            'Message the agent'
+        )
         with patch.object(validate, '_ocr_texts', return_value={path: valid}):
             validate._validate_ocr_content([path])
         for missing in ('Message the agent', 'reconnect'):
@@ -1052,6 +1065,47 @@ class CaptureLaunchTest(unittest.TestCase):
                 capture._boot_ios_simulator('iPad Pro 13-inch (M5)'),
                 'GOOD-26',
             )
+
+    def test_validate_rejects_blank_native_copilot_reply_and_local_username(self):
+        blank_chat = (
+            'Review this reconnect plan: keep the remote agent running. '
+            'Do not run tools, read files, or load skills. '
+            '32.7k / 200k context 16% Message the agent'
+        )
+        with self.assertRaisesRegex(ValueError, 'without a visible assistant reply'):
+            validate._validate_native_copilot_scene(
+                ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png',
+                blank_chat,
+            )
+
+        replied_chat = (
+            'Review this reconnect plan: keep the remote agent running. '
+            'Do not run tools, read files, or load skills. '
+            '32.7k / 200k context 16% '
+            '1. Drop SSH mid-task and verify reconnect keeps the session alive. '
+            '2. Backoff caps at 30 seconds before resuming by session id. '
+            'delay = 1s retry ssh connect resume by id '
+            'Message the agent'
+        )
+        validate._validate_native_copilot_scene(
+            ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png',
+            replied_chat,
+        )
+
+        with self.assertRaisesRegex(ValueError, 'private local username'):
+            validate._reject_bad_ocr_content({
+                ROOT / 'ios/fastlane/screenshots/en-US/04_iphone_duo.png': (
+                    'Agent MonkeyMux depoll@127.0.0.1:55828 Connection #1'
+                ),
+            })
+
+        with self.assertRaisesRegex(ValueError, 'admin model override notice'):
+            validate._reject_bad_ocr_content({
+                ROOT / 'ios/fastlane/screenshots/en-US/01_iphone_6_9.png': (
+                    'An administrator-managed setting replaced model '
+                    '"cliproxyapi/agy-acp/gemini-4-neon" with "auto"'
+                ),
+            })
 
 
 if __name__ == '__main__':

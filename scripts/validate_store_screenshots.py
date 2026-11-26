@@ -75,6 +75,11 @@ BAD_OCR_PATTERNS = {
         re.IGNORECASE,
     ),
     'private local path': re.compile(r'/Users/depoll|/private/var/folders', re.IGNORECASE),
+    'private local username': re.compile(r'\bdepoll@', re.IGNORECASE),
+    'Copilot admin model override notice': re.compile(
+        r'administrator-managed setting replaced model',
+        re.IGNORECASE,
+    ),
     'disabled streamer mode': re.compile(r'Streamer mode disabled', re.IGNORECASE),
     'enabled streamer mode': re.compile(r'Streamer mode enabled', re.IGNORECASE),
     'visible API key': re.compile(r'ANTHROPIC_API_KEY|sk-ant-', re.IGNORECASE),
@@ -230,6 +235,8 @@ def _validate_ocr_content(paths: list[Path]) -> None:
             monkeymux_texts.setdefault(_monkeymux_scene_group(path), []).append(
                 (path, text),
             )
+        elif scene == 7:
+            _validate_native_copilot_scene(path, text)
 
     for grouped_texts in monkeymux_texts.values():
         paths_description = ', '.join(
@@ -237,6 +244,29 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         )
         store_media.require_agent_family(
             ' '.join(text for _, text in grouped_texts), paths_description,
+        )
+
+
+def _validate_native_copilot_scene(path: Path, text: str) -> None:
+    """Require a visible assistant reply between the prompt/context line and composer."""
+    lower = text.casefold()
+    start = lower.find('load skills')
+    context_pos = lower.find('context', max(0, start))
+    if context_pos != -1:
+        start = context_pos + len('context')
+    elif start != -1:
+        start += len('load skills')
+    else:
+        start = 0
+    end = lower.find('message the agent', start)
+    reply_slice = text[start:] if end == -1 else text[start:end]
+    # Strip context-bar percentage tokens (e.g. "16%") so a blank chat fails.
+    reply_body = re.sub(r'\b\d{1,3}%\b', '', reply_slice)
+    if len(re.sub(r'\s+', '', reply_body)) < 80:
+        raise ValueError(
+            f'{store_media.display_path(path)} shows the native Copilot prompt '
+            'without a visible assistant reply; regenerate with a model that '
+            'renders a full response',
         )
 
 
@@ -260,6 +290,9 @@ def _validate_duo_ocr_content(paths: dict[str, Path]) -> None:
         _require_ocr_markers(path, texts[path], markers)
     _validate_copilot_scene(
         paths['duo_closed_terminal'], texts[paths['duo_closed_terminal']],
+    )
+    _validate_native_copilot_scene(
+        paths['duo_open_native'], texts[paths['duo_open_native']],
     )
     window_paths = [paths[scene] for scene in sorted(DUO_WINDOW_SCENES)]
     store_media.require_agent_family(
