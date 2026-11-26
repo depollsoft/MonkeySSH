@@ -2433,23 +2433,34 @@ def _ios_simulator_udids(name: str) -> list[str]:
     devices = json.loads(
         subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json'])
     )
-    return [
-        device['udid']
+    matching = [
+        device
         for runtime, runtime_devices in devices['devices'].items()
         if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-')
         for device in runtime_devices
         if device['name'] == name
     ]
+    matching.sort(key=lambda device: device.get('state') != 'Booted')
+    return [device['udid'] for device in matching]
 
 
 def _boot_ios_simulator(name: str) -> str:
     device_ids = _ios_simulator_udids(name)
     if not device_ids:
         raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
-    device_id = device_ids[0]
-    subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
-    subprocess.run(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], check=True)
-    return device_id
+    last_error: subprocess.CalledProcessError | None = None
+    for device_id in device_ids:
+        subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
+        try:
+            subprocess.run(
+                ['xcrun', 'simctl', 'bootstatus', device_id, '-b'],
+                check=True,
+            )
+            return device_id
+        except subprocess.CalledProcessError as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
 
 
 def _ios_simulator_name(target: ScreenshotTarget) -> str:

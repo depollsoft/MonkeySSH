@@ -1024,6 +1024,35 @@ class CaptureLaunchTest(unittest.TestCase):
         self.assertIn('--dart-define=STORE_SCREENSHOT_SCENE=hosts', command.call_args.args[3])
         terminate.assert_called_once_with(process, timeout=20)
 
+    def test_ios_simulator_lookup_prefers_booted_and_falls_back_on_boot_error(self):
+        payload = json.dumps({
+            'devices': {
+                'com.apple.CoreSimulator.SimRuntime.iOS-27-0': [
+                    {'name': 'iPad Pro 13-inch (M5)', 'udid': 'BROKEN-27', 'state': 'Shutdown'},
+                ],
+                'com.apple.CoreSimulator.SimRuntime.iOS-26-5': [
+                    {'name': 'iPad Pro 13-inch (M5)', 'udid': 'GOOD-26', 'state': 'Booted'},
+                ],
+            },
+        }).encode()
+        with patch.object(capture.subprocess, 'check_output', return_value=payload):
+            self.assertEqual(
+                capture._ios_simulator_udids('iPad Pro 13-inch (M5)'),
+                ['GOOD-26', 'BROKEN-27'],
+            )
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ['xcrun', 'simctl', 'bootstatus'] and command[3] == 'BROKEN-27':
+                raise subprocess.CalledProcessError(145, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(capture, '_ios_simulator_udids', return_value=['BROKEN-27', 'GOOD-26']), \
+             patch.object(capture.subprocess, 'run', side_effect=fake_run):
+            self.assertEqual(
+                capture._boot_ios_simulator('iPad Pro 13-inch (M5)'),
+                'GOOD-26',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
