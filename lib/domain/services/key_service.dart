@@ -66,6 +66,7 @@ class KeyService {
     required String name,
     required SshKeyType keyType,
     String? passphrase,
+    int kdfRounds = 16,
   }) async {
     final normalizedPassphrase = (passphrase?.isEmpty ?? true)
         ? null
@@ -75,6 +76,7 @@ class KeyService {
       keyType: keyType,
       comment: name,
       passphrase: normalizedPassphrase,
+      kdfRounds: kdfRounds,
     );
 
     return _insertKey(

@@ -805,6 +805,7 @@ class AgentProbeTimeouts {
     this.batchProbe = const Duration(seconds: 8),
     this.metadataProbe = const Duration(seconds: 30),
     this.metadataProbeBase = const Duration(seconds: 20),
+    this.metadataProbePerBatch = const Duration(seconds: 10),
     this.usageProbe = const Duration(seconds: 14),
     this.install = const Duration(seconds: 18),
     this.defaultRun = const Duration(seconds: 15),
@@ -816,9 +817,13 @@ class AgentProbeTimeouts {
   /// Timeout for one group of registry metadata probes.
   final Duration metadataProbe;
 
-  /// Base of the batched registry-metadata timeout, which grows by 10 seconds
-  /// for every four installed runtimes.
+  /// Base of the batched registry-metadata timeout, which grows by
+  /// [metadataProbePerBatch] for every four installed runtimes.
   final Duration metadataProbeBase;
+
+  /// Extra timeout added to [metadataProbeBase] for every four installed
+  /// runtimes in a batched registry-metadata probe.
+  final Duration metadataProbePerBatch;
 
   /// Timeout for a usage probe.
   final Duration usageProbe;
@@ -1079,7 +1084,8 @@ class AgentManagementService {
           priority: priority,
           timeout:
               _timeouts.metadataProbeBase +
-              Duration(seconds: ((installedDefinitions.length + 3) ~/ 4) * 10),
+              _timeouts.metadataProbePerBatch *
+                  ((installedDefinitions.length + 3) ~/ 4),
           keepPartialOutputOnTimeout: true,
         );
         metadata = parseAgentMetadataProbeOutput(metadataOutput.output);

@@ -888,6 +888,7 @@ final class MonkeyMuxAcpBridgeService {
     bool takeOver = false,
     Duration heartbeatInterval = const Duration(seconds: 30),
     DateTime Function()? clock,
+    int maxFrameBytes = monkeyMuxAcpBridgeMaxFrameBytes,
   }) {
     _validateBridgeId(bridgeId);
     if (lastAcknowledgedSequence < 0) {
@@ -911,6 +912,7 @@ final class MonkeyMuxAcpBridgeService {
       takeOver: takeOver,
       heartbeatInterval: heartbeatInterval,
       clock: clock ?? DateTime.now,
+      maxFrameBytes: maxFrameBytes,
     );
   }
 
@@ -978,6 +980,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     required bool takeOver,
     required Duration heartbeatInterval,
     required DateTime Function() clock,
+    required int maxFrameBytes,
   }) : _installer = installer,
        _sessionProvider = sessionProvider,
        _bridgeId = bridgeId,
@@ -993,7 +996,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
        // Resuming an earlier position means this chat held the lease before.
        _heldWriterLease = lastAcknowledgedSequence > 0,
        _heartbeatInterval = heartbeatInterval,
-       _clock = clock {
+       _clock = clock,
+       _maxFrameBytes = maxFrameBytes {
     scheduleMicrotask(() {
       _emitState(MonkeyMuxAcpTransportStatus.connecting);
       unawaited(_openChannel());
@@ -1011,6 +1015,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final String _clientToken;
   final Duration _heartbeatInterval;
   final DateTime Function() _clock;
+  final int _maxFrameBytes;
   // Only the first handshake written takes the lease over, whether or not
   // its reply arrives. A later reconnect must not silently take back a lease
   // another device deliberately took meanwhile.
@@ -1162,11 +1167,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         _outgoingFrame.clear();
         if (frame.isNotEmpty && frame.last == 0x0d) frame.removeLast();
         if (frame.isEmpty) continue;
-        _enqueuePendingInput(_prepareAcpInputFrame(frame));
+        _enqueuePendingInput(
+          _prepareAcpInputFrame(frame, maxBytes: _maxFrameBytes),
+        );
         continue;
       }
       _outgoingFrame.add(byte);
-      if (_outgoingFrame.length > monkeyMuxAcpBridgeMaxFrameBytes) {
+      if (_outgoingFrame.length > _maxFrameBytes) {
         _outgoingFrame.clear();
         throw const MonkeyMuxAcpBridgeException(
           MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
@@ -2693,7 +2700,10 @@ void _requireType(Map<String, Object?> message, String expected) {
   }
 }
 
-_InputFrame _prepareAcpInputFrame(List<int> frame) {
+_InputFrame _prepareAcpInputFrame(
+  List<int> frame, {
+  int maxBytes = monkeyMuxAcpBridgeMaxFrameBytes,
+}) {
   Object? decoded;
   try {
     decoded = jsonDecode(utf8.decode(frame, allowMalformed: false));
@@ -2717,7 +2727,7 @@ _InputFrame _prepareAcpInputFrame(List<int> frame) {
       'version': monkeyMuxAcpBridgeProtocolVersion,
       'type': 'input',
       'data': decoded,
-    }),
+    }, maxBytes: maxBytes),
     prompt:
         decoded['method'] == 'session/prompt' &&
             requestId != null &&
@@ -2727,9 +2737,12 @@ _InputFrame _prepareAcpInputFrame(List<int> frame) {
   );
 }
 
-Uint8List _encodeWire(Map<String, Object?> message) {
+Uint8List _encodeWire(
+  Map<String, Object?> message, {
+  int maxBytes = monkeyMuxAcpBridgeMaxFrameBytes,
+}) {
   final bytes = utf8.encode('${jsonEncode(message)}\n');
-  if (bytes.length > monkeyMuxAcpBridgeMaxFrameBytes) {
+  if (bytes.length > maxBytes) {
     throw const MonkeyMuxAcpBridgeException(
       MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
       'The bridge frame exceeded the protocol limit.',

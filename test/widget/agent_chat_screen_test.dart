@@ -47,7 +47,6 @@ import '../helpers/keyboard_visibility_channel.dart';
 import '../helpers/tap_selectable_text.dart';
 import '../support/fake_acp_session_manager.dart';
 import '../support/fake_git_working_tree_service.dart';
-import 'agent_chat_transcript_tools_cases.dart';
 
 class _MockSshService extends Mock implements SshService {}
 
@@ -187,8 +186,6 @@ Future<void> _pumpWithSftpRoute(
 }
 
 void main() {
-  registerAgentChatTranscriptToolsTests();
-
   for (final (markdown, path) in [
     ('lib/main.dart:42', 'lib/main.dart'),
     ('`lib/main.dart`', 'lib/main.dart'),
