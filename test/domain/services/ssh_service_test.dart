@@ -212,11 +212,10 @@ class _AuthenticationFixture {
   }
 }
 
-/// What the server does on one connection of a [_ReconnectFixture], after the
-/// host key is accepted. Throwing ends that connection.
-/// A destination behind a trusted jump host. The destination drops the
-/// connection after the user answers its password prompt, and [forward]
-/// answers each tunnel the jump host is asked to open.
+/// A destination behind a trusted jump host. After the user answers its
+/// password prompt the destination drops the connection, or with
+/// `hangTargetAuth` stops answering. [forward] answers each tunnel the jump
+/// host is asked to open.
 class _JumpReconnectFixture {
   final jumpClient = _MockSshClient();
   int forwardCount = 0;
@@ -309,6 +308,8 @@ class _JumpReconnectFixture {
   );
 }
 
+/// What the server does on one connection of a [_ReconnectFixture], after the
+/// host key is accepted. Throwing ends that connection.
 typedef _ServerAuthStep = Future<void> Function(
   SSHPasswordRequestHandler? onPasswordRequest,
   SSHUserInfoRequestHandler? onUserInfoRequest,
@@ -339,6 +340,7 @@ class _ReconnectFixture {
     required List<_ServerAuthStep> steps,
     InteractiveAuthPromptHandler? promptHandler,
     Set<int> refusedSockets = const {},
+    int? changedHostKeySocket,
     Duration reconnectWindow = const Duration(seconds: 45),
     Duration retryDelay = Duration.zero,
   }) async {
@@ -363,7 +365,11 @@ class _ReconnectFixture {
         if (refusedSockets.contains(fixture.socketCount)) {
           throw const SocketException('Connection refused');
         }
-        final socket = _FakeHostKeySocket(hostKeyBytes);
+        final socket = _FakeHostKeySocket(
+          fixture.socketCount == changedHostKeySocket
+              ? _ed25519HostKeyBlob([2, 7, 1])
+              : hostKeyBytes,
+        );
         fixture.sockets.add(socket);
         return socket;
       },
@@ -383,10 +389,18 @@ class _ReconnectFixture {
             when(client.close).thenAnswer((_) async {});
             when(() => client.authenticated).thenAnswer((_) async {
               final bytes = await (socket as HostKeySource).hostKeyBytes;
-              await onVerifyHostKey!(
+              final accepted = await onVerifyHostKey!(
                 'ssh-ed25519',
                 _hostKeyCallbackFingerprint(bytes),
               );
+              if (!accepted) {
+                return Future<void>.error(
+                  SSHAuthAbortError(
+                    'Connection closed before authentication',
+                    SSHHostkeyError('Hostkey verification failed'),
+                  ),
+                );
+              }
               await step(onPasswordRequest, onUserInfoRequest);
             });
             return client;
@@ -9321,13 +9335,13 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(fixture.sockets.last.destroyed, isFalse);
       expect(sentPasswords, ['typed-secret', 'typed-secret']);
       expect(challenges, hasLength(1));
-      expect(progress, contains('Authentication timed out; reconnecting…'));
+      expect(progress, contains('Authentication timed out. Reconnecting…'));
       verify(fixture.clients.first.close).called(1);
       verifyNever(fixture.clients.last.close);
     });
 
     test('reconnects after a silent authentication timeout when the server '
-        'later accepts key auth', () async {
+        'later accepts without a prompt', () async {
       var promptCalls = 0;
       final fixture = await _ReconnectFixture.create(
         promptHandler: (_) async {
@@ -9339,7 +9353,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         steps: [
           (onPassword, _) async {
             await onPassword!();
-            // Server silently pivots root without sending FIN/RST.
+            // The server restarts without closing the connection.
             return Completer<void>().future;
           },
           (_, _) async {},
@@ -9353,6 +9367,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(result.success, isTrue);
       expect(fixture.socketCount, 3);
       expect(fixture.clients, hasLength(2));
+      expect(fixture.sockets.first.destroyed, isTrue);
+      verify(fixture.clients.first.close).called(1);
       expect(promptCalls, 1);
     });
 
@@ -9389,6 +9405,14 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(result.success, isTrue);
       expect(fixture.socketCount, 3);
+      expect(fixture.sockets.map((socket) => socket.destroyed), [
+        true,
+        false,
+        false,
+      ]);
+      verify(fixture.clients[0].close).called(1);
+      verify(fixture.clients[1].close).called(1);
+      verifyNever(fixture.clients[2].close);
       expect(promptCalls, 1);
       expect(sentPasswords, ['typed-secret', 'typed-secret']);
     });
@@ -9423,6 +9447,14 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(result.success, isTrue);
       expect(fixture.socketCount, 3);
+      expect(fixture.sockets.map((socket) => socket.destroyed), [
+        false,
+        true,
+        false,
+      ]);
+      verify(fixture.clients[0].close).called(1);
+      verify(fixture.clients[1].close).called(1);
+      verifyNever(fixture.clients[2].close);
       expect(promptCalls, 1);
       expect(sentPasswords, ['typed-secret', 'typed-secret']);
     });
@@ -9454,6 +9486,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(result.success, isTrue);
       expect(fixture.socketCount, 2);
+      expect(fixture.sockets.first.destroyed, isTrue);
+      verify(fixture.clients.first.close).called(1);
       expect(sentPasswords, ['stored-pass', 'stored-pass']);
     });
 
@@ -9537,6 +9571,269 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(fixture.sockets.first.destroyed, isTrue);
       expect(fixture.sockets.last.destroyed, isTrue);
       expect(promptCalls, 1);
+    });
+
+    for (final promptText in [
+      'Password:',
+      "tester@reconnect.example.com's password: ",
+      'Password for tester: ',
+    ]) {
+      test('answers the keyboard-interactive prompt "$promptText" with the '
+          'typed password after a timeout', () async {
+        final challenges = <SshAuthChallenge>[];
+        final responses = <List<String>?>[];
+        final request = SSHUserInfoRequest('', '', [
+          SSHUserInfoPrompt(promptText, false),
+        ]);
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (challenge) async {
+            challenges.add(challenge);
+            return ['typed-secret'];
+          },
+          steps: [
+            (_, onUserInfo) async {
+              responses.add(await onUserInfo!(request));
+              return Completer<void>().future;
+            },
+            (_, onUserInfo) async {
+              responses.add(await onUserInfo!(request));
+            },
+          ],
+        );
+
+        final result = await fixture.service.connect(
+          _ReconnectFixture.shortTimeoutConfig,
+        );
+
+        expect(result.success, isTrue);
+        expect(fixture.socketCount, 2);
+        expect(fixture.sockets.first.destroyed, isTrue);
+        expect(responses, [
+          ['typed-secret'],
+          ['typed-secret'],
+        ]);
+        expect(challenges, hasLength(1));
+      });
+    }
+
+    test('asks again when the prompt after a timeout wants something other '
+        'than the password', () async {
+      var promptCalls = 0;
+      final responses = <List<String>?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async => ['answer-${++promptCalls}'],
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Completer<void>().future;
+          },
+          (_, onUserInfo) async {
+            responses.add(
+              await onUserInfo!(
+                SSHUserInfoRequest('', '', [
+                  SSHUserInfoPrompt('Password reset code:', false),
+                ]),
+              ),
+            );
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isTrue);
+      expect(responses, [
+        ['answer-2'],
+      ]);
+      expect(promptCalls, 2);
+    });
+
+    test('does not send the typed password to a changed host key after a '
+        'timeout', () async {
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async => ['typed-secret'],
+        changedHostKeySocket: 2,
+        steps: [
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Completer<void>().future;
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isFalse);
+      expect(fixture.socketCount, 2);
+      expect(sentPasswords, ['typed-secret']);
+    });
+
+    for (final (label, ending) in <(String, Future<void> Function())>[
+      ('times out', () => Completer<void>().future),
+      (
+        'drops',
+        () => Future<void>.error(
+          SSHAuthAbortError('Connection closed before authentication'),
+        ),
+      ),
+    ]) {
+      test('forgets the typed password when authentication $label and the '
+          'server cannot be reached again', () async {
+        var promptCalls = 0;
+        SSHPasswordRequestHandler? firstOnPassword;
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (_) async => ['answer-${++promptCalls}'],
+          refusedSockets: {2},
+          reconnectWindow: const Duration(seconds: 1),
+          retryDelay: const Duration(seconds: 2),
+          steps: [
+            (onPassword, _) async {
+              firstOnPassword = onPassword;
+              await onPassword!();
+              return ending();
+            },
+          ],
+        );
+
+        final result = await fixture.service.connect(
+          _ReconnectFixture.shortTimeoutConfig,
+        );
+
+        expect(result.success, isFalse);
+        expect(fixture.socketCount, 2);
+        // A password still held would answer this request without asking.
+        expect(await firstOnPassword!(), 'answer-2');
+        expect(promptCalls, 2);
+      });
+    }
+
+    test('destroys the socket when the reconnect after a timeout is '
+        'cancelled', () async {
+      final token = SshConnectionCancellationToken();
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async => ['typed-secret'],
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Completer<void>().future;
+          },
+          (onPassword, _) async {
+            await onPassword!();
+            token.cancel();
+            return Completer<void>().future;
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+        cancellationToken: token,
+      );
+
+      expect(result.cancelled, isTrue);
+      expect(fixture.socketCount, 2);
+      expect(fixture.sockets.last.destroyed, isTrue);
+      verify(fixture.clients.last.close).called(1);
+    });
+
+    test('reconnects to a jump host whose authentication times out', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final knownHostsRepository = KnownHostsRepository(db);
+      await _seedTrustedHost(
+        knownHostsRepository,
+        hostname: 'jump.example.com',
+        hostKeyBytes: _JumpReconnectFixture.jumpKey,
+      );
+      await _seedTrustedHost(
+        knownHostsRepository,
+        hostname: 'target.example.com',
+        hostKeyBytes: _JumpReconnectFixture.targetKey,
+      );
+      final progress = <String>[];
+      final jumpSockets = <_FakeHostKeySocket>[];
+      final clients = <_MockSshClient>[];
+      final service = SshService(
+        knownHostsRepository: knownHostsRepository,
+        interactiveAuthPromptHandler: (_) async => ['typed-secret'],
+        reconnectAfterDropRetryDelay: Duration.zero,
+        socketConnector: (host, port, {timeout}) async {
+          final socket = _FakeHostKeySocket(_JumpReconnectFixture.jumpKey);
+          jumpSockets.add(socket);
+          return socket;
+        },
+        clientFactory:
+            (
+              socket, {
+              required username,
+              onVerifyHostKey,
+              onPasswordRequest,
+              onUserInfoRequest,
+              identities,
+              keepAliveInterval,
+            }) {
+              // The jump host's first sign-in stalls after the password, its
+              // second succeeds, and the destination then signs in unasked.
+              final index = clients.length;
+              final client = _MockSshClient();
+              clients.add(client);
+              when(client.close).thenAnswer((_) async {});
+              when(() => client.isClosed).thenReturn(false);
+              when(
+                () => client.forwardLocal('target.example.com', 22),
+              ).thenAnswer(
+                (_) async =>
+                    _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+              );
+              when(() => client.authenticated).thenAnswer((_) async {
+                final bytes = await (socket as HostKeySource).hostKeyBytes;
+                await onVerifyHostKey!(
+                  'ssh-ed25519',
+                  _hostKeyCallbackFingerprint(bytes),
+                );
+                if (index < 2) await onPasswordRequest!();
+                if (index == 0) return Completer<void>().future;
+              });
+              return client;
+            },
+      );
+
+      final result = await service.connect(
+        const SshConnectionConfig(
+          hostname: 'target.example.com',
+          port: 22,
+          username: 'target',
+          jumpHost: SshConnectionConfig(
+            hostname: 'jump.example.com',
+            port: 22,
+            username: 'jump',
+            connectionTimeout: Duration(milliseconds: 40),
+          ),
+        ),
+        onProgress: (update) => progress.add(update.message),
+      );
+
+      expect(result.success, isTrue);
+      expect(clients, hasLength(3));
+      expect(jumpSockets, hasLength(2));
+      expect(jumpSockets.first.destroyed, isTrue);
+      expect(jumpSockets.last.destroyed, isFalse);
+      expect(
+        progress,
+        contains('Jump host authentication timed out. Reconnecting…'),
+      );
+      expect(
+        progress,
+        isNot(contains('Authentication timed out. Reconnecting…')),
+      );
     });
 
     test('connect replaces a changed trusted host key after prompt', () async {

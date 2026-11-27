@@ -1388,8 +1388,8 @@ class _InteractiveAuthHandlers {
 /// Tracks the interactive authentication prompts of one connection attempt:
 /// whether one is open, so the authentication timeout can pause while the
 /// user types, and whether the last one was answered, so a connection the
-/// server drops while checking the answer can be retried without asking the
-/// user to type the password again.
+/// server drops or stops answering while checking the answer can be retried
+/// without asking the user to type the password again.
 class _InteractiveAuthGate {
   int _activePrompts = 0;
   Completer<void>? _idle;
@@ -1521,10 +1521,10 @@ class SshService {
   /// the OS never answers, must not hold the connection.
   final Duration wifiPermissionTimeout;
 
-  /// How long reconnecting after the server dropped the connection during
-  /// sign-in keeps trying to reach it. A Mac unlocked over SSH after a
-  /// restart (FileVault) restarts every process, sshd and its network
-  /// included, and takes several seconds to accept connections again.
+  /// How long reconnecting after the server dropped the connection or stopped
+  /// answering during sign-in keeps trying to reach it. A Mac unlocked over
+  /// SSH after a restart (FileVault) restarts every process, sshd and its
+  /// network included, and takes several seconds to accept connections again.
   final Duration reconnectAfterDropWindow;
 
   /// Pause between attempts to reach the server within
@@ -2303,14 +2303,18 @@ class SshService {
           await _closeSshClients(createdClient, const []);
           gate.startRetry();
           await authenticate(await reopenEndpointSocket(), verify);
+        } on SshConnectionCancelledException {
+          // Closing waits for the peer, and one that has stopped answering
+          // would hold the cancellation.
+          socket.destroy();
+          rethrow;
         } on TimeoutException {
-          // A freshly rebooted Mac in FileVault pre-boot can enter maintenance
-          // sleep while the password prompt is open (stalling the existing
-          // TCP socket in retransmit backoff when the password is submitted),
-          // or tear down sshd and its network during pivot-root without
-          // delivering a TCP FIN/RST. Either leaves authentication hanging
-          // until this timeout. Destroy the stalled socket so close() cannot
-          // block on unsent bytes, then reconnect once.
+          // A Mac waiting for a FileVault unlock sleeps within seconds of a
+          // connection opening, so a typed password is often sent while it is
+          // asleep and never arrives; the unlock can also restart the Mac
+          // without closing the connection. Either leaves authentication
+          // waiting until this timeout. Destroy the socket so closing cannot
+          // wait on a peer that has stopped answering, then reconnect once.
           socket.destroy();
           if (reconnectedAfterTimeout ||
               !gate.answeredLastPrompt ||
@@ -2327,7 +2331,9 @@ class SshService {
           await _closeSshClients(createdClient, const []);
           report(
             SshConnectionState.connecting,
-            'Authentication timed out; reconnecting…',
+            isJumpHost
+                ? 'Jump host authentication timed out. Reconnecting…'
+                : 'Authentication timed out. Reconnecting…',
           );
           gate.startRetry();
           await authenticate(await reopenEndpointSocket(), verify);
@@ -2607,12 +2613,13 @@ class SshService {
           gate.recordDeclined();
           return null;
         }
-        // Only a prompt that names a password trades a typed answer with a
-        // reconnect: one that asks for a passphrase may be for a key, not the
-        // account.
+        // Only a prompt that asks for the password and nothing else trades a
+        // typed answer with a reconnect. One that asks for a passphrase may
+        // be for a key, and one such as "Password reset code:" wants
+        // something other than the account password.
         final isReplayable =
             isPasswordPrompt &&
-            prompts.first.promptText.toLowerCase().contains('password');
+            _replayablePasswordPrompt.hasMatch(prompts.first.promptText);
         if (isReplayable) {
           final replayed = gate.takeReplayPassword();
           if (replayed != null) {
@@ -2656,6 +2663,14 @@ class SshService {
       onUserInfoRequest: onUserInfoRequest,
     );
   }
+
+  /// A prompt that ends by asking for the password, such as "Password:",
+  /// "user@host's password:" or "Password for user:".
+  static final _replayablePasswordPrompt = RegExp(
+    r'^(?:.*\s)?password(?:\s+for\s+\S+)?\s*:?\s*$',
+    caseSensitive: false,
+    dotAll: true,
+  );
 
   /// Whether a single keyboard-interactive prompt is unambiguously asking for
   /// an account password (rather than an OTP/2FA code or a new password during
