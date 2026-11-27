@@ -69,11 +69,11 @@ Be respectful and constructive in all interactions.
    # Fast inner-loop check (changed files: parallel format, daemon-backed analyze, mapped tests)
    ./scripts/dev_check.sh
 
-   # Or check the entire repository (parallel format across lib/ test/ tool/ + full analyze)
+   # Or check the entire repository (parallel format across all Dart dirs + full analyze)
    ./scripts/dev_check.sh --all --format --analyze
 
    # Format only your source directories (avoid `dart format .` when build/ or third_party/ exist)
-   dart format lib test tool
+   dart format lib test tool integration_test test_driver
 
    # Regenerate Drift database code (scoped via build.yaml to lib/data/database/database.dart)
    dart run build_runner build --delete-conflicting-outputs

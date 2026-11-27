@@ -181,6 +181,37 @@ class DartAnalyzeFastIntegrationTest(unittest.TestCase):
         fast_reloaded = self._run_fast('--fatal-warnings', '--fatal-infos', 'lib/clean.dart')
         self.assertEqual(fast_reloaded.returncode, 0, fast_reloaded.stdout + fast_reloaded.stderr)
 
+    def test_whole_repo_catches_transitive_dependent_error_after_signature_change(self):
+        lib_a = self.pkg / 'lib' / 'a.dart'
+        lib_b = self.pkg / 'lib' / 'b.dart'
+        lib_a.write_text('int compute(int x) => x + 1;\n', encoding='utf-8')
+        lib_b.write_text(
+            "import 'a.dart';\nint useCompute() => compute(1);\n",
+            encoding='utf-8',
+        )
+
+        # Warm whole-repo analysis passes initially.
+        clean = self._run_fast('--fatal-warnings', '--fatal-infos')
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+        # Change signature in lib/a.dart (valid by itself) so dependent lib/b.dart breaks.
+        lib_a.write_text('int compute(int x, int y) => x + y;\n', encoding='utf-8')
+        broken = self._run_fast('--fatal-warnings', '--fatal-infos')
+        dart_broken = self._run_dart_analyze('--fatal-warnings', '--fatal-infos')
+        self.assertEqual(broken.returncode, 1, broken.stdout + broken.stderr)
+        self.assertNotEqual(dart_broken.returncode, 0, dart_broken.stdout + dart_broken.stderr)
+        self.assertIn('lib/b.dart', broken.stdout)
+        self.assertIn('not_enough_positional_arguments', broken.stdout)
+        self.assertIn('not_enough_positional_arguments', dart_broken.stdout)
+
+        # Fixing lib/b.dart makes whole-repo analysis pass again immediately.
+        lib_b.write_text(
+            "import 'a.dart';\nint useCompute() => compute(1, 2);\n",
+            encoding='utf-8',
+        )
+        fixed = self._run_fast('--fatal-warnings', '--fatal-infos')
+        self.assertEqual(fixed.returncode, 0, fixed.stdout + fixed.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

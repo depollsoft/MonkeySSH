@@ -183,8 +183,15 @@ run_format() {
   fi
 
   if [[ "$mode" == "all" ]]; then
-    echo "Running parallel dart format across lib/ test/ tool/ ($FORMAT_WORKERS workers)..."
-    find lib test tool -name '*.dart' -print0 \
+    local format_dirs=()
+    local dir
+    for dir in lib test tool integration_test test_driver; do
+      if [[ -d "$dir" ]]; then
+        format_dirs+=("$dir")
+      fi
+    done
+    echo "Running parallel dart format across ${format_dirs[*]} ($FORMAT_WORKERS workers)..."
+    find "${format_dirs[@]}" -name '*.dart' -print0 \
       | xargs -0 -n 64 -P "$FORMAT_WORKERS" dart format "${format_flags[@]}"
     return
   fi

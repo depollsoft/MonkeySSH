@@ -309,6 +309,29 @@ class AnalysisServerBridge:
         )
         self._wait_for_idle(require_analyzing_edge=True, timeout=STARTUP_TIMEOUT)
 
+    def _wait_for_analysis_settlement(
+        self,
+        *,
+        edge_wait: float = 0.5,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> None:
+        """Wait for a triggered analysis pass to start (bounded) and finish."""
+        edge_deadline = time.monotonic() + edge_wait
+        with self._idle_cond:
+            while not self._closed and not self._seen_analyzing:
+                remaining = edge_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._idle_cond.wait(timeout=remaining)
+            idle_deadline = time.monotonic() + timeout
+            while not self._closed and self._is_analyzing:
+                remaining = idle_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('analysis server timed out waiting for idle')
+                self._idle_cond.wait(timeout=remaining)
+        if self._closed:
+            raise RuntimeError('analysis server exited while analyzing')
+
     def sync_filesystem(self, requested_files: list[str] | None = None) -> None:
         """Synchronize disk edits/additions/deletions with the analysis server."""
         current = scan_dart_files(self.root)
@@ -336,6 +359,7 @@ class AnalysisServerBridge:
                 if prev_digest is not None and prev_digest != digest:
                     modified.add(path)
 
+        changed = sorted(added | modified)
         if added or removed:
             for path in removed:
                 self._errors_by_file.pop(path, None)
@@ -346,15 +370,18 @@ class AnalysisServerBridge:
                 'analysis.setAnalysisRoots',
                 {'included': [str(self.root)], 'excluded': []},
             )
-            # Push overlays for added/modified files then remove so disk state
-            # is guaranteed visible immediately.
-            refresh = sorted(added | modified)
-            if refresh:
-                self._refresh_files(refresh)
-            self._wait_for_idle(require_analyzing_edge=False, timeout=REQUEST_TIMEOUT)
+            if changed:
+                self._refresh_files(changed)
+                self._request('analysis.getErrors', {'file': changed[0]}, timeout=REQUEST_TIMEOUT)
+            self._wait_for_analysis_settlement(timeout=REQUEST_TIMEOUT)
+            self._request('server.getVersion', timeout=10.0)
         elif modified:
-            self._refresh_files(sorted(modified))
-            self._wait_for_idle(require_analyzing_edge=False, timeout=REQUEST_TIMEOUT)
+            with self._idle_cond:
+                self._seen_analyzing = False
+            self._refresh_files(changed)
+            self._request('analysis.getErrors', {'file': changed[0]}, timeout=REQUEST_TIMEOUT)
+            self._wait_for_analysis_settlement(timeout=REQUEST_TIMEOUT)
+            self._request('server.getVersion', timeout=10.0)
 
         self._file_snapshot = current
 
