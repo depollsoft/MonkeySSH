@@ -51,6 +51,8 @@ jobs:
       ios_native: ${{ steps.filter.outputs.ios_native }}
       macos_native: ${{ steps.filter.outputs.macos_native }}
       windows_native: ${{ steps.filter.outputs.windows_native }}
+      monkeymux_fingerprint: ${{ steps.monkeymux-fingerprint.outputs.value }}
+      monkeymux_cached: ${{ steps.monkeymux-cache.outputs.cache-hit == 'true' }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -69,27 +71,85 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: python3 scripts/ci_changes.py
 
-  # Generate the ignored helper payload once, then fan the exact same bytes out
-  # to every Flutter test and package job in this workflow run.
+      - name: Fingerprint MonkeyMux inputs
+        id: monkeymux-fingerprint
+        if: steps.filter.outputs.run_check == 'true' || steps.filter.outputs.go == 'true'
+        run: |
+          fingerprint="$(bash scripts/build_monkeymux_assets.sh --print-fingerprint)"
+          echo "value=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Check MonkeyMux cache
+        id: monkeymux-cache
+        if: steps.monkeymux-fingerprint.outputs.value != ''
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: assets/monkeymux/
+          key: monkeymux-assets-v1-Linux-${{ steps.monkeymux-fingerprint.outputs.value }}
+          lookup-only: true
+
+  # Lightweight GitHub-hosted probe on push to main: checks whether Apple build
+  # caches or the Windows pub cache are missing on refs/heads/main (after a
+  # Flutter bump, Xcode bump, or 10 GB LRU eviction) without allocating macOS
+  # or Windows runners on normal merges when caches are already warm.
+  cache-probe:
+    name: Probe Build Caches
+    needs: changes
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      (needs.changes.outputs.run_check == 'true' || needs.changes.outputs.go == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      warm_ios: ${{ steps.probe.outputs.warm_ios }}
+      warm_macos: ${{ steps.probe.outputs.warm_macos }}
+      warm_windows_pub: ${{ steps.probe.outputs.warm_windows_pub }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            pubspec.lock
+            ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved
+            macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved
+            scripts/ci_cache_probe.py
+          sparse-checkout-cone-mode: false
+
+      - name: Probe main caches
+        id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLUTTER_VERSION: ${{ env.FLUTTER_VERSION }}
+        run: python3 scripts/ci_cache_probe.py
+
+  # Generate the ignored helper payload once when missing from the Ubicloud
+  # cache or when a GitHub-hosted consumer (Apple/Windows) needs the artifact.
+  # When already cached and only Ubicloud Linux jobs run (most PRs), this job is
+  # skipped and downstream Linux jobs restore directly from Ubicloud cache.
   #
-  # This job deliberately keeps running on push to main: an Actions cache written
-  # from a gh-readonly-queue/... ref is scoped to that throwaway ref, so a run on
-  # main is the only thing that can write the payload cache PRs later restore.
+  # On push to main, this job remains the sole writer of the payload cache.
   monkeymux-assets:
     name: Build MonkeyMux Assets
-    needs: changes
-    if: needs.changes.outputs.run_check == 'true' || needs.changes.outputs.go == 'true'
+    needs: [changes, cache-probe]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
+      (needs.changes.outputs.run_check == 'true' || needs.changes.outputs.go == 'true') &&
+      (needs.changes.outputs.monkeymux_cached != 'true' ||
+       needs.changes.outputs.go == 'true' ||
+       (github.event_name == 'merge_group' && (needs.changes.outputs.ios == 'true' || needs.changes.outputs.macos == 'true' || needs.changes.outputs.windows == 'true')) ||
+       (github.event_name == 'pull_request' && (needs.changes.outputs.ios_native == 'true' || needs.changes.outputs.macos_native == 'true' || needs.changes.outputs.windows_native == 'true')) ||
+       (github.event_name == 'push' && (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_ios == 'true' || needs.cache-probe.outputs.warm_macos == 'true')))
     runs-on: ubicloud-standard-4
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version-file: remote/monkeymux/go.mod
-          cache-dependency-path: remote/monkeymux/go.sum
 
       - name: Fingerprint MonkeyMux inputs
         id: monkeymux-fingerprint
@@ -104,7 +164,29 @@ jobs:
           path: assets/monkeymux/
           key: monkeymux-assets-v1-${{ runner.os }}-${{ steps.monkeymux-fingerprint.outputs.value }}
 
+      - name: Check cached MonkeyMux assets
+        id: monkeymux-ready
+        env:
+          CACHE_HIT: ${{ steps.monkeymux-cache.outputs.cache-hit }}
+          EXPECTED_FINGERPRINT: ${{ steps.monkeymux-fingerprint.outputs.value }}
+        run: |
+          if [ "$CACHE_HIT" = "true" ] &&
+             [ -f assets/monkeymux/.build-inputs.sha256 ] &&
+             [ "$(cat assets/monkeymux/.build-inputs.sha256)" = "$EXPECTED_FINGERPRINT" ] &&
+             python3 scripts/verify_monkeymux_assets.py assets/monkeymux "$(sh remote/monkeymux/monkeymux-version.sh)"; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v7.0.0
+        if: steps.monkeymux-ready.outputs.ready != 'true'
+        with:
+          go-version-file: remote/monkeymux/go.mod
+          cache-dependency-path: remote/monkeymux/go.sum
+
       - name: Build assets
+        if: steps.monkeymux-ready.outputs.ready != 'true'
         run: scripts/build_monkeymux_assets.sh
 
       - name: Save MonkeyMux assets
@@ -129,7 +211,7 @@ jobs:
   #
   # Setup steps that only touch disjoint paths run as `background:` steps and
   # are joined with `wait:` before the first step that needs them. The payload
-  # download writes assets/monkeymux/ while flutter-setup installs the SDK and
+  # fetch writes assets/monkeymux/ while flutter-setup installs the SDK and
   # runs pub get, so the two overlap in every Flutter job below.
   # ---------------------------------------------------------------------------
   check:
@@ -137,7 +219,12 @@ jobs:
     needs: [changes, monkeymux-assets]
     # The merge-queue run validates the exact tree that lands on main, so the
     # push run would only re-check bytes that were already green.
-    if: needs.changes.outputs.run_check == 'true' && github.event_name != 'push'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.monkeymux-assets.result == 'success' || needs.monkeymux-assets.result == 'skipped') &&
+      needs.changes.outputs.run_check == 'true' &&
+      github.event_name != 'push'
     runs-on: ubicloud-standard-4
     timeout-minutes: 5
     steps:
@@ -145,13 +232,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download MonkeyMux assets
+      - name: Fetch MonkeyMux assets
         id: monkeymux-download
         background: true
-        uses: actions/download-artifact@v8.0.2
+        uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          name: monkeymux-assets
-          path: assets/monkeymux/
+          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: $/.github/actions/flutter-setup
         with:
@@ -180,20 +267,46 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ruby/setup-ruby@v1.329.0
-        with:
-          ruby-version: '3.3'
-
       # jactionlint is the maintained fork of rhysd/actionlint. Upstream 1.7.12
       # predates the step-level `background:` / `wait:` keys this workflow uses
       # and rejects them as unexpected keys (rhysd/actionlint#693 is still open).
-      - name: Validate GitHub Actions workflows
+      - name: Fetch jactionlint
+        id: fetch-jactionlint
+        background: true
         run: |
           curl --fail --silent --show-error --location --retry 3 \
             https://github.com/jdx/jactionlint/releases/download/v1.8.2/jactionlint_1.8.2_linux_amd64.tar.gz \
             -o "$RUNNER_TEMP/jactionlint.tar.gz"
           echo "6533bd8047fc012a3f66238d84f65cacdac669da00b9f6cf042c1734c252bc93  $RUNNER_TEMP/jactionlint.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/jactionlint.tar.gz" -C "$RUNNER_TEMP" jactionlint
+
+      - name: Fetch gh-actions-lock
+        id: fetch-actions-lock
+        background: true
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/github/gh-actions-lock/releases/download/v0.2.0/linux-amd64 \
+            -o "$RUNNER_TEMP/gh-actions-lock"
+          echo "79ec84c191667fd935a277e6fd3662cf5d3669cccc9e99998731d8f306f373b6  $RUNNER_TEMP/gh-actions-lock" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/gh-actions-lock"
+
+      - name: Restore Pillow venv cache
+        id: pillow-cache
+        background: true
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: .venv
+          key: tooling-pillow-v1-${{ runner.os }}-py3
+
+      - uses: ruby/setup-ruby@v1.329.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Wait for tooling downloads and Pillow cache
+        wait: [fetch-jactionlint, fetch-actions-lock, pillow-cache]
+
+      - name: Validate GitHub Actions workflows
+        run: |
           # Validate workflow syntax and expressions without depending on optional
           # ShellCheck/Pyflakes versions from the runner image.
           "$RUNNER_TEMP/jactionlint" -shellcheck= -pyflakes=
@@ -202,18 +315,22 @@ jobs:
       # Dependabot does not add new ones. Offline check: no token or network.
       - name: Check workflow lockfile coverage
         run: |
-          curl --fail --silent --show-error --location --retry 3 \
-            https://github.com/github/gh-actions-lock/releases/download/v0.2.0/linux-amd64 \
-            -o "$RUNNER_TEMP/gh-actions-lock"
-          echo "79ec84c191667fd935a277e6fd3662cf5d3669cccc9e99998731d8f306f373b6  $RUNNER_TEMP/gh-actions-lock" | sha256sum --check
-          chmod +x "$RUNNER_TEMP/gh-actions-lock"
           "$RUNNER_TEMP/gh-actions-lock" --verify-local
 
       - name: Test Python scripts
         run: |
-          python3 -m venv .venv
-          .venv/bin/python -m pip install --quiet Pillow
-          .venv/bin/python -m unittest discover -s test/scripts -p '*_test.py'
+          if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import PIL' 2>/dev/null; then
+            python3 -m venv .venv
+            .venv/bin/python -m pip install --quiet Pillow
+          fi
+          .venv/bin/python scripts/run_script_tests.py -s test/scripts -p '*_test.py' -j 4
+
+      - name: Save Pillow venv cache
+        if: github.event_name != 'merge_group' && steps.pillow-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: .venv
+          key: ${{ steps.pillow-cache.outputs.cache-primary-key }}
 
       - name: Test deployment orchestration
         run: |
@@ -225,14 +342,19 @@ jobs:
   test:
     name: Test (Shard ${{ matrix.shard-index }}/6)
     needs: [changes, monkeymux-assets]
-    if: needs.changes.outputs.run_check == 'true' && github.event_name != 'push'
-    runs-on: ubicloud-standard-4
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.monkeymux-assets.result == 'success' || needs.monkeymux-assets.result == 'skipped') &&
+      needs.changes.outputs.run_check == 'true' &&
+      github.event_name != 'push'
+    runs-on: ubicloud-standard-8
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      # `--total-shards` splits by file count, not runtime, so the spread across
-      # shards is structural. Per-shard fixed overhead is ~28s, so more, smaller
-      # shards are cheaper than a long critical-path shard.
+      # Balance shards by static structural test weight (scripts/ci_test_shard.py)
+      # rather than Flutter's file-count modulo, and run 8 workers per shard on
+      # 8-vCPU runners (48 vCPU total).
       matrix:
         shard-index: [0, 1, 2, 3, 4, 5]
     steps:
@@ -240,13 +362,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download MonkeyMux assets
+      - name: Fetch MonkeyMux assets
         id: monkeymux-download
         background: true
-        uses: actions/download-artifact@v8.0.2
+        uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          name: monkeymux-assets
-          path: assets/monkeymux/
+          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: $/.github/actions/flutter-setup
         with:
@@ -257,11 +379,11 @@ jobs:
         wait: monkeymux-download
 
       - name: Run tests
-        # package:test defaults to numberOfProcessors ~/ 2, i.e. 2 concurrent
-        # suites on the 4-vCPU runner. Use the whole box.
+        # package:test defaults to numberOfProcessors ~/ 2; use all 8 vCPUs.
         run: |
           set -o pipefail
-          flutter test --no-pub -j 4 --total-shards 6 --shard-index ${{ matrix.shard-index }} 2>&1 | tee "$RUNNER_TEMP/flutter-test.log"
+          python3 scripts/ci_test_shard.py --total-shards 6 --shard-index ${{ matrix.shard-index }} --run -- \
+            flutter test --no-pub -j 8 2>&1 | tee "$RUNNER_TEMP/flutter-test.log"
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -385,7 +507,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            os: ubuntu-latest
+            os: ubicloud-standard-8
           - name: windows
             os: windows-2025
     defaults:
@@ -397,16 +519,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download MonkeyMux assets
-        uses: actions/download-artifact@v8.0.2
+      - name: Fetch MonkeyMux assets
+        id: monkeymux-download
+        background: true
+        uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          name: monkeymux-assets
-          path: assets/monkeymux/
+          source: ${{ matrix.name == 'linux' && needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: remote/monkeymux/go.mod
           cache-dependency-path: remote/monkeymux/go.sum
+
+      - name: Wait for MonkeyMux assets
+        wait: monkeymux-download
 
       # Checked on Linux only: the repository has no .gitattributes, so a
       # Windows runner checks out CRLF and gofmt would flag every file.
@@ -445,10 +572,17 @@ jobs:
       - name: Vet other platforms
         if: matrix.name == 'linux'
         run: |
+          pids=()
           for goos in darwin windows; do
             echo "vetting $goos"
-            GOOS="$goos" go vet ./...
+            (GOOS="$goos" go vet ./...) &
+            pids+=($!)
           done
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=$?
+          done
+          exit "$status"
 
   # The push Cloud Functions build and test here; deploy-functions.yml runs the
   # same suite again before it deploys from main.
@@ -494,21 +628,34 @@ jobs:
   build-android:
     name: Build Android
     needs: [changes, monkeymux-assets]
-    if: needs.changes.outputs.android == 'true' && github.event_name != 'push'
-    runs-on: ubicloud-standard-4
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.monkeymux-assets.result == 'success' || needs.monkeymux-assets.result == 'skipped') &&
+      needs.changes.outputs.android == 'true' &&
+      github.event_name != 'push'
+    runs-on: ubicloud-standard-8
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download MonkeyMux assets
+      - name: Fetch MonkeyMux assets
         id: monkeymux-download
         background: true
-        uses: actions/download-artifact@v8.0.2
+        uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          name: monkeymux-assets
-          path: assets/monkeymux/
+          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
+
+      - name: Restore Android CMake cache
+        id: android-cmake-cache
+        background: true
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/android-cmake-3.22.1
+          key: android-cmake-v1-${{ runner.os }}-3.22.1
 
       - uses: actions/setup-java@v6.1.0
         with:
@@ -518,21 +665,23 @@ jobs:
       # Restores ~/.gradle caches while flutter-setup fetches the SDK and pub
       # packages. The gradle.properties write below waits for it so nothing
       # else touches ~/.gradle while the cache is being unpacked.
+      # Skip saving on merge_group: caches written from gh-readonly-queue refs
+      # are throwaway and burn ~25s + quota without ever being read back.
       - uses: gradle/actions/setup-gradle@v6.4.0
         id: gradle-setup
         background: true
         with:
           cache-cleanup: always
-          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          cache-read-only: ${{ github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
           add-job-summary: on-failure
 
       - uses: $/.github/actions/flutter-setup
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          sqlite-targets: android-arm64 android-x64 android-arm android-ia32
+          sqlite-targets: android-arm64
 
-      - name: Wait for Gradle setup and MonkeyMux assets
-        wait: [gradle-setup, monkeymux-download]
+      - name: Wait for Gradle setup, CMake cache and MonkeyMux assets
+        wait: [gradle-setup, monkeymux-download, android-cmake-cache]
 
       - name: Configure CI Gradle properties
         run: |
@@ -568,9 +717,8 @@ jobs:
 
       # Gradle installs the NDK and CMake on first use with no download
       # timeout, so a stalled transfer from Google hangs the build until the
-      # job limit. Install them first, bounded and retried. The NDK is the
-      # version Flutter's Gradle plugin asks for; CMake 3.22.1 is the Android
-      # Gradle Plugin's default for native builds.
+      # job limit. Reuse cached CMake 3.22.1 and pre-installed NDK when present,
+      # installing only missing components bounded and retried.
       - name: Install Android NDK and CMake
         run: |
           flutter_root="${FLUTTER_ROOT:-$(cd "$(dirname "$(command -v flutter)")/.." && pwd)}"
@@ -580,18 +728,46 @@ jobs:
             echo "::warning::Could not read Flutter's NDK version; Gradle will install the NDK itself."
             exit 0
           fi
-          sdkmanager="${ANDROID_HOME:?}/cmdline-tools/latest/bin/sdkmanager"
-          for attempt in 1 2 3; do
-            if timeout 150 "$sdkmanager" --install "ndk;$ndk" "cmake;3.22.1" > /dev/null; then
-              exit 0
+          cmake_cache="$HOME/.cache/android-cmake-3.22.1"
+          if [ ! -x "${ANDROID_HOME:?}/cmake/3.22.1/bin/cmake" ] && [ -x "$cmake_cache/bin/cmake" ]; then
+            mkdir -p "$ANDROID_HOME/cmake"
+            rm -rf "$ANDROID_HOME/cmake/3.22.1"
+            cp -a "$cmake_cache" "$ANDROID_HOME/cmake/3.22.1"
+          fi
+          missing=()
+          [ -d "$ANDROID_HOME/ndk/$ndk" ] || missing+=("ndk;$ndk")
+          [ -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" ] || missing+=("cmake;3.22.1")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sdkmanager="${ANDROID_HOME:?}/cmdline-tools/latest/bin/sdkmanager"
+            installed=false
+            for attempt in 1 2 3; do
+              if timeout 150 "$sdkmanager" --install "${missing[@]}" > /dev/null; then
+                installed=true
+                break
+              fi
+              echo "::warning::Android SDK install attempt $attempt failed or stalled."
+            done
+            if [ "$installed" != true ]; then
+              exit 1
             fi
-            echo "::warning::Android SDK install attempt $attempt failed or stalled."
-          done
-          exit 1
+          fi
+          if [ -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" ] && [ ! -x "$cmake_cache/bin/cmake" ]; then
+            rm -rf "$cmake_cache"
+            mkdir -p "$(dirname "$cmake_cache")"
+            cp -a "$ANDROID_HOME/cmake/3.22.1" "$cmake_cache"
+          fi
+
+      - name: Save Android CMake cache
+        if: github.event_name != 'merge_group' && steps.android-cmake-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/android-cmake-3.22.1
+          key: ${{ steps.android-cmake-cache.outputs.cache-primary-key }}
 
       - name: Build release APK
         run: |
           flutter build apk \
+            --no-pub \
             --flavor production \
             --release \
             --no-tree-shake-icons \
@@ -604,13 +780,19 @@ jobs:
 
   build-ios:
     name: Build iOS
-    needs: [changes, monkeymux-assets]
-    # On push this only warms the Apple compilation caches, which are keyed on
-    # pubspec.lock + Package.resolved and can only be written from main.
+    needs: [changes, cache-probe, monkeymux-assets]
+    # On push this only warms the Apple compilation & SPM caches on main when a
+    # dependency lockfile moved or cache-probe detected a missing main cache.
     if: >-
-      needs.changes.outputs.ios == 'true' &&
-      (github.event_name != 'push' || needs.changes.outputs.deps == 'true') &&
-      (github.event_name != 'pull_request' || needs.changes.outputs.ios_native == 'true')
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
+      needs.monkeymux-assets.result == 'success' &&
+      ((github.event_name == 'push' &&
+        (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_ios == 'true')) ||
+       (github.event_name != 'push' &&
+        needs.changes.outputs.ios == 'true' &&
+        (github.event_name != 'pull_request' || needs.changes.outputs.ios_native == 'true')))
     runs-on: xcode-27
     env:
       # The iPhone Duo fold and vertical bar reader compiles only with the
@@ -688,7 +870,8 @@ jobs:
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_CACHING=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_CAS_PATH="$HOME/Library/Caches/monkeyssh-xcode"
-          flutter build ios --verbose \
+          export FLUTTER_XCODE_COMPILATION_CACHE_LIMIT_SIZE=2560
+          flutter build ios --no-pub --verbose \
             --flavor production \
             --release \
             --no-codesign \
@@ -698,11 +881,12 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/ios-build.log"
 
       - name: Save Apple build caches
+        if: github.event_name != 'merge_group'
         uses: $/.github/actions/apple-cache-save
         with:
           phase: build
           platform: ios
-          compilation-limit-kib: 1048576
+          compilation-limit-kib: 3145728
           workspace-limit-kib: 2097152
           compilation-key: ${{ steps.apple-cache.outputs.compilation-key }}
           compilation-hit: ${{ steps.apple-cache.outputs.compilation-hit }}
@@ -718,20 +902,26 @@ jobs:
           retention-days: 3
 
       - name: Save SwiftPM cache
-        if: steps.spm-cache.outputs.swiftpm-hit != 'true'
+        if: github.event_name != 'merge_group' && steps.spm-cache.outputs.swiftpm-hit != 'true'
         uses: $/.github/actions/apple-cache-save
         with:
           phase: swiftpm
 
   build-macos:
     name: Build macOS
-    needs: [changes, monkeymux-assets]
-    # On push this only warms the Apple compilation caches, which are keyed on
-    # pubspec.lock + Package.resolved and can only be written from main.
+    needs: [changes, cache-probe, monkeymux-assets]
+    # On push this only warms the Apple compilation & SPM caches on main when a
+    # dependency lockfile moved or cache-probe detected a missing main cache.
     if: >-
-      needs.changes.outputs.macos == 'true' &&
-      (github.event_name != 'push' || needs.changes.outputs.deps == 'true') &&
-      (github.event_name != 'pull_request' || needs.changes.outputs.macos_native == 'true')
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
+      needs.monkeymux-assets.result == 'success' &&
+      ((github.event_name == 'push' &&
+        (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_macos == 'true')) ||
+       (github.event_name != 'push' &&
+        needs.changes.outputs.macos == 'true' &&
+        (github.event_name != 'pull_request' || needs.changes.outputs.macos_native == 'true')))
     runs-on: macos-26
     # macos-26 build times vary 3x on identical cache state (169s-746s observed),
     # so leave headroom rather than time out an otherwise green build.
@@ -784,15 +974,17 @@ jobs:
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_CACHING=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_CAS_PATH="$HOME/Library/Caches/monkeyssh-xcode"
-          flutter build macos --release --no-tree-shake-icons --verbose \
+          export FLUTTER_XCODE_COMPILATION_CACHE_LIMIT_SIZE=4096
+          flutter build macos --no-pub --release --no-tree-shake-icons --verbose \
             2>&1 | tee "$RUNNER_TEMP/macos-build.log"
 
       - name: Save Apple build caches
+        if: github.event_name != 'merge_group'
         uses: $/.github/actions/apple-cache-save
         with:
           phase: build
           platform: macos
-          compilation-limit-kib: 2097152
+          compilation-limit-kib: 5242880
           workspace-limit-kib: 2097152
           compilation-key: ${{ steps.apple-cache.outputs.compilation-key }}
           compilation-hit: ${{ steps.apple-cache.outputs.compilation-hit }}
@@ -808,10 +1000,52 @@ jobs:
           retention-days: 3
 
       - name: Save SwiftPM cache
-        if: steps.spm-cache.outputs.swiftpm-hit != 'true'
+        if: github.event_name != 'merge_group' && steps.spm-cache.outputs.swiftpm-hit != 'true'
         uses: $/.github/actions/apple-cache-save
         with:
           phase: swiftpm
+
+  # Warm the ~32-110 MB Windows pub cache on push to main when pubspec.lock or
+  # FLUTTER_VERSION moved (or the cache was evicted), so build-windows on PRs
+  # and merge_group can restore read-only in ~3s instead of paying ~62s in
+  # uncached `flutter pub get` or ~2m45s saving a throwaway cache.
+  warm-windows-pub:
+    name: Warm Windows Pub Cache
+    needs: [changes, cache-probe]
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_windows_pub == 'true')
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore Windows pub cache
+        id: win-pub-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/AppData/Local/Pub/Cache
+          key: windows-pub-v1-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock') }}
+
+      - uses: $/.github/actions/flutter-setup
+        if: steps.win-pub-cache.outputs.cache-hit != 'true'
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: 'false'
+          pub-cache: 'false'
+
+      - name: Save Windows pub cache
+        if: steps.win-pub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/AppData/Local/Pub/Cache
+          key: ${{ steps.win-pub-cache.outputs.cache-primary-key }}
 
   build-windows:
     name: Build Windows
@@ -837,66 +1071,74 @@ jobs:
           name: monkeymux-assets
           path: assets/monkeymux/
 
-      # Needs only the runner's Node, so it runs under the ~3-minute Flutter
+      # Needs only the runner's Node, so it runs under the ~2-minute Flutter
       # setup instead of after it.
       - name: Test Windows usage RPC transport
         id: windows-node-test
         background: true
         run: node --test test/scripts/agent_usage_windows_test.cjs
 
+      # Read-only restore of the main-warmed Windows pub cache (~3-5s) so both
+      # pull_request and merge_group avoid ~62s uncached `flutter pub get` and
+      # never pay a ~2m45s post-job save.
+      - name: Restore Windows pub cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/AppData/Local/Pub/Cache
+          key: windows-pub-v1-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: windows-pub-v1-${{ env.FLUTTER_VERSION }}-
+
       - uses: $/.github/actions/flutter-setup
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           sqlite-targets: windows-x64
-          # The ~2.1 GB SDK archive is what cancelled otherwise successful jobs
-          # during the post-job save; download the SDK instead. The pub cache is
-          # only ~32 MB and is safe to persist, and `flutter pub get` costs
-          # ~60s on Windows without it.
-          #
-          # Only a pull_request run can ever hit that pub cache again, though:
-          # a cache written from a gh-readonly-queue/... ref is scoped to that
-          # throwaway ref, and push-to-main never runs this job. In the merge
-          # queue the restore always missed and the post-job save still spent
-          # ~2m45s packing a cache nobody could read, on the longest job of
-          # the gating run.
+          # The ~2.1 GB SDK archive cancelled otherwise successful jobs during
+          # post-job save; download the SDK instead, and rely on the read-only
+          # Windows pub cache restored above.
           cache: 'false'
-          pub-cache: ${{ github.event_name == 'pull_request' }}
+          pub-cache: 'false'
 
       - name: Wait for MonkeyMux assets and the Node test
         wait: [monkeymux-download, windows-node-test]
 
-      # One invocation: each extra `flutter test` pays ~6s of Dart VM and test
-      # harness startup. The --plain-name filters below cannot be merged.
+      # Batch whole-file and name-filtered Windows-only tests into two
+      # invocations to avoid redundant Dart VM and test harness cold starts.
       - name: Test Windows-only Dart behavior
         run: flutter test --no-pub -j 4 test/domain/services/agent_usage_windows_command_test.dart test/domain/services/agent_probe_parallel_test.dart test/domain/services/monkeymux_windows_cleanup_test.dart
 
-      - name: Test Windows agent command wrapping
-        run: flutter test --no-pub test/domain/services/agent_management_service_test.dart --plain-name "full Windows probe executes through cmd and PowerShell"
-
-      - name: Test MonkeyMux launcher through the Windows shell
-        run: flutter test --no-pub test/domain/services/monkeymux_installer_service_test.dart --plain-name "Windows launcher command runs through cmd and prunes unused builds"
+      - name: Test Windows agent and MonkeyMux shell wrapping
+        run: >-
+          flutter test --no-pub -j 2
+          test/domain/services/agent_management_service_test.dart
+          test/domain/services/monkeymux_installer_service_test.dart
+          --name "full Windows probe executes through cmd and PowerShell|Windows launcher command runs through cmd and prunes unused builds"
 
       - name: Build Windows
-        run: flutter build windows --release --no-tree-shake-icons
+        run: flutter build windows --no-pub --release --no-tree-shake-icons
 
   build-linux:
     name: Build Linux
     needs: [changes, monkeymux-assets]
-    if: needs.changes.outputs.linux == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.monkeymux-assets.result == 'success' || needs.monkeymux-assets.result == 'skipped') &&
+      needs.changes.outputs.linux == 'true' &&
+      github.event_name != 'push'
+    runs-on: ubicloud-standard-4
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download MonkeyMux assets
+      - name: Fetch MonkeyMux assets
         id: monkeymux-download
         background: true
-        uses: actions/download-artifact@v8.0.2
+        uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          name: monkeymux-assets
-          path: assets/monkeymux/
+          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       # Not awalsh128/cache-apt-pkgs-action: it pins actions/cache by the
       # commit our own steps reach through a tag, and gh-actions-lock 0.2.0
@@ -921,7 +1163,7 @@ jobs:
         wait: [apt-packages, monkeymux-download]
 
       - name: Build Linux
-        run: flutter build linux --release --no-tree-shake-icons
+        run: flutter build linux --no-pub --release --no-tree-shake-icons
 
   # ---------------------------------------------------------------------------
   # Gate job — the single required status check for branch protection.
@@ -933,13 +1175,14 @@ jobs:
   ci:
     name: CI
     if: ${{ always() && !cancelled() }}
-    needs: [changes, monkeymux-assets, check, tooling, test, terminal-test, esctest, go-test, functions-test, build-android, build-ios, build-macos, build-windows, build-linux]
+    needs: [changes, cache-probe, monkeymux-assets, check, tooling, test, terminal-test, esctest, go-test, functions-test, build-android, build-ios, build-macos, warm-windows-pub, build-windows, build-linux]
     runs-on: ubicloud-standard-4
     timeout-minutes: 2
     steps:
       - name: Evaluate results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          CACHE_PROBE_RESULT: ${{ needs.cache-probe.result }}
           MONKEYMUX_ASSETS_RESULT: ${{ needs.monkeymux-assets.result }}
           CHECK_RESULT: ${{ needs.check.result }}
           TOOLING_RESULT: ${{ needs.tooling.result }}
@@ -951,12 +1194,14 @@ jobs:
           ANDROID_RESULT: ${{ needs.build-android.result }}
           IOS_RESULT: ${{ needs.build-ios.result }}
           MACOS_RESULT: ${{ needs.build-macos.result }}
+          WARM_WINDOWS_PUB_RESULT: ${{ needs.warm-windows-pub.result }}
           WINDOWS_RESULT: ${{ needs.build-windows.result }}
           LINUX_RESULT: ${{ needs.build-linux.result }}
         run: |
           ok=true
           for name_result in \
             "changes:$CHANGES_RESULT" \
+            "cache-probe:$CACHE_PROBE_RESULT" \
             "monkeymux-assets:$MONKEYMUX_ASSETS_RESULT" \
             "check:$CHECK_RESULT" \
             "tooling:$TOOLING_RESULT" \
@@ -968,6 +1213,7 @@ jobs:
             "build-android:$ANDROID_RESULT" \
             "build-ios:$IOS_RESULT" \
             "build-macos:$MACOS_RESULT" \
+            "warm-windows-pub:$WARM_WINDOWS_PUB_RESULT" \
             "build-windows:$WINDOWS_RESULT" \
             "build-linux:$LINUX_RESULT"; do
             name="${name_result%%:*}"

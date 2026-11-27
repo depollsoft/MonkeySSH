@@ -285,7 +285,7 @@ jobs:
   monkeymux-assets:
     name: Build MonkeyMux Assets
     needs: validate-build-inputs
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     timeout-minutes: 10
     env:
       BUILD_FROM_SOURCE: ${{ (inputs.build-android && inputs.android-reuse-aab-artifact-name == '') || (inputs.build-ios && inputs.ios-reuse-ipa-artifact-name == '') }}
@@ -322,12 +322,6 @@ jobs:
           ref: ${{ steps.source-sha.outputs.value }}
           fetch-depth: 1
 
-      - uses: actions/setup-go@v7.0.0
-        if: env.BUILD_FROM_SOURCE == 'true'
-        with:
-          go-version-file: remote/monkeymux/go.mod
-          cache-dependency-path: remote/monkeymux/go.sum
-
       - name: Fingerprint MonkeyMux inputs
         id: monkeymux-fingerprint
         if: env.BUILD_FROM_SOURCE == 'true'
@@ -340,14 +334,39 @@ jobs:
       # Read only: workflow_run can build PR source under the default-branch
       # cache scope. CI's trusted push-to-main job is the sole payload writer.
       - name: Restore MonkeyMux assets
+        id: monkeymux-cache
         if: steps.monkeymux-fingerprint.outputs.value != ''
         uses: actions/cache/restore@v6.1.0
         with:
           path: assets/monkeymux/
           key: monkeymux-assets-v1-${{ runner.os }}-${{ steps.monkeymux-fingerprint.outputs.value }}
 
-      - name: Build assets
+      - name: Check cached MonkeyMux assets
+        id: monkeymux-ready
         if: env.BUILD_FROM_SOURCE == 'true'
+        env:
+          CACHE_HIT: ${{ steps.monkeymux-cache.outputs.cache-hit }}
+          EXPECTED_FINGERPRINT: ${{ steps.monkeymux-fingerprint.outputs.value }}
+        run: |
+          if [ "$CACHE_HIT" = "true" ] &&
+             [ -n "$EXPECTED_FINGERPRINT" ] &&
+             [ -f scripts/verify_monkeymux_assets.py ] &&
+             [ -f assets/monkeymux/.build-inputs.sha256 ] &&
+             [ "$(cat assets/monkeymux/.build-inputs.sha256)" = "$EXPECTED_FINGERPRINT" ] &&
+             python3 scripts/verify_monkeymux_assets.py assets/monkeymux "$(sh remote/monkeymux/monkeymux-version.sh)"; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v7.0.0
+        if: env.BUILD_FROM_SOURCE == 'true' && steps.monkeymux-ready.outputs.ready != 'true'
+        with:
+          go-version-file: remote/monkeymux/go.mod
+          cache-dependency-path: remote/monkeymux/go.sum
+
+      - name: Build assets
+        if: env.BUILD_FROM_SOURCE == 'true' && steps.monkeymux-ready.outputs.ready != 'true'
         run: scripts/build_monkeymux_assets.sh
 
       - name: Upload assets
@@ -438,7 +457,7 @@ jobs:
         if: inputs.android-reuse-aab-artifact-name == ''
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          sqlite-targets: android-arm64 android-x64 android-arm android-ia32
+          sqlite-targets: ${{ inputs.android-target-platform == 'android-arm64' && 'android-arm64' || 'android-arm64 android-x64 android-arm android-ia32' }}
 
       - name: Configure Firebase for Android
         if: inputs.android-reuse-aab-artifact-name == '' || inputs.deploy-android-to == 'firebase'
@@ -574,6 +593,7 @@ jobs:
             ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
           fi
           flutter build "${ANDROID_FLAGS[@]}" \
+            --no-pub \
             --flavor "$BUILD_FLAVOR" \
             --build-name="$BUILD_NAME" \
             --build-number="$BUILD_NUMBER" \
@@ -909,12 +929,14 @@ jobs:
             export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_CACHING=YES
             export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
             export FLUTTER_XCODE_COMPILATION_CACHE_CAS_PATH="$HOME/Library/Caches/monkeyssh-xcode"
+            export FLUTTER_XCODE_COMPILATION_CACHE_LIMIT_SIZE=2560
           else
             # Fastlane archives deploy builds below. Generate its Xcode
             # configuration without compiling the application a second time.
             EXTRA_FLAGS+=(--config-only)
           fi
           flutter build ios \
+            --no-pub \
             --flavor "$BUILD_FLAVOR" \
             --release \
             --no-codesign \
@@ -933,7 +955,7 @@ jobs:
         with:
           phase: build
           platform: ios
-          compilation-limit-kib: 1048576
+          compilation-limit-kib: 3145728
           workspace-limit-kib: 2097152
           compilation-key: ${{ steps.apple-cache.outputs.compilation-key }}
           compilation-hit: ${{ steps.apple-cache.outputs.compilation-hit }}
