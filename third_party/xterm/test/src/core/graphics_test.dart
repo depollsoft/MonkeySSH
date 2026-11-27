@@ -3486,38 +3486,57 @@ void main() {
       // and across the ESC/ST that frame each chunk. The parser must hold the
       // incomplete APC and resume, never dropping the introducer and rendering
       // the base64 as ground-state text (the on-screen "gibberish").
+      //
+      // Prefix/suffix with ordinary text so a leak is unmistakable in the
+      // buffer and the parser has real ground-state work around the image.
+      const prefix = 'BEGIN';
+      const suffix = 'END';
+
+      void verifySlices(String transmission, List<int> sliceSizes) {
+        expect('\x1b_G'.allMatches(transmission).length, greaterThan(1));
+        final stream = '$prefix$transmission$suffix';
+        for (final sliceSize in sliceSizes) {
+          final terminal = Terminal();
+          for (var offset = 0; offset < stream.length; offset += sliceSize) {
+            final end = math.min(offset + sliceSize, stream.length);
+            terminal.write(stream.substring(offset, end));
+          }
+
+          final text = terminal.buffer.getText().replaceAll('\n', '');
+          expect(
+            text,
+            'BEGINEND',
+            reason:
+                'slice size $sliceSize leaked image payload into the buffer',
+          );
+          expect(
+            terminal.heldImageSignatures().keys,
+            <int>[92],
+            reason:
+                'slice size $sliceSize must still reassemble exactly one image',
+          );
+        }
+      }
+
+      // 1-byte slicing exercises every possible split offset (introducer,
+      // control keys, m=1/m=0 continuation boundaries, payload, and ST) on a
+      // compact 3-chunk payload without spending seconds in 8,600 single-char
+      // parser calls.
+      final compactRgba = _rawRgbaBase64(8, 8);
+      final compactTransmission = _multiChunkTransmission(
+        compactRgba,
+        firstControl: 'a=t,i=92,f=32,s=8,v=8',
+        chunkSize: 128,
+      );
+      verifySlices(compactTransmission, const <int>[1]);
+
+      // Larger slice sizes exercise full 4096-byte Kitty continuation chunks.
       final rgba = _rawRgbaBase64(40, 40);
       final transmission = _multiChunkTransmission(
         rgba,
         firstControl: 'a=t,i=92,f=32,s=40,v=40',
       );
-
-      // Prefix/suffix with ordinary text so a leak is unmistakable in the
-      // buffer and the parser has real ground-state work around the image.
-      const prefix = 'BEGIN';
-      const suffix = 'END';
-      final stream = '$prefix$transmission$suffix';
-
-      for (final sliceSize in <int>[1, 7, 64, 293, 4096]) {
-        final terminal = Terminal();
-        for (var offset = 0; offset < stream.length; offset += sliceSize) {
-          final end = math.min(offset + sliceSize, stream.length);
-          terminal.write(stream.substring(offset, end));
-        }
-
-        final text = terminal.buffer.getText().replaceAll('\n', '');
-        expect(
-          text,
-          'BEGINEND',
-          reason: 'slice size $sliceSize leaked image payload into the buffer',
-        );
-        expect(
-          terminal.heldImageSignatures().keys,
-          <int>[92],
-          reason:
-              'slice size $sliceSize must still reassemble exactly one image',
-        );
-      }
+      verifySlices(transmission, const <int>[7, 64, 293, 4096]);
     },
   );
 

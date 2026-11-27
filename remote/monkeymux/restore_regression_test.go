@@ -14,6 +14,7 @@ import (
 )
 
 func TestResolveStartupDirectoryFallsBackToNearestAncestor(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	missing := filepath.Join(base, "removed", "child")
 
@@ -35,6 +36,7 @@ func TestResolveStartupDirectoryFallsBackToNearestAncestor(t *testing.T) {
 // longer exists must still be recreated (falling back to an existing directory)
 // instead of being silently dropped.
 func TestRestoreKeepsWindowsWithMissingCwd(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	missing := filepath.Join(base, "worktree-removed-after-upgrade")
 
@@ -256,6 +258,7 @@ func TestRestoreRedrawUsesCurrentPrimaryClientSize(t *testing.T) {
 }
 
 func TestAgentResumeCommandWithFreshFallback(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		resume string
@@ -371,6 +374,7 @@ func TestRestoreAgentWindowSurvivesFailedResume(t *testing.T) {
 }
 
 func TestRestoreRelaunchesRunningAliasOnly(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		tool    string
 		command string

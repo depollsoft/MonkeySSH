@@ -11,6 +11,7 @@ import (
 )
 
 func TestReplacementIdentityUsesDarwinKernelStartTime(t *testing.T) {
+	t.Parallel()
 	pid := os.Getpid()
 	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {

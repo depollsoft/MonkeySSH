@@ -30,6 +30,7 @@ func TestCodexShutdownAgentHelper(t *testing.T) {
 }
 
 func TestCodexShutdownDoesNotStopExecedCLI(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ready, terminated := filepath.Join(dir, "ready"), filepath.Join(dir, "terminated")
 	cmd := exec.Command("/bin/sh", "-c", "exec "+shellQuote(os.Args[0])+" -test.run=^TestCodexShutdownAgentHelper$")
@@ -53,6 +54,7 @@ func TestCodexShutdownDoesNotStopExecedCLI(t *testing.T) {
 }
 
 func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
+	t.Parallel()
 	for _, shell := range []string{"/bin/sh", "/bin/bash", "/bin/zsh"} {
 		if _, err := os.Stat(shell); os.IsNotExist(err) {
 			continue
@@ -61,6 +63,7 @@ func TestCodexShutdownReapsWithoutFreshFallback(t *testing.T) {
 			graceful := mode != "ignores-term-and-hup" && mode != "lookup-failed"
 			name := filepath.Base(shell) + "/" + mode
 			t.Run(name, func(t *testing.T) {
+				t.Parallel()
 				dir := t.TempDir()
 				ready := filepath.Join(dir, "ready")
 				terminated := filepath.Join(dir, "terminated")
@@ -168,6 +171,7 @@ func (p *codexShutdownLookupProcess) shutdownCodex(window *muxWindow, deadline t
 }
 
 func TestCodexProcessIsShell(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		image string
 		path  string

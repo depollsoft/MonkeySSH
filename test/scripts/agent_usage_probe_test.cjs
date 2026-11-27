@@ -1,4 +1,4 @@
-const {test} = require('node:test');
+const {describe, test} = require('node:test');
 const assert = require('node:assert/strict');
 const {codexUsage, copilotUsage, claudeUsage, rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
 
@@ -9,39 +9,6 @@ test('Retry-After accepts seconds and HTTP dates without exposing raw data', () 
   assert.equal(retryAfterSeconds('Sat, 12 Sep 2026 12:15:00 GMT', now), 900);
   for (const value of ['', '0', '-1', 'not a date']) assert.equal(retryAfterSeconds(value, now), undefined);
   assert.equal(retryAfterSeconds('999999999', now), 604800);
-});
-
-test('HTTP 429 shares one request and preserves only the sanitized cooldown', async () => {
-  const http = require('http');
-  const {requestJson} = require('../../assets/scripts/agent_usage_probe.cjs');
-  let requests = 0;
-  const server = http.createServer((request, response) => {
-    requests++;
-    response.writeHead(429, request.url.endsWith('/dated') ? {
-      Date: 'Sat, 12 Sep 2026 12:00:00 GMT', 'Retry-After': 'Sat, 12 Sep 2026 12:15:00 GMT',
-    } : {'Retry-After': '900'});
-    response.end('PRIVATE_RESPONSE');
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const url = `http://127.0.0.1:${server.address().port}/usage`;
-    const results = await Promise.allSettled([
-      requestJson(url, {token:'FIXTURE', local:true}),
-      requestJson(url, {token:'FIXTURE', local:true}),
-    ]);
-    assert.equal(requests, 1);
-    for (const result of results) {
-      assert.equal(result.status, 'rejected');
-      assert.equal(result.reason.message, 'rateLimited');
-      assert.equal(result.reason.retryAfterSeconds, 900);
-      assert.ok(!JSON.stringify(result.reason).includes('PRIVATE_RESPONSE'));
-    }
-    await assert.rejects(requestJson(url + '/dated', {local:true}), {message:'rateLimited', retryAfterSeconds:900});
-    assert.equal(requests, 2);
-  } finally {
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-  }
 });
 
 test('multi-provider failures preserve the longest throttle hint and successful quotas', async () => {
@@ -322,18 +289,6 @@ test('Claude plans with and without a five-hour limit report only the meters the
   }
 });
 
-for (const framed of [true, false]) {
-  test(`RPC supports fragmented ${framed ? 'Content-Length' : 'JSONL'} responses`, async () => {
-    const source = `process.stdin.once('data', () => {
-      const body = JSON.stringify({jsonrpc:'2.0', id:2, result:{ok:true}});
-      const wire = ${framed} ? 'Content-Length: '+Buffer.byteLength(body)+'\\r\\n\\r\\n'+body : body+'\\n';
-      process.stdout.write(wire.slice(0, 8));
-      setTimeout(() => process.stdout.write(wire.slice(8)), 10);
-    });`;
-    assert.deepEqual(await rpc(process.execPath, ['-e', source], 'account.getQuota', framed, false), {ok: true});
-  });
-}
-
 for (const framed of [false, true]) {
   test(`RPC drains final ${framed ? 'Content-Length' : 'JSONL'} response after process exit`, async t => {
     const {EventEmitter} = require('node:events');
@@ -369,43 +324,6 @@ test('RPC rejects a closed process without a response', async t => {
     return child;
   });
   await assert.rejects(rpc('agent', [], 'account/get', false, false), /unavailable/);
-});
-
-test('RPC errors do not propagate provider error text', async () => {
-  const source = `process.stdin.once('data', () => process.stdout.write(JSON.stringify({id:2,error:{message:'SECRET'}})+'\\n'));`;
-  await assert.rejects(rpc(process.execPath, ['-e', source], 'account/get', false, false),
-    error => error.message === 'unavailable');
-});
-
-
-test('encoded SSH bootstrap returns only normalized data and handles initialization', async () => {
-  const fs = require('fs');
-  const os = require('os');
-  const path = require('path');
-  const cp = require('child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-usage-test-'));
-  try {
-    const executable = path.join(dir, "codex quote ' fixture");
-    fs.writeFileSync(executable, `#!/usr/bin/env node
-      const readline = require('readline');
-      readline.createInterface({input: process.stdin}).on('line', line => {
-        const request = JSON.parse(line);
-        if (!request.id) return;
-        const result = request.id === 1 ? {} : {rateLimits: {primary: {
-          usedPercent: 42, windowDurationMins: 300, resetsAt: 1800000000}},
-          accessToken: 'SECRET'};
-        process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
-      });`, {mode: 0o700});
-    const script = fs.readFileSync(path.join(__dirname, '../../assets/scripts/agent_usage_probe.cjs'));
-    const bootstrap = "process.env.MONKEYSSH_USAGE_PROBE='1';eval(Buffer.from('" +
-      script.toString('base64') + "','base64').toString())";
-    const input = Buffer.from(JSON.stringify({codex: executable})).toString('base64');
-    const result = cp.spawnSync(process.execPath, ['-e', bootstrap, input], {encoding: 'utf8', timeout: 15000});
-    assert.equal(result.status, 0);
-    assert.ok(result.stdout.startsWith('__monkeyssh_usage__='));
-    assert.ok(!result.stdout.includes('SECRET'));
-    assert.equal(JSON.parse(result.stdout.split('=')[1]).windows[0].usedPercent, 42);
-  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 const {grokUsage, cursorUsage, antigravityUsage, openclawUsage, codexOAuthUsage,
@@ -599,20 +517,6 @@ test('Hermes accounts come from the home Hermes uses on each platform', () => {
   }
 });
 
-test('Windows stdin bootstrap accepts a fragmented payload without command expansion', async () => {
-  const fs = require('fs'), path = require('path'), cp = require('child_process');
-  const script = fs.readFileSync(path.join(__dirname, '../../assets/scripts/agent_usage_probe.cjs')).toString('base64');
-  const bootstrap = "process.env.MONKEYSSH_USAGE_PROBE='1';const r=require('readline').createInterface({input:process.stdin});r.once('line',s=>{r.close();eval(Buffer.from(s,'base64').toString())})";
-  const child = cp.spawn(process.execPath, ['-e', bootstrap, Buffer.from(JSON.stringify({unknown: ''})).toString('base64')]);
-  let output = '';
-  child.stdout.on('data', chunk => output += chunk);
-  const closed = new Promise(resolve => child.on('close', resolve));
-  child.stdin.write(script.slice(0, 200));
-  child.stdin.end(script.slice(200) + '\n');
-  assert.equal(await closed, 0);
-  assert.equal(JSON.parse(output.split('=')[1]).status, 'unsupported');
-});
-
 test('Antigravity uses the quota-summary request schema and falls back on older CLIs', async () => {
   const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
   const methods = [];
@@ -724,68 +628,6 @@ test('Antigravity parses headless CLI /usage JSON and gates version >= 1.1.11', 
   assert.ok(!JSON.stringify(parsed).includes('SECRET'));
 });
 
-test('Antigravity local fallback targets only the discovered loopback family and bypasses env proxies', async () => {
-  const cp = require('child_process');
-  const http = require('http');
-  const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
-
-  // An IPv6-only listener's CSRF token must never be sent to 127.0.0.1 on the same port.
-  const seen = [];
-  const res = await antigravity([{host: '::1', port: 54321, csrf: 'IPV6_ONLY_CSRF'}], async (url, options) => {
-    seen.push({url, csrf: options.headers['x-codeium-csrf-token']});
-    return {groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]};
-  });
-  assert.equal(seen.length, 1);
-  assert.match(seen[0].url, /^https:\/\/\[::1\]:54321\//);
-  assert.equal(seen[0].csrf, 'IPV6_ONLY_CSRF');
-  assert.equal(res.windows[0].usedPercent, 50);
-
-  // Dual-stack listeners on one PID are probed as alternatives and reported once,
-  // while two distinct PIDs stay separate instances.
-  const dualStack = await antigravity([
-    {host: '127.0.0.1', port: 5000, csrf: 'SAME', pid: 123},
-    {host: '::1', port: 5000, csrf: 'SAME', pid: 123},
-  ], async () => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]}));
-  assert.deepEqual(dualStack.windows.map(w => w.label), ['Models · Weekly']);
-
-  const multiPid = await antigravity([
-    {host: '127.0.0.1', port: 5000, csrf: 'A', pid: 100},
-    {host: '::1', port: 5000, csrf: 'A', pid: 100},
-    {host: '127.0.0.1', port: 5001, csrf: 'B', pid: 200},
-  ], async url => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: url.includes(':5000/') ? 0.5 : 0.25}]}]}));
-  assert.deepEqual(multiPid.windows.map(w => [w.label, w.usedPercent]), [
-    ['Instance 1 · Models · Weekly', 50],
-    ['Instance 2 · Models · Weekly', 75],
-  ]);
-
-  // Even with NODE_USE_ENV_PROXY=1 and HTTP_PROXY pointing at an interceptor, local: true skips the proxy.
-  let proxyHits = 0;
-  const proxy = http.createServer((req, res) => { proxyHits++; res.writeHead(200); res.end('{}'); });
-  const target = http.createServer((req, res) => {
-    res.writeHead(200, {'Content-Type': 'application/json'});
-    res.end(JSON.stringify({ok: req.headers['x-codeium-csrf-token']}));
-  });
-  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
-  await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
-  try {
-    const out = await new Promise((resolve, reject) => cp.execFile(process.execPath, ['-e', `
-      const {requestJson} = require(${JSON.stringify(require.resolve('../../assets/scripts/agent_usage_probe.cjs'))});
-      requestJson('http://127.0.0.1:${target.address().port}/quota', {
-        local: true, headers: {'x-codeium-csrf-token': 'LOCAL_CSRF'}, body: {},
-      }).then(r => console.log(JSON.stringify(r)));
-    `], {
-      encoding: 'utf8',
-      timeout: 5000,
-      env: {...process.env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: ''},
-    }, (error, stdout) => error ? reject(error) : resolve(stdout)));
-    assert.deepEqual(JSON.parse(out.trim()), {ok: 'LOCAL_CSRF'});
-    assert.equal(proxyHits, 0);
-  } finally {
-    proxy.closeAllConnections(); target.closeAllConnections();
-    await Promise.all([new Promise(r => proxy.close(r)), new Promise(r => target.close(r))]);
-  }
-});
-
 test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops early when signed out', {skip: process.platform === 'win32'}, async () => {
   const fs = require('fs'), os = require('os'), path = require('path');
   const {antigravity, antigravityCli} = require('../../assets/scripts/agent_usage_probe.cjs');
@@ -799,12 +641,12 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
     };
 
     // Older CLI (< 1.1.11), prerelease 1.1.11-rc.1, and multi-line launcher banners must never be called with `-p`.
-    for (const [label, versionOut] of [
+    const oldChecks = [
       ['old', '1.1.10'],
       ['prerelease', '1.1.11-rc.1'],
       ['banner', 'Node 22.0.0\\nagy 1.1.10'],
       ['desktop', '1.107.0\\nabcdef123456\\narm64'],
-    ]) {
+    ].map(async ([label, versionOut]) => {
       const marker = path.join(dir, `invoked-${label}`);
       const fake = makeFakeAgy(`agy-${label}`, `
         if (process.argv.includes('--version')) { console.log("${versionOut}"); process.exit(0); }
@@ -814,7 +656,7 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       assert.equal(await antigravityCli(fake), null);
       assert.equal(fs.existsSync(marker), false);
       await assert.rejects(antigravity(fake, {ports: []}), /needsRunning/);
-    }
+    });
 
     // 1.1.11 invokes `-p /usage --output-format json` without --print-timeout and disables auto-update.
     const cli1111 = makeFakeAgy('agy-1111', `
@@ -828,7 +670,6 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
         ]}]}},
       }));
     `);
-    assert.equal((await antigravity(cli1111, {ports: []})).windows[0].usedPercent, 25);
 
     // 1.5.14 adds --print-timeout and disables auto-update without scanning local ports.
     const modernAgy = makeFakeAgy('agy-modern', `
@@ -843,12 +684,6 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
         ]}]}},
       }));
     `);
-    const result = await antigravity(modernAgy, {
-      ports: () => { throw new Error('local scan should not run when CLI succeeds'); },
-    });
-    assert.deepEqual(result.windows, [
-      {label: 'Gemini Models · Weekly Limit Remaining', usedPercent: 50, resetsAt: '2026-11-28T15:00:00.000Z'},
-    ]);
 
     // Signed-out CLI writes auth prompt to stderr and hangs; probe kills it immediately.
     const unauthedAgy = makeFakeAgy('agy-unauthed', `
@@ -856,11 +691,6 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       process.stderr.write('Authentication required. Please visit the URL to log in:\\n  https://example.test/auth\\n');
       setTimeout(() => {}, 60000);
     `);
-    const t0 = Date.now();
-    await assert.rejects(antigravity(unauthedAgy, {
-      ports: () => { throw new Error('should not fall back on signInRequired'); },
-    }), /signInRequired/);
-    assert.ok(Date.now() - t0 < 5000);
 
     // GEMINI_API_KEY mode exits with code 2 and points to AI Studio.
     const apiKeyAgy = makeFakeAgy('agy-apikey', `
@@ -868,9 +698,6 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       process.stderr.write('/usage is unavailable with GEMINI_API_KEY; see https://aistudio.google.com/usage\\n');
       process.exit(2);
     `);
-    assert.deepEqual(await antigravity(apiKeyAgy, {
-      ports: () => { throw new Error('should not fall back on notReported'); },
-    }), {windows: [], status: 'notReported'});
 
     // HTTP 429 on stderr reports rateLimited; incidental 429 (line numbers / timestamps) does not.
     const throttledAgy = makeFakeAgy('agy-429', `
@@ -878,37 +705,74 @@ test('Antigravity runs `agy -p /usage --output-format json` on 1.1.11+ and stops
       process.stderr.write('AGY_ERROR: {"code":429,"status":"RESOURCE_EXHAUSTED"}\\n');
       process.exit(3);
     `);
-    await assert.rejects(antigravity(throttledAgy, {
-      ports: () => { throw new Error('should not fall back on rateLimited'); },
-    }), /rateLimited/);
 
     const incidental429Agy = makeFakeAgy('agy-line429', `
       if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
       process.stderr.write('E1121 11:30:00.429 client.go:429] connection reset\\n');
       process.exit(1);
     `);
-    await assert.rejects(antigravity(incidental429Agy, {ports: []}), /unavailable/);
 
     // Shared deadline bounds version + usage and skips local fallback after a timeout.
-    const slowAgy = makeFakeAgy('agy-slow', `
-      if (process.argv.includes('--version')) { setTimeout(() => { console.log('1.5.14'); process.exit(0); }, 250); return; }
-      setTimeout(() => { console.log('{}'); process.exit(0); }, 5000);
-    `);
+    // Use /bin/sh instead of node so V8 startup latency under heavy CPU load
+    // never pushes the --version probe past the shared 600ms budget.
+    const slowAgy = path.join(dir, 'agy-slow');
+    fs.writeFileSync(slowAgy, '#!/bin/sh\n' +
+      'if [ "$1" = "--version" ]; then sleep 0.15; echo 1.5.14; exit 0; fi\n' +
+      'exec sleep 5\n', {mode: 0o700});
+
+    await Promise.all([
+      ...oldChecks,
+      (async () => {
+        assert.equal((await antigravity(cli1111, {ports: []})).windows[0].usedPercent, 25);
+      })(),
+      (async () => {
+        const result = await antigravity(modernAgy, {
+          ports: () => { throw new Error('local scan should not run when CLI succeeds'); },
+        });
+        assert.deepEqual(result.windows, [
+          {label: 'Gemini Models · Weekly Limit Remaining', usedPercent: 50, resetsAt: '2026-11-28T15:00:00.000Z'},
+        ]);
+      })(),
+      (async () => {
+        const t0 = Date.now();
+        await assert.rejects(antigravity(unauthedAgy, {
+          ports: () => { throw new Error('should not fall back on signInRequired'); },
+        }), /signInRequired/);
+        assert.ok(Date.now() - t0 < 5000);
+      })(),
+      (async () => {
+        assert.deepEqual(await antigravity(apiKeyAgy, {
+          ports: () => { throw new Error('should not fall back on notReported'); },
+        }), {windows: [], status: 'notReported'});
+      })(),
+      (async () => {
+        await assert.rejects(antigravity(throttledAgy, {
+          ports: () => { throw new Error('should not fall back on rateLimited'); },
+        }), /rateLimited/);
+      })(),
+      (async () => {
+        await assert.rejects(antigravity(incidental429Agy, {ports: []}), /unavailable/);
+      })(),
+      (async () => {
+        // Non-timeout CLI failure falls back to local server; empty supported CLI returns empty windows (not needsRunning).
+        const fallback = await antigravity('/fake/agy', {
+          cli: async () => { throw new Error('unavailable'); },
+          ports: [{host: '127.0.0.1', port: 12345, csrf: 'TOK'}],
+          request: async () => ({groups: [{displayName: 'Local', buckets: [{displayName: '5h', remainingFraction: 0.25}]}]}),
+        });
+        assert.equal(fallback.windows[0].usedPercent, 75);
+        assert.deepEqual(await antigravity('/fake/agy', {cli: async () => ({windows: []}), ports: []}), {windows: []});
+      })(),
+    ]);
+
+    // Run the tight 600ms timeout check outside the parallel burst so process
+    // launch contention cannot push the 250ms --version probe past the budget.
     const t1 = Date.now();
     await assert.rejects(antigravity(slowAgy, {
       timeoutMs: 600,
       ports: () => { throw new Error('should not scan ports after CLI timeout'); },
     }), /timeout/);
     assert.ok(Date.now() - t1 < 2500);
-
-    // Non-timeout CLI failure falls back to local server; empty supported CLI returns empty windows (not needsRunning).
-    const fallback = await antigravity('/fake/agy', {
-      cli: async () => { throw new Error('unavailable'); },
-      ports: [{host: '127.0.0.1', port: 12345, csrf: 'TOK'}],
-      request: async () => ({groups: [{displayName: 'Local', buckets: [{displayName: '5h', remainingFraction: 0.25}]}]}),
-    });
-    assert.equal(fallback.windows[0].usedPercent, 75);
-    assert.deepEqual(await antigravity('/fake/agy', {cli: async () => ({windows: []}), ports: []}), {windows: []});
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -963,28 +827,6 @@ test('Muse usage reads the subscription window and weekly allowance', () => {
   assert.equal(museUsage({usage: {...usage, window: {...usage.window, windowDurationMins: 180}}}).windows[0].label, '180 minutes');
   for (const empty of [{}, null, {usage: {}}, {window: {usedPercent: 'x'}}]) {
     assert.deepEqual(museUsage(empty), {windows: [], status: 'notReported'});
-  }
-});
-
-test('Muse usage runs `muse usage --json` without updating Muse', {skip: process.platform === 'win32'}, async () => {
-  const fs = require('fs'), os = require('os'), path = require('path');
-  const {probe} = require('../../assets/scripts/agent_usage_probe.cjs');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-usage-'));
-  try {
-    const muse = path.join(dir, 'muse');
-    fs.writeFileSync(muse, '#!/bin/sh\n' +
-      '[ "$1 $2 $#" = "usage --json 2" ] && [ "$MUSE_NO_AUTO_UPDATE" = 1 ] || exit 3\n' +
-      'echo \'{"observedAtMs":1,"tier":"pro","window":{"usedPercent":5,"resetsAtMs":1793001800000,"windowDurationMins":300},' +
-      '"weekly":{"usedPercent":9,"resetsAtMs":1793500000000}}\'\n', {mode: 0o755});
-    const result = await probe('muse', muse);
-    assert.equal(result.status, 'available');
-    assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]), [['5 hours', 5], ['Weekly', 9]]);
-    // Not signed in, or a locked keychain over SSH: Muse exits non-zero.
-    fs.writeFileSync(muse, '#!/bin/sh\necho "muse usage: not logged in" >&2\nexit 1\n', {mode: 0o755});
-    assert.deepEqual(await probe('muse', muse), {status: 'unavailable'});
-    assert.deepEqual(await probe('muse', path.join(dir, 'missing')), {status: 'unavailable'});
-  } finally {
-    fs.rmSync(dir, {recursive: true, force: true});
   }
 });
 
@@ -1045,4 +887,191 @@ test('OpenCode 2 asks its own server for the active Console sign-in once', async
   const failed = await multiProvider('opencode', accounts.slice(0, 1),
     openCodeReader('/opt/opencode', true, async () => { throw new Error('unavailable'); }));
   assert.deepEqual(failed.notices, [{provider: 'OpenCode', status: 'unavailable'}]);
+});
+
+// Isolated subprocess and loopback tests that do not mutate process-global
+// environment variables, os.homedir, or child_process.spawn.
+describe('isolated subprocess and loopback probes', {concurrency: true}, () => {
+  test('HTTP 429 shares one request and preserves only the sanitized cooldown', async () => {
+    const http = require('http');
+    const {requestJson} = require('../../assets/scripts/agent_usage_probe.cjs');
+    let requests = 0;
+    const server = http.createServer((request, response) => {
+      requests++;
+      response.writeHead(429, request.url.endsWith('/dated') ? {
+        Date: 'Sat, 12 Sep 2026 12:00:00 GMT', 'Retry-After': 'Sat, 12 Sep 2026 12:15:00 GMT',
+      } : {'Retry-After': '900'});
+      response.end('PRIVATE_RESPONSE');
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/usage`;
+      const results = await Promise.allSettled([
+        requestJson(url, {token:'FIXTURE', local:true}),
+        requestJson(url, {token:'FIXTURE', local:true}),
+      ]);
+      assert.equal(requests, 1);
+      for (const result of results) {
+        assert.equal(result.status, 'rejected');
+        assert.equal(result.reason.message, 'rateLimited');
+        assert.equal(result.reason.retryAfterSeconds, 900);
+        assert.ok(!JSON.stringify(result.reason).includes('PRIVATE_RESPONSE'));
+      }
+      await assert.rejects(requestJson(url + '/dated', {local:true}), {message:'rateLimited', retryAfterSeconds:900});
+      assert.equal(requests, 2);
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  for (const framed of [true, false]) {
+    test(`RPC supports fragmented ${framed ? 'Content-Length' : 'JSONL'} responses`, async () => {
+      const source = `process.stdin.once('data', () => {
+        const body = JSON.stringify({jsonrpc:'2.0', id:2, result:{ok:true}});
+        const wire = ${framed} ? 'Content-Length: '+Buffer.byteLength(body)+'\\r\\n\\r\\n'+body : body+'\\n';
+        process.stdout.write(wire.slice(0, 8));
+        setTimeout(() => process.stdout.write(wire.slice(8)), 10);
+      });`;
+      assert.deepEqual(await rpc(process.execPath, ['-e', source], 'account.getQuota', framed, false), {ok: true});
+    });
+  }
+
+  test('RPC errors do not propagate provider error text', async () => {
+    const source = `process.stdin.once('data', () => process.stdout.write(JSON.stringify({id:2,error:{message:'SECRET'}})+'\\n'));`;
+    await assert.rejects(rpc(process.execPath, ['-e', source], 'account/get', false, false),
+      error => error.message === 'unavailable');
+  });
+
+  test('encoded SSH bootstrap returns only normalized data and handles initialization', async () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const cp = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-usage-test-'));
+    try {
+      const executable = path.join(dir, "codex quote ' fixture");
+      fs.writeFileSync(executable, `#!/usr/bin/env node
+        const readline = require('readline');
+        readline.createInterface({input: process.stdin}).on('line', line => {
+          const request = JSON.parse(line);
+          if (!request.id) return;
+          const result = request.id === 1 ? {} : {rateLimits: {primary: {
+            usedPercent: 42, windowDurationMins: 300, resetsAt: 1800000000}},
+            accessToken: 'SECRET'};
+          process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
+        });`, {mode: 0o700});
+      const script = fs.readFileSync(path.join(__dirname, '../../assets/scripts/agent_usage_probe.cjs'));
+      const bootstrap = "process.env.MONKEYSSH_USAGE_PROBE='1';eval(Buffer.from('" +
+        script.toString('base64') + "','base64').toString())";
+      const input = Buffer.from(JSON.stringify({codex: executable})).toString('base64');
+      const stdout = await new Promise((resolve, reject) => cp.execFile(
+        process.execPath,
+        ['-e', bootstrap, input],
+        {encoding: 'utf8', timeout: 15000},
+        (error, out) => error ? reject(error) : resolve(out),
+      ));
+      assert.ok(stdout.startsWith('__monkeyssh_usage__='));
+      assert.ok(!stdout.includes('SECRET'));
+      assert.equal(JSON.parse(stdout.split('=')[1]).windows[0].usedPercent, 42);
+    } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+  });
+
+  test('Windows stdin bootstrap accepts a fragmented payload without command expansion', async () => {
+    const fs = require('fs'), path = require('path'), cp = require('child_process');
+    const script = fs.readFileSync(path.join(__dirname, '../../assets/scripts/agent_usage_probe.cjs')).toString('base64');
+    const bootstrap = "process.env.MONKEYSSH_USAGE_PROBE='1';const r=require('readline').createInterface({input:process.stdin});r.once('line',s=>{r.close();eval(Buffer.from(s,'base64').toString())})";
+    const child = cp.spawn(process.execPath, ['-e', bootstrap, Buffer.from(JSON.stringify({unknown: ''})).toString('base64')]);
+    let output = '';
+    child.stdout.on('data', chunk => output += chunk);
+    const closed = new Promise(resolve => child.on('close', resolve));
+    child.stdin.write(script.slice(0, 200));
+    child.stdin.end(script.slice(200) + '\n');
+    assert.equal(await closed, 0);
+    assert.equal(JSON.parse(output.split('=')[1]).status, 'unsupported');
+  });
+
+  test('Antigravity local fallback targets only the discovered loopback family and bypasses env proxies', async () => {
+    const cp = require('child_process');
+    const http = require('http');
+    const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
+
+    // An IPv6-only listener's CSRF token must never be sent to 127.0.0.1 on the same port.
+    const seen = [];
+    const res = await antigravity([{host: '::1', port: 54321, csrf: 'IPV6_ONLY_CSRF'}], async (url, options) => {
+      seen.push({url, csrf: options.headers['x-codeium-csrf-token']});
+      return {groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]};
+    });
+    assert.equal(seen.length, 1);
+    assert.match(seen[0].url, /^https:\/\/\[::1\]:54321\//);
+    assert.equal(seen[0].csrf, 'IPV6_ONLY_CSRF');
+    assert.equal(res.windows[0].usedPercent, 50);
+
+    // Dual-stack listeners on one PID are probed as alternatives and reported once,
+    // while two distinct PIDs stay separate instances.
+    const dualStack = await antigravity([
+      {host: '127.0.0.1', port: 5000, csrf: 'SAME', pid: 123},
+      {host: '::1', port: 5000, csrf: 'SAME', pid: 123},
+    ], async () => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]}));
+    assert.deepEqual(dualStack.windows.map(w => w.label), ['Models · Weekly']);
+
+    const multiPid = await antigravity([
+      {host: '127.0.0.1', port: 5000, csrf: 'A', pid: 100},
+      {host: '::1', port: 5000, csrf: 'A', pid: 100},
+      {host: '127.0.0.1', port: 5001, csrf: 'B', pid: 200},
+    ], async url => ({groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: url.includes(':5000/') ? 0.5 : 0.25}]}]}));
+    assert.deepEqual(multiPid.windows.map(w => [w.label, w.usedPercent]), [
+      ['Instance 1 · Models · Weekly', 50],
+      ['Instance 2 · Models · Weekly', 75],
+    ]);
+
+    // Even with NODE_USE_ENV_PROXY=1 and HTTP_PROXY pointing at an interceptor, local: true skips the proxy.
+    let proxyHits = 0;
+    const proxy = http.createServer((req, res) => { proxyHits++; res.writeHead(200); res.end('{}'); });
+    const target = http.createServer((req, res) => {
+      res.writeHead(200, {'Content-Type': 'application/json'});
+      res.end(JSON.stringify({ok: req.headers['x-codeium-csrf-token']}));
+    });
+    await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+    await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+    try {
+      const out = await new Promise((resolve, reject) => cp.execFile(process.execPath, ['-e', `
+        const {requestJson} = require(${JSON.stringify(require.resolve('../../assets/scripts/agent_usage_probe.cjs'))});
+        requestJson('http://127.0.0.1:${target.address().port}/quota', {
+          local: true, headers: {'x-codeium-csrf-token': 'LOCAL_CSRF'}, body: {},
+        }).then(r => console.log(JSON.stringify(r)));
+      `], {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: {...process.env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: ''},
+      }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+      assert.deepEqual(JSON.parse(out.trim()), {ok: 'LOCAL_CSRF'});
+      assert.equal(proxyHits, 0);
+    } finally {
+      proxy.closeAllConnections(); target.closeAllConnections();
+      await Promise.all([new Promise(r => proxy.close(r)), new Promise(r => target.close(r))]);
+    }
+  });
+
+  test('Muse usage runs `muse usage --json` without updating Muse', {skip: process.platform === 'win32'}, async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const {probe} = require('../../assets/scripts/agent_usage_probe.cjs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-usage-'));
+    try {
+      const muse = path.join(dir, 'muse');
+      fs.writeFileSync(muse, '#!/bin/sh\n' +
+        '[ "$1 $2 $#" = "usage --json 2" ] && [ "$MUSE_NO_AUTO_UPDATE" = 1 ] || exit 3\n' +
+        'echo \'{"observedAtMs":1,"tier":"pro","window":{"usedPercent":5,"resetsAtMs":1793001800000,"windowDurationMins":300},' +
+        '"weekly":{"usedPercent":9,"resetsAtMs":1793500000000}}\'\n', {mode: 0o755});
+      const result = await probe('muse', muse);
+      assert.equal(result.status, 'available');
+      assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]), [['5 hours', 5], ['Weekly', 9]]);
+      // Not signed in, or a locked keychain over SSH: Muse exits non-zero.
+      fs.writeFileSync(muse, '#!/bin/sh\necho "muse usage: not logged in" >&2\nexit 1\n', {mode: 0o755});
+      assert.deepEqual(await probe('muse', muse), {status: 'unavailable'});
+      assert.deepEqual(await probe('muse', path.join(dir, 'missing')), {status: 'unavailable'});
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true});
+    }
+  });
 });

@@ -10,6 +10,7 @@ import (
 )
 
 func TestAttachPrefixDetachesWithEnhancedKeyboardEncodings(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		input []string
@@ -56,6 +57,7 @@ func TestAttachPrefixDetachesWithEnhancedKeyboardEncodings(t *testing.T) {
 }
 
 func TestAttachPrefixWithKittyKeysForwardsOnlyWindowInput(t *testing.T) {
+	t.Parallel()
 	firstReader, firstWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +117,7 @@ func TestAttachPrefixWithKittyKeysForwardsOnlyWindowInput(t *testing.T) {
 }
 
 func TestAttachCloseConfirmationAcceptsKittyKeys(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	server.windows = []*muxWindow{
 		{id: "@1", index: 0, lastActivity: time.Now()},
@@ -137,6 +140,7 @@ func TestAttachCloseConfirmationAcceptsKittyKeys(t *testing.T) {
 }
 
 func TestAttachPrefixRecognizesKeysSplitAcrossReads(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		input []string
@@ -174,6 +178,7 @@ func TestAttachPrefixRecognizesKeysSplitAcrossReads(t *testing.T) {
 }
 
 func TestAttachHeldPartialKeyIsFlushedWhenNothingCompletesIt(t *testing.T) {
+	t.Parallel()
 	inputReader, inputWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

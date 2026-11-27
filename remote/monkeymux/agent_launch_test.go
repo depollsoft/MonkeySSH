@@ -46,6 +46,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestAgentLaunchCommandRewriting(t *testing.T) {
+	t.Parallel()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +92,7 @@ func TestAgentLaunchCommandRewriting(t *testing.T) {
 }
 
 func TestAgentLaunchWrapperDetection(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"claude", "codex", "opencode", "copilot", "cursor-agent"} {
 		for _, prefix := range []string{"", "monkeymux ", "/opt/bin/monkeymux ", "'/opt/with spaces/monkeymux' ", "cd /tmp && A=1 monkeymux "} {
 			for _, args := range []string{" --resume X", " --executable '/opt/agent tools/" + tool + "' --resume X"} {
@@ -114,6 +116,7 @@ func TestAgentLaunchWrapperDetection(t *testing.T) {
 }
 
 func TestAgentLaunchSessionIDArguments(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		tool, flag string
 		blockers   []string
@@ -329,6 +332,7 @@ func TestAgentLaunchGeneratedFiles(t *testing.T) {
 }
 
 func TestCodexIdentityHookConfig(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"'/opt/monkeymux' agent-identity-hook --tool codex", shellQuote(`/path/with spaces/quote'and"slash\monkeymux`) + " agent-identity-hook --tool codex"} {
 		value := codexIdentityHookConfig(command)
 		const prefix = `hooks.SessionStart=[{hooks=[{type="command",command=`
@@ -349,6 +353,7 @@ func TestCodexIdentityHookConfig(t *testing.T) {
 // Vectors come from values Codex itself persisted to config.toml after the
 // user trusted the hook in the pane; the second is the wrapper's real command.
 func TestCodexIdentityHookTrustedHash(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ command, want string }{
 		{"bash /private/tmp/claude-501/-Users-depoll-Code-MonkeySSH/fc8e760a-62cf-4a6a-9ffa-a526bc6e6e8c/scratchpad/spike/hook.sh",
 			"sha256:10c8523ececf61dd6235483ae3c8af5e0661cadd54b6ba35fbdbade8fbcce932"},
@@ -371,6 +376,7 @@ func TestCodexIdentityHookTrustedHash(t *testing.T) {
 }
 
 func TestCodexIdentityHookTrustConfig(t *testing.T) {
+	t.Parallel()
 	command := "'/opt/monkeymux' agent-identity-hook --tool codex"
 	value := codexIdentityHookTrustConfig(command)
 	want := `hooks.state={"/<session-flags>/config.toml:session_start:0:0"={trusted_hash="` +
@@ -389,6 +395,7 @@ func TestCodexIdentityHookTrustConfig(t *testing.T) {
 }
 
 func TestWithAgentLaunchEnvironment(t *testing.T) {
+	t.Parallel()
 	for _, key := range []string{"MONKEYMUX_AGENT_PID", "OPENCODE_TUI_CONFIG"} {
 		for _, env := range [][]string{nil, {"A=a=b"}, {key + "=old", "A=1", key + "=duplicate", key + "_OTHER=keep"}} {
 			original := append([]string(nil), env...)
@@ -728,6 +735,7 @@ func TestPrepareOpenCodeTUIConfigsPersistIndependently(t *testing.T) {
 }
 
 func TestRestoreWrapsBothAgentLaunchLegs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ tool, marker string }{
 		{"claude", " agent-launch claude"},
 		{"copilot", " agent-launch copilot"},

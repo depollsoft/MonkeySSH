@@ -134,6 +134,7 @@ func sendTestClientInput(t *testing.T, conn net.Conn, data string) {
 const testPermissionRequest = `{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"s"}}`
 
 func TestAcpProviderCancelAnswersAndUnpinsPendingRequest(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	publishTestProviderFrame(t, bridge, cancelFrame(`"permission-1"`))
@@ -161,6 +162,7 @@ func TestAcpProviderCancelAnswersAndUnpinsPendingRequest(t *testing.T) {
 }
 
 func TestAcpFreshAttachDoesNotResurrectCancelledRequest(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	publishTestProviderFrame(t, bridge, cancelFrame(`"permission-1"`))
@@ -179,6 +181,7 @@ func TestAcpFreshAttachDoesNotResurrectCancelledRequest(t *testing.T) {
 }
 
 func TestAcpResumeReplaysCancelAfterRequest(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	publishTestProviderFrame(t, bridge, cancelFrame(`"permission-1"`))
@@ -197,6 +200,7 @@ func TestAcpResumeReplaysCancelAfterRequest(t *testing.T) {
 }
 
 func TestAcpClientAnswerToCancelledRequestIsNotForwarded(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	publishTestProviderFrame(t, bridge, cancelFrame(`"permission-1"`))
@@ -221,6 +225,7 @@ func TestAcpClientAnswerToCancelledRequestIsNotForwarded(t *testing.T) {
 }
 
 func TestAcpProviderCancelMatchesExactIDType(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(
 		t,
@@ -241,6 +246,7 @@ func TestAcpProviderCancelMatchesExactIDType(t *testing.T) {
 }
 
 func TestAcpProviderCancelMatchesEquivalentStringSpelling(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(
 		t,
@@ -252,6 +258,7 @@ func TestAcpProviderCancelMatchesEquivalentStringSpelling(t *testing.T) {
 }
 
 func TestAcpProviderCancelIgnoresAnsweredAndUnknownRequests(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	answer := parseAcpEnvelope(json.RawMessage(
@@ -273,6 +280,7 @@ func TestAcpProviderCancelIgnoresAnsweredAndUnknownRequests(t *testing.T) {
 }
 
 func TestAcpReusedRequestIDIsForwardedAfterCancellation(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
 	publishTestProviderFrame(t, bridge, cancelFrame(`"permission-1"`))
@@ -288,6 +296,7 @@ func TestAcpReusedRequestIDIsForwardedAfterCancellation(t *testing.T) {
 }
 
 func TestAcpCancelledRequestMemoryIsBounded(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
@@ -313,6 +322,7 @@ func TestAcpCancelledRequestMemoryIsBounded(t *testing.T) {
 }
 
 func TestAcpReusedCancelledIDKeepsItsNewMarkerThroughEviction(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
@@ -343,6 +353,7 @@ func TestAcpReusedCancelledIDKeepsItsNewMarkerThroughEviction(t *testing.T) {
 }
 
 func TestParseAcpProviderOutputRecognizesOnlyCancelNotifications(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		frame   string
@@ -385,6 +396,7 @@ func readTestAcpFrame(
 }
 
 func TestAcpCancellationFloodWithoutReadsFailsProvider(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	// The provider never reads its input, so the first answer blocks the
 	// writer and the rest queue behind it.

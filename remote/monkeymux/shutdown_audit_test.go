@@ -18,6 +18,7 @@ type shutdownAuditPty struct {
 func (p shutdownAuditPty) Write(data []byte) (int, error) { return p.write(data) }
 
 func TestWriteWindowInputConcurrentClose(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", pty: shutdownAuditPty{write: func(data []byte) (int, error) {
 		return len(data), nil
 	}}}
@@ -49,6 +50,7 @@ func TestWriteWindowInputConcurrentClose(t *testing.T) {
 }
 
 func TestWriteWindowInputDoesNotHoldServerLockDuringWrite(t *testing.T) {
+	t.Parallel()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	defer close(release)
@@ -81,6 +83,7 @@ func TestWriteWindowInputDoesNotHoldServerLockDuringWrite(t *testing.T) {
 }
 
 func TestAcpAttachAfterStopDoesNotRegisterClient(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	server, peer := net.Pipe()
 	defer peer.Close()

@@ -75,6 +75,7 @@ func TestCodexSessionGateWaitsForHeldFileWindows(t *testing.T) {
 // Codex removes a released lock file. A probe that happens to have it open
 // must not turn that removal into a sharing violation.
 func TestCodexSessionLockProbeSharesDeleteWindows(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session-id.lock")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -92,6 +93,7 @@ func TestCodexSessionLockProbeSharesDeleteWindows(t *testing.T) {
 // A probe of a free lock briefly takes it. Codex must be able to take it
 // again straight away.
 func TestCodexSessionLockProbeReleasesFreeLockWindows(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session-id.lock")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)

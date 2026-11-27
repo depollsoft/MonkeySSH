@@ -17,6 +17,7 @@ func TestShellExecutableCommandUsesPowerShellCallOperator(t *testing.T) {
 }
 
 func TestPiRestoreTreatsWindowsShellsAsShells(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"cmd.exe", "powershell.exe", "pwsh.exe"} {
 		state := restoreWindowState{
 			CurrentCommand: command,

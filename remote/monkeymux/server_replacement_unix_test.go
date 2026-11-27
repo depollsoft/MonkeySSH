@@ -26,6 +26,7 @@ func startReplacementTestPane(t *testing.T) *exec.Cmd {
 }
 
 func TestReapReplacementPaneGroupsKillsCapturedPane(t *testing.T) {
+	t.Parallel()
 	cmd := startReplacementTestPane(t)
 	pid := cmd.Process.Pid
 	panes := captureReplacementPaneGroups(&serverRestore{
@@ -51,6 +52,7 @@ func TestReapReplacementPaneGroupsKillsCapturedPane(t *testing.T) {
 }
 
 func TestReapReplacementPaneGroupsSkipsMissingPIDs(t *testing.T) {
+	t.Parallel()
 	reapReplacementPaneGroups(nil)
 	reapReplacementPaneGroups([]replacementPaneGroup{
 		{0, time.Now()}, {-1, time.Now()}, {99999999, time.Now()},
@@ -58,6 +60,7 @@ func TestReapReplacementPaneGroupsSkipsMissingPIDs(t *testing.T) {
 }
 
 func TestReapReplacementPaneGroupsSkipsUnconfirmedPIDs(t *testing.T) {
+	t.Parallel()
 	cmd := startReplacementTestPane(t)
 	pid := cmd.Process.Pid
 	snapshot := inspectReplacementProcess(pid)
@@ -88,6 +91,7 @@ func TestReapReplacementPaneGroupsSkipsUnconfirmedPIDs(t *testing.T) {
 // Model an interactive job beneath an intermediate process and a wrapper shell
 // in its own group. Fake OS operations make kill ordering and PID reuse exact.
 func TestReplacementPaneGroupsWrapperOrderingAndGuards(t *testing.T) {
+	t.Parallel()
 	const owner, wrapper, intermediate, pane = 10, 20, 25, 30
 	started := time.Unix(100, 0)
 	for _, tc := range []struct {
@@ -196,6 +200,7 @@ func TestReplacementPaneGroupsWrapperOrderingAndGuards(t *testing.T) {
 }
 
 func TestServerTerminationRechecksBeforeEscalation(t *testing.T) {
+	t.Parallel()
 	for _, stillLive := range []bool{false, true} {
 		owner := true
 		var signals []syscall.Signal
@@ -222,6 +227,7 @@ func TestServerTerminationRechecksBeforeEscalation(t *testing.T) {
 }
 
 func TestReplacementCaptureRejectsIdentityChangesDuringAncestryRead(t *testing.T) {
+	t.Parallel()
 	for _, changed := range []string{"pane", "wrapper", "ancestry"} {
 		t.Run(changed, func(t *testing.T) {
 			const owner, wrapper, pane = 10, 20, 30
@@ -266,6 +272,7 @@ func TestReplacementCaptureRejectsIdentityChangesDuringAncestryRead(t *testing.T
 }
 
 func TestReplacementCaptureReadsProcessTableTwiceForAllWindows(t *testing.T) {
+	t.Parallel()
 	const owner = 10
 	started := time.Unix(100, 0)
 	processes := map[int]processInfo{}

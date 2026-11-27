@@ -24,6 +24,7 @@ func (p codexShutdownTestProcess) shutdownCodex(_ *muxWindow, deadline time.Time
 }
 
 func TestCodexShutdownSelectsInteractiveWindow(t *testing.T) {
+	t.Parallel()
 	started := make(chan time.Time, 1)
 	release := make(chan struct{})
 	close(release)
@@ -39,6 +40,7 @@ func TestCodexShutdownSelectsInteractiveWindow(t *testing.T) {
 }
 
 func TestCodexShutdownWindowsShareBudget(t *testing.T) {
+	t.Parallel()
 	started := make(chan time.Time, 8)
 	release := make(chan struct{})
 	server := &muxServer{}
@@ -64,6 +66,7 @@ func TestCodexShutdownWindowsShareBudget(t *testing.T) {
 }
 
 func TestCodexResumeLockGate(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		clearAfter time.Duration
@@ -87,6 +90,7 @@ func TestCodexResumeLockGate(t *testing.T) {
 }
 
 func TestCodexSessionLockPathRejectsTraversal(t *testing.T) {
+	t.Parallel()
 	for _, id := range []string{"", ".", "..", "../outside", `..\outside`, "C:outside", "bad\x00id"} {
 		if path := codexSessionLockPath(t.TempDir(), id); path != "" {
 			t.Errorf("accepted session ID %q: %q", id, path)
@@ -95,6 +99,7 @@ func TestCodexSessionLockPathRejectsTraversal(t *testing.T) {
 }
 
 func TestCodexSessionLockProbeDoesNotCreateOrRemoveFiles(t *testing.T) {
+	t.Parallel()
 	path := codexSessionLockPath(t.TempDir(), "session-id")
 	if codexSessionLockHeld(path) {
 		t.Fatal("absent lock reported held")

@@ -8,6 +8,7 @@ import (
 )
 
 func TestWindowTracksKittyKeyboardPerScreen(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	observe := func(chunks ...string) {
 		t.Helper()
@@ -65,6 +66,7 @@ func TestWindowTracksKittyKeyboardPerScreen(t *testing.T) {
 }
 
 func TestKittyKeyboardStackEvictsOldestPush(t *testing.T) {
+	t.Parallel()
 	var modes kittyKeyboardModes
 	for flags := range kittyKeyboardStackLimit + 3 {
 		modes.push(flags + 1)
@@ -78,6 +80,7 @@ func TestKittyKeyboardStackEvictsOldestPush(t *testing.T) {
 }
 
 func TestKeyboardModeReplayRebuildsBothScreens(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{modifyOtherKeys: 2}
 	window.kittyKeyboard[0] = kittyKeyboardModes{flags: 7, saved: []int{1, 5}}
 	want := kittyKeyboardResetSequence + "\x1b[=1;1u\x1b[>5u\x1b[>7u" +
@@ -98,6 +101,7 @@ func TestKeyboardModeReplayRebuildsBothScreens(t *testing.T) {
 }
 
 func TestReplayStripsKeyboardModeSequences(t *testing.T) {
+	t.Parallel()
 	history := "a\x1b[>5ub\x1b[<uc\x1b[=1;1ud\x1b[>4;2me\x1b[>4mf" +
 		"\x1b[?u\x1b[>1;2mg\x1b[4mh\x1b[su\x1b[u"
 	want := "abcdef\x1b[>1;2mg\x1b[4mh\x1b[su\x1b[u"
@@ -107,6 +111,7 @@ func TestReplayStripsKeyboardModeSequences(t *testing.T) {
 }
 
 func TestReplayKeepsKeyboardModeSequencesAfterLastReset(t *testing.T) {
+	t.Parallel()
 	// A full reset in the history erases the restore written before it, so
 	// the changes after the last reset have to replay to rebuild the state.
 	history := "a\x1b[>1u\x1bcb\x1b[>2u\x1bcc\x1b[>5u\x1b[>4;2md"
@@ -117,6 +122,7 @@ func TestReplayKeepsKeyboardModeSequencesAfterLastReset(t *testing.T) {
 }
 
 func TestReplayStripsEightBitKeyboardSequencesWithoutTrackingThem(t *testing.T) {
+	t.Parallel()
 	// Dropping both forms keeps a terminal that reads 0x9b as CSI from
 	// re-applying the push after the restore, while UTF-8 terminals never
 	// treated it as a mode change, so tracking ignores it.
@@ -132,6 +138,7 @@ func TestReplayStripsEightBitKeyboardSequencesWithoutTrackingThem(t *testing.T) 
 }
 
 func TestWindowSwitchRestoresEachWindowsKeyboardModes(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	agent := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
 	shell := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
@@ -175,6 +182,7 @@ func TestWindowSwitchRestoresEachWindowsKeyboardModes(t *testing.T) {
 }
 
 func TestReplayLeavesKeyboardModesAloneUntilAWindowUsesThem(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	server.windows = []*muxWindow{
 		{id: "@1", index: 0, lastActivity: time.Now()},
@@ -198,6 +206,7 @@ func TestReplayLeavesKeyboardModesAloneUntilAWindowUsesThem(t *testing.T) {
 }
 
 func TestWindowResetsTrackedModesOnRISAndDECSTR(t *testing.T) {
+	t.Parallel()
 	setup := "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?1h\x1b[?7l\x1b=\x1b[4h\x1b[?25l\x1b[>1u"
 	replay := func(window *muxWindow) string {
 		return string(terminalModePreReplaySequence(window)) +

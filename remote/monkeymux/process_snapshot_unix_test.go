@@ -15,6 +15,7 @@ import (
 // answers kill(pid, 0). Treating that zombie as a live server would keep the
 // session locked out for as long as the parent lives.
 func TestInspectProcessReportsZombieAsNotRunning(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start helper process: %v", err)
@@ -67,6 +68,7 @@ func TestInspectProcessStartTimeIsTimezoneIndependent(t *testing.T) {
 }
 
 func TestInspectProcessReportsSelfAsRunningMonkeyMux(t *testing.T) {
+	t.Parallel()
 	snapshot := inspectProcess(os.Getpid())
 	if !snapshot.known {
 		t.Skip("this host cannot inspect its own process")
@@ -83,6 +85,7 @@ func TestInspectProcessReportsSelfAsRunningMonkeyMux(t *testing.T) {
 }
 
 func TestParseProcessStartTimeAcceptsCLocaleOutput(t *testing.T) {
+	t.Parallel()
 	// Padded and unpadded day-of-month, as ps prints them under LC_ALL=C.
 	for _, value := range []string{
 		"Sat Aug  8 23:15:36 2026",
@@ -98,6 +101,7 @@ func TestParseProcessStartTimeAcceptsCLocaleOutput(t *testing.T) {
 }
 
 func TestUserHZTicksToDuration(t *testing.T) {
+	t.Parallel()
 	cases := map[int64]time.Duration{
 		0:      0,
 		1:      10 * time.Millisecond,
@@ -117,6 +121,7 @@ func TestUserHZTicksToDuration(t *testing.T) {
 }
 
 func TestPidRecordOwnershipRejectsProcessStartedAfterTheRecord(t *testing.T) {
+	t.Parallel()
 	snapshot := inspectProcess(os.Getpid())
 	if !snapshot.known || snapshot.started.IsZero() {
 		t.Skip("this host does not report process start times")
@@ -136,6 +141,7 @@ func TestPidRecordOwnershipRejectsProcessStartedAfterTheRecord(t *testing.T) {
 }
 
 func TestPidRecordOwnershipRejectsForeignProcess(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("sleep", "120")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start helper process: %v", err)
@@ -156,6 +162,7 @@ func TestPidRecordOwnershipRejectsForeignProcess(t *testing.T) {
 }
 
 func TestInspectProcessHandlesUnknownPID(t *testing.T) {
+	t.Parallel()
 	// A pid that cannot exist must never be reported as a running owner.
 	snapshot := inspectProcess(0)
 	if snapshot.running {
@@ -170,6 +177,7 @@ func TestInspectProcessHandlesUnknownPID(t *testing.T) {
 // that as "gone" would let a helper reclaim a session another user's server
 // still owns.
 func TestProcessIDAliveTreatsPermissionDeniedAsAlive(t *testing.T) {
+	t.Parallel()
 	// pid 1 always exists and is owned by root, so an unprivileged test run
 	// exercises the EPERM path and a privileged one still succeeds outright.
 	if !processIDAlive(1) {

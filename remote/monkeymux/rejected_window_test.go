@@ -29,6 +29,7 @@ func (p rejectedCleanupPty) Close() error {
 }
 
 func TestRejectedWindowKillsBeforeReaping(t *testing.T) {
+	t.Parallel()
 	var events []string
 	cleanupRejectedWindow(rejectedCleanupPty{events: &events}, rejectedCleanupProcess{events: &events})
 	if want := []string{"kill", "close", "wait"}; !reflect.DeepEqual(events, want) {

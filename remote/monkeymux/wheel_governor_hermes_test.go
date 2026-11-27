@@ -159,6 +159,7 @@ func hermesWheelProfile(base float64) *wheelAccelerationProfile {
 }
 
 func TestHermesWheelSpeedMatchesTUI(t *testing.T) {
+	t.Parallel()
 	for _, base := range hermesTestBases {
 		speed := hermesWheelSpeed(base)
 		tui := newHermesTestTUI(base)
@@ -178,6 +179,7 @@ func TestHermesWheelSpeedMatchesTUI(t *testing.T) {
 }
 
 func TestHermesTUIAcceleratesUngovernedDrag(t *testing.T) {
+	t.Parallel()
 	tui := newHermesTestTUI(1)
 	now := time.Unix(100, 0)
 	for i := 0; i < 60; i++ {
@@ -190,6 +192,7 @@ func TestHermesTUIAcceleratesUngovernedDrag(t *testing.T) {
 }
 
 func TestWheelGovernorHermesRowConservation(t *testing.T) {
+	t.Parallel()
 	// batch is how many reports the client writes per frame; it sends up to
 	// six while a fast drag is behind.
 	for _, base := range hermesTestBases {
@@ -243,6 +246,7 @@ func settleHermesWheelGovernor(t *testing.T, g *wheelGovernor, tui *hermesTestTU
 }
 
 func TestWheelGovernorHermesReversalSendsPair(t *testing.T) {
+	t.Parallel()
 	g := wheelGovernor{profile: hermesWheelProfile(1)}
 	tui := newHermesTestTUI(1)
 	now := time.Unix(100, 0)
@@ -264,6 +268,7 @@ func TestWheelGovernorHermesReversalSendsPair(t *testing.T) {
 }
 
 func TestWheelGovernorHermesJitteredDrag(t *testing.T) {
+	t.Parallel()
 	// A finger drag that wobbles: mostly one direction, with reversals in
 	// the same frame and across frames, at varying frame gaps. With a base
 	// below 2 every row is paid exactly.
@@ -390,6 +395,7 @@ func TestWriteWindowWheelGovernorHermesSlowScrollSpeed(t *testing.T) {
 }
 
 func TestHermesScrollSpeedBase(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		environment []string
 		want        float64
@@ -420,6 +426,7 @@ func TestHermesScrollSpeedBase(t *testing.T) {
 }
 
 func TestWheelGovernorHermesPrecisionMode(t *testing.T) {
+	t.Parallel()
 	for _, base := range hermesTestBases {
 		t.Run(fmt.Sprint(base), func(t *testing.T) {
 			g := wheelGovernor{profile: hermesWheelProfile(base)}
@@ -503,6 +510,7 @@ func TestWheelGovernorHermesRereadsSpeedForNextRun(t *testing.T) {
 // bypassed for a whole drag Hermes then ramps, and a reversal could switch
 // Hermes into wheel mode.
 func TestWheelGovernorHermesPrecisionBoundary(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		gap      time.Duration
@@ -792,6 +800,7 @@ func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 }
 
 func TestMayHoldWheelReport(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		data string
 		want bool

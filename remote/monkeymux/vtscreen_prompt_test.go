@@ -101,6 +101,7 @@ func runSemanticParityCase(c semanticParityCase) *terminalScreen {
 // semantic_prompt_parity_test.dart runs and expects the same marks, cell
 // contents, scrollback and prompt state.
 func TestSemanticPromptParityWithClient(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("testdata/semantic_prompt_parity.json")
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,7 @@ func TestSemanticPromptParityWithClient(t *testing.T) {
 func osc133(body string) string { return "\x1b]133;" + body + "\x07" }
 
 func TestSemanticPromptReadsLongOptions(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 4)
 	aid := strings.Repeat("x", 100)
 	s.Write([]byte(osc133("A;aid=" + aid + ";click_events=2;cl=v;special_key=1;redraw=last")))
@@ -181,6 +183,7 @@ func enterAlternateScreen(s *terminalScreen) string {
 // That holds also when the alternate screen has prompt options of its own,
 // which the redraw does not carry.
 func TestWindowReplayKeepsTheCommandRunningBehindARedraw(t *testing.T) {
+	t.Parallel()
 	for _, alternate := range []string{"", osc133("A;cl=line")} {
 		server := newMuxServerWithSize("test", 20, 5)
 		window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
@@ -208,6 +211,7 @@ func replayFrame(s *terminalScreen) *terminalScreen {
 }
 
 func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		size   [2]int
@@ -282,6 +286,7 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 // A prompt row that scrolled into the scrollback and came back with a taller
 // screen keeps its input, so a frame still marks it as input.
 func TestRenderFrameKeepsInputRestoredFromScrollback(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "abcdefghijklmnopqrstuv"))
 	s.Resize(10, 4)
@@ -299,6 +304,7 @@ func TestRenderFrameKeepsInputRestoredFromScrollback(t *testing.T) {
 // paints, the earlier ones too, on either screen, and the options and exit
 // status in force, so a client painted from it keeps what the model keeps.
 func TestRenderFrameCarriesEveryPrompt(t *testing.T) {
+	t.Parallel()
 	shell := osc133("A;cl=line;click_events=1") + "$ " + osc133("B") + "ls\r\n" + osc133("C") + "out\r\n" +
 		osc133("D;0") + osc133("A;cl=line;click_events=1") + "$ " + osc133("B") + "false\r\n" + osc133("C") +
 		osc133("D;1") + osc133("A;cl=m") + "top\r\n" + osc133("P;k=s") + "> " + osc133("B") + "abcdefgh"
@@ -344,6 +350,7 @@ func TestRenderFrameCarriesEveryPrompt(t *testing.T) {
 // prompt whose command ended, a screen without shell integration or the
 // alternate screen a running program shows.
 func TestRenderFrameMarksOnlyWhatTheModelMarks(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 5)
 	s.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "sleep 9\r\n" + osc133("C") + "running"))
 	frame := string(s.RenderFrame())
@@ -403,6 +410,7 @@ func TestRenderFrameMarksOnlyWhatTheModelMarks(t *testing.T) {
 // ends with it where the app reads the status it ends with: a prompt keeps the
 // status, input clears it.
 func TestRenderFrameEndsWithTheExitStatus(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 5)
 	s.Write([]byte(osc133("A") + "$ " + osc133("B") + "false\r\n" + osc133("C") + osc133("D;1") + osc133("A") + "$ "))
 	if s.shell.exit != "1" {
@@ -470,6 +478,7 @@ func shellStatusAfter(t *testing.T, frame []byte, status, exit string) (string, 
 }
 
 func TestSemanticPromptCloneAndReset(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "x"))
 	c := s.Clone()
@@ -486,6 +495,7 @@ func TestSemanticPromptCloneAndReset(t *testing.T) {
 // and 633 marks, options included, reach attached clients in live output and
 // survive the replay filter, while the window's model applies them.
 func TestSemanticPromptMarksReachAttachedClients(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	server.windows = []*muxWindow{{id: "@1", index: 0, lastActivity: time.Now()}}
 	server.activeID = "@1"
@@ -518,6 +528,7 @@ func TestSemanticPromptMarksReachAttachedClients(t *testing.T) {
 // unmarked on the client and still carry the content and the options in
 // force, whatever prompt the client showed before.
 func TestRenderFrameLeavesUnmarkedPromptRowsUnmarked(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		size   [2]int
@@ -558,6 +569,7 @@ func TestRenderFrameLeavesUnmarkedPromptRowsUnmarked(t *testing.T) {
 // the cursor when nothing follows, and never with a D after its C, so the
 // app reads a program started that way as running rather than at a prompt.
 func TestRenderFrameStartsACommandOnItsInputRow(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, output, want string
 	}{
@@ -588,6 +600,7 @@ func TestRenderFrameStartsACommandOnItsInputRow(t *testing.T) {
 // C after its input however many commands the replay shows before it, on the
 // screen and in the scrollback.
 func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
+	t.Parallel()
 	earlier := ""
 	for i := range 4 {
 		earlier += osc133("A;cl=line") + "$ " + osc133("B") + "echo x\r\n" + osc133("C") + "x\r\n" + osc133("D;"+string(rune('0'+i)))
@@ -628,6 +641,7 @@ func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
 // the glyph the cursor waits after is printed again as output, the one cell
 // the client classifies apart from the model.
 func TestRenderFrameKeepsTheCommandMarkWithTheCursorOnItsInput(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 5)
 	s.Write([]byte(osc133("A") + "$ " + osc133("B") + "abcdefgh\x1b7\r\n" + osc133("C") + "out\x1b8"))
 	replay := replaySequence(s)
@@ -650,6 +664,7 @@ func TestRenderFrameKeepsTheCommandMarkWithTheCursorOnItsInput(t *testing.T) {
 // saved cursor's deferred wrap after the command's C, which then comes again
 // where it was (at mark), so the app adds no command mark on another row.
 func TestRenderFrameKeepsTheCommandRunning(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, output, mark string
 	}{

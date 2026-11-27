@@ -128,6 +128,7 @@ func TestEnsureServerRefusesToStealLivePIDWithoutSocket(t *testing.T) {
 }
 
 func TestRemoveSocketPathIfUnchangedKeepsReboundListener(t *testing.T) {
+	t.Parallel()
 	dir := shortUnixSocketDir(t)
 	path := filepath.Join(dir, "old.sock")
 
@@ -288,6 +289,7 @@ func TestCloseWaitsForInFlightSocketRepublisher(t *testing.T) {
 }
 
 func TestWaitForServerProcessExitWaitsForLiveOwner(t *testing.T) {
+	t.Parallel()
 	owner := pidRecord{pid: os.Getpid(), writtenAt: time.Now()}
 	if waitForServerProcessExit("wait-owner", owner, 150*time.Millisecond) {
 		t.Fatal("waitForServerProcessExit treated a live pid as exited")
@@ -295,6 +297,7 @@ func TestWaitForServerProcessExitWaitsForLiveOwner(t *testing.T) {
 }
 
 func TestWaitForServerProcessExitChecksOnceAtDeadline(t *testing.T) {
+	t.Parallel()
 	owner := pidRecord{pid: 99999999, writtenAt: time.Now()}
 	if !waitForServerProcessExit("wait-dead-owner", owner, 0) {
 		t.Fatal("waitForServerProcessExit skipped the final ownership check")
@@ -302,6 +305,7 @@ func TestWaitForServerProcessExitChecksOnceAtDeadline(t *testing.T) {
 }
 
 func TestServerExitWaitAllowsWindowWatcherShutdownMargin(t *testing.T) {
+	t.Parallel()
 	if serverExitWaitTimeout <= windowWatcherShutdownTimeout {
 		t.Fatalf(
 			"server exit wait %s must exceed watcher shutdown bound %s",
@@ -346,6 +350,7 @@ func TestPrepareRunningServerReplacementKeepsServerWithoutSnapshot(
 }
 
 func TestPrepareRunningServerReplacementNoopsForCurrentVersion(t *testing.T) {
+	t.Parallel()
 	outcome, err := prepareRunningServerReplacement(
 		"current",
 		runningServerStatus{version: monkeyMuxVersion},
@@ -374,6 +379,7 @@ func TestPrepareRunningServerReplacementForceRequiresSnapshotForCurrentVersion(t
 }
 
 func TestKeepRespondingServerBeforeReplacement(t *testing.T) {
+	t.Parallel()
 	shutdown := &ensureServerReplacement{oldPID: pidRecord{pid: 10}}
 	legacy := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true}
 	native := &ensureServerReplacement{oldPID: pidRecord{pid: 10}, legacyHandoff: true, keepOldProcess: true}
@@ -1143,6 +1149,7 @@ func TestInstallSessionLockFileIsNeverEmpty(t *testing.T) {
 // clearAbandonedPIDFile must not delete a file that became valid while it was
 // being considered.
 func TestClearAbandonedPIDFileKeepsRepopulatedFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "monkeymux-test.lock")
 
@@ -1172,6 +1179,7 @@ func TestClearAbandonedPIDFileKeepsRepopulatedFile(t *testing.T) {
 }
 
 func TestReadPIDRecordReportsFileTimestamp(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "monkeymux-test.pid")
 	if err := os.WriteFile(path, []byte("4321\n"), 0o600); err != nil {
@@ -1194,6 +1202,7 @@ func TestReadPIDRecordReportsFileTimestamp(t *testing.T) {
 }
 
 func TestProcessImageMatching(t *testing.T) {
+	t.Parallel()
 	// The helper installs under ~/.monkeyssh, so the install path contains the
 	// name of the session from the original bug report. Ownership must come
 	// from the --session value, never from a substring of the command line.

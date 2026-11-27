@@ -18,6 +18,7 @@ func programStatusText(text string) string {
 }
 
 func TestParseProgramStatusBody(t *testing.T) {
+	t.Parallel()
 	longMsg := base64.RawStdEncoding.EncodeToString([]byte(strings.Repeat("m", 2049)))
 	for _, test := range []struct {
 		name   string
@@ -144,6 +145,7 @@ func TestParseProgramStatusBody(t *testing.T) {
 }
 
 func TestParseProgramStatusQuery(t *testing.T) {
+	t.Parallel()
 	if _, _, query, ok := parseProgramStatusBody("?"); !query || !ok {
 		t.Fatalf("query = %v, ok = %v; want a feature-detection query", query, ok)
 	}
@@ -159,6 +161,7 @@ func TestParseProgramStatusQuery(t *testing.T) {
 }
 
 func TestProgramStatusReportsReplaceTheirRecord(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeTerminalMetadataLocked([]byte(programStatusOsc(
 		"state=working:app=deploy:progress=10:msg=" + programStatusText("pushing"),
@@ -172,6 +175,7 @@ func TestProgramStatusReportsReplaceTheirRecord(t *testing.T) {
 }
 
 func TestProgramStatusChildrenInheritAppAndClearWithParent(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeTerminalMetadataLocked([]byte(
 		programStatusOsc("state=working:app=deploy") +
@@ -205,6 +209,7 @@ func TestProgramStatusChildrenInheritAppAndClearWithParent(t *testing.T) {
 }
 
 func TestProgramStatusEvictsLeastRecentlyUpdatedRecord(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	for index := 0; index <= programStatusMaxRecords; index++ {
 		window.observeTerminalMetadataLocked([]byte(programStatusOsc(
@@ -227,6 +232,7 @@ func TestProgramStatusEvictsLeastRecentlyUpdatedRecord(t *testing.T) {
 }
 
 func TestProgramStatusPromptAndResetEndRecords(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeTerminalMetadataLocked([]byte(
 		programStatusOsc("state=working") +
@@ -261,6 +267,7 @@ func TestProgramStatusPromptAndResetEndRecords(t *testing.T) {
 // RIS, prompts and reports apply in the order they were written, also when
 // they share one read.
 func TestProgramStatusResetAppliesInByteOrder(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("program-status-ris")
 	window := &muxWindow{id: "@1", name: "sh", lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
@@ -597,6 +604,7 @@ func TestProgramStatusReporterOwnedByTheWindowProcess(t *testing.T) {
 }
 
 func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("program-status-query")
 	pty := &recordingPty{}
 	window := &muxWindow{id: "@1", name: "claude", pty: pty, lastActivity: time.Now()}
@@ -621,6 +629,7 @@ func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {
 // answered once, in either OSC form; the attached terminal decodes UTF-8 and
 // could not answer a C1 one.
 func TestProgramStatusQueryIsAnsweredOnlyWhenStripped(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("program-status-query-split")
 	pty := &recordingPty{}
 	window := &muxWindow{id: "@1", name: "claude", pty: pty, lastActivity: time.Now()}
@@ -654,6 +663,7 @@ func TestProgramStatusQueryIsAnsweredOnlyWhenStripped(t *testing.T) {
 // no terminal is showing, the device-attributes answer comes from the
 // client's capability hint, so the OSC 7501 reply must be queued ahead of it.
 func TestProgramStatusReplyPrecedesDeviceAttributesInBackgroundWindow(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("program-status-background")
 	pty := &recordingPty{}
 	background := &muxWindow{id: "@2", index: 1, name: "claude", pty: pty, lastActivity: time.Now()}
@@ -680,6 +690,7 @@ func TestProgramStatusReplyPrecedesDeviceAttributesInBackgroundWindow(t *testing
 // idle at startup, working and done per turn, blocked on a permission prompt,
 // idle once it was rejected, and clear on /exit.
 func TestClaudeCodeProgramStatusSession(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("program-status-claude")
 	control := newControlRecorder(server)
 	server.controls[newControlClient(control)] = struct{}{}
@@ -717,6 +728,7 @@ func TestClaudeCodeProgramStatusSession(t *testing.T) {
 }
 
 func TestProgramStatusSnapshotJSON(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeTerminalMetadataLocked([]byte(programStatusOsc("state=working:progress=0")))
 	encoded, err := json.Marshal(window.programStatusSummaryLocked().snapshot())
@@ -729,6 +741,7 @@ func TestProgramStatusSnapshotJSON(t *testing.T) {
 }
 
 func TestRestoreHistoryDropsProgramStatus(t *testing.T) {
+	t.Parallel()
 	history := []byte("before" + programStatusOsc("state=working:app=claude-code") +
 		"\x1b]7501;state=done\x07after")
 	if got := string(stripTerminalProgressFromRestoreHistory(history)); got != "beforeafter" {

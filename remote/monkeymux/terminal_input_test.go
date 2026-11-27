@@ -8,6 +8,7 @@ import (
 )
 
 func TestEncodeTerminalResponsesForWin32InputMode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string
@@ -71,6 +72,7 @@ func win32EncodeSequence(sequence string) string {
 }
 
 func TestEncodeTerminalInputForWin32InputMode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string
@@ -111,6 +113,7 @@ func TestEncodeTerminalInputForWin32InputMode(t *testing.T) {
 }
 
 func TestEncodeBracketedPasteInputForWin32InputMode(t *testing.T) {
+	t.Parallel()
 	input := "\x1b[200~hello\x1b[?62;4c\x1b[201~"
 	want := win32InputModeEscapeCharacterEvent + "[200~hello" +
 		win32InputModeEscapeCharacterEvent + "[?62;4c" +
@@ -127,6 +130,7 @@ func TestEncodeBracketedPasteInputForWin32InputMode(t *testing.T) {
 }
 
 func TestStripWin32InputModeRequests(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		prev      string
@@ -200,6 +204,7 @@ func TestStripWin32InputModeRequests(t *testing.T) {
 }
 
 func TestWin32InputModeRequestStripperWriteHandlesSplitAcrossWrites(t *testing.T) {
+	t.Parallel()
 	var sink bytes.Buffer
 	stripper := newWin32InputModeRequestStripper(&sink)
 	// A win32-input-mode request split across two writes must still be removed
@@ -216,6 +221,7 @@ func TestWin32InputModeRequestStripperWriteHandlesSplitAcrossWrites(t *testing.T
 }
 
 func TestWin32InputModeRequestStripperFlushEmitsUnterminatedCarry(t *testing.T) {
+	t.Parallel()
 	var sink bytes.Buffer
 	stripper := newWin32InputModeRequestStripper(&sink)
 	// A chunk ending on a partial request prefix is buffered, not emitted...
@@ -242,6 +248,7 @@ func TestWin32InputModeRequestStripperFlushEmitsUnterminatedCarry(t *testing.T) 
 }
 
 func TestSplitBracketedPasteActionsStayClassified(t *testing.T) {
+	t.Parallel()
 	client := &attachClient{}
 
 	first := client.routeInput([]byte("abc\x1b[20"))
@@ -263,6 +270,7 @@ func TestSplitBracketedPasteActionsStayClassified(t *testing.T) {
 }
 
 func TestEscapeImmediatelyBeforePastePreservesActionOrder(t *testing.T) {
+	t.Parallel()
 	client := &attachClient{}
 	input := []byte("\x1b\x1b[200~hello\x1b[201~x")
 
@@ -285,6 +293,7 @@ func TestEscapeImmediatelyBeforePastePreservesActionOrder(t *testing.T) {
 }
 
 func TestAmbiguousPasteStartFlushesAsOrdinaryInput(t *testing.T) {
+	t.Parallel()
 	passthrough := make(chan []byte, 1)
 	claims := make(chan uint64, 1)
 	client := &attachClient{
@@ -322,6 +331,7 @@ func TestAmbiguousPasteStartFlushesAsOrdinaryInput(t *testing.T) {
 }
 
 func TestLateSplitPasteStartAfterTimeoutStaysOrdinary(t *testing.T) {
+	t.Parallel()
 	flushed := make(chan []byte, 1)
 	client := &attachClient{
 		inputPassthrough: func(data []byte) {
@@ -353,6 +363,7 @@ func TestLateSplitPasteStartAfterTimeoutStaysOrdinary(t *testing.T) {
 }
 
 func TestInjectInputControlPreservesBracketedPaste(t *testing.T) {
+	t.Parallel()
 	const paste = "\x1b[200~/tmp/image.png\x1b[201~ "
 	for _, test := range []struct {
 		name  string
@@ -379,6 +390,7 @@ func TestInjectInputControlPreservesBracketedPaste(t *testing.T) {
 }
 
 func TestWriteWindowBareEscape(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		win32 bool
@@ -416,6 +428,7 @@ func (p *consoleModeRecordingPty) virtualTerminalInputEnabled() (bool, error) {
 }
 
 func TestConsoleInputModeChangesAndProbeFailure(t *testing.T) {
+	t.Parallel()
 	pty := &consoleModeRecordingPty{}
 	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
 	server := newMuxServer("test")
@@ -446,6 +459,7 @@ func TestConsoleInputModeChangesAndProbeFailure(t *testing.T) {
 	}
 }
 func TestConsoleReaderInputPolicy(t *testing.T) {
+	t.Parallel()
 	const reply = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
 	const paste = "\x1b[200~hello\x1b[201~"
 	for _, test := range []struct {
@@ -488,6 +502,7 @@ func TestConsoleReaderInputPolicy(t *testing.T) {
 }
 
 func TestNativeConsolePasteFilterAcrossEverySplit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, input, want string }{
 		{"plain", "\x1b[200~hello\x1b[201~ ", "hello "},
 		{"unicode", "\x1b[200~héllo 🐒\x1b[201~", "héllo 🐒"},
@@ -518,6 +533,7 @@ func TestNativeConsolePasteFilterAcrossEverySplit(t *testing.T) {
 }
 
 func TestNativePasteCharacterEventsPreserveRepeatsAndSplitUnicode(t *testing.T) {
+	t.Parallel()
 	const input = "\x1b[200~aa🐒\r\n\t\x1b[201~"
 	const up = "\x1b[0;0;0;0;0;1_"
 	const want = "\x1b[0;0;97;1;0;1_" + up + "\x1b[0;0;97;1;0;1_" + up +
@@ -542,6 +558,7 @@ func TestNativePasteCharacterEventsPreserveRepeatsAndSplitUnicode(t *testing.T) 
 }
 
 func TestNativePasteChunksUseOneModeQuery(t *testing.T) {
+	t.Parallel()
 	pty := &consoleModeRecordingPty{}
 	window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
 	server := newMuxServer("test")
@@ -563,6 +580,7 @@ func TestNativePasteChunksUseOneModeQuery(t *testing.T) {
 }
 
 func TestNativeConsoleRoutedResponseForms(t *testing.T) {
+	t.Parallel()
 	for _, reply := range []string{
 		"\x1b]11;rgb:ff/ff/ff\a", "\x1b]11;rgb:ff/ff/ff\x9c",
 		"\x9d11;rgb:ff/ff/ff\x1b\\", "\x9d11;rgb:ff/ff/ff\x9c",
@@ -595,6 +613,7 @@ func TestNativeConsoleRoutedResponseForms(t *testing.T) {
 }
 
 func TestNativeConsoleStreamingResponsePreservesUserInput(t *testing.T) {
+	t.Parallel()
 	for _, framing := range [][2]string{{"\x1b]52;c;", "\x1b\\"}, {"\x9d52;c;", "\x9c"}, {"\x90!|", "\x1b\\"}} {
 		pty := &consoleModeRecordingPty{}
 		window := &muxWindow{id: "@1", pty: pty, win32InputMode: true}
@@ -637,6 +656,7 @@ func TestNativeConsoleStreamingResponsePreservesUserInput(t *testing.T) {
 }
 
 func TestNativeResponseFilterPreservesSplitUTF8(t *testing.T) {
+	t.Parallel()
 	const text = "\xc2\x9dtext\xc2\x90text\xc2\x9c"
 	for split := 0; split <= len(text); split++ {
 		pty := &consoleModeRecordingPty{}

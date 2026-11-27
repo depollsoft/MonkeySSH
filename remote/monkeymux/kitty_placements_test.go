@@ -30,6 +30,7 @@ func kittyPlacementKeys(window *muxWindow) []string {
 const kittyPixelRoot = "f=32,s=1,v=1;/wAA/w=="
 
 func TestKittyRelativePlacementsReplayAfterTheirImages(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
@@ -53,6 +54,7 @@ func TestKittyRelativePlacementsReplayAfterTheirImages(t *testing.T) {
 }
 
 func TestKittyRelativePlacementsNeedAVirtualRootAndAPlacementID(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
@@ -72,6 +74,7 @@ func TestKittyRelativePlacementsNeedAVirtualRootAndAPlacementID(t *testing.T) {
 }
 
 func TestKittyRelativePlacementsFollowTheClientChecks(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	var stream strings.Builder
 	for id := 1; id <= 11; id++ {
@@ -100,6 +103,7 @@ func TestKittyRelativePlacementsFollowTheClientChecks(t *testing.T) {
 }
 
 func TestKittyPlacementsGoWithTheirParents(t *testing.T) {
+	t.Parallel()
 	setup := func() *muxWindow {
 		window := &muxWindow{id: "@1"}
 		window.observeKittyGraphicsLocked([]byte(
@@ -141,6 +145,7 @@ func TestKittyPlacementsGoWithTheirParents(t *testing.T) {
 }
 
 func TestKittyRelativePlacementFromATransmitAndDisplayRoot(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=T,U=1,i=1,c=2,r=1," + kittyPixelRoot + "\x1b\\" +
@@ -159,6 +164,7 @@ func TestKittyRelativePlacementFromATransmitAndDisplayRoot(t *testing.T) {
 }
 
 func TestKittyPlacementsOnARootVirtualPlacementGoWithIt(t *testing.T) {
+	t.Parallel()
 	for name, command := range map[string]string{
 		"retransmit":      "\x1b_Ga=T,U=1,i=1,p=5," + kittyPixelRoot + "\x1b\\",
 		"delete by id":    "\x1b_Ga=d,d=i,i=1\x1b\\",
@@ -194,6 +200,7 @@ func TestKittyPlacementsOnARootVirtualPlacementGoWithIt(t *testing.T) {
 }
 
 func TestKittyAlternateScreenPlacementsFollowTheClientClears(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": true}}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b[?1049h" +
@@ -219,6 +226,7 @@ func TestKittyAlternateScreenPlacementsFollowTheClientClears(t *testing.T) {
 }
 
 func TestKittyDeleteKeepsAnImageWhoseNamedPlacementIsMissing(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=5," + kittyPixelRoot + "\x1b\\" +
@@ -240,6 +248,7 @@ func TestKittyDeleteKeepsAnImageWhoseNamedPlacementIsMissing(t *testing.T) {
 }
 
 func TestKittyTransientImagesAreEvictedFirst(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	var stream strings.Builder
 	stream.WriteString("\x1b_Ga=t,i=1,N=1," + kittyPixelRoot + "\x1b\\")
@@ -261,6 +270,7 @@ func TestKittyTransientImagesAreEvictedFirst(t *testing.T) {
 }
 
 func TestKittyErrorRepliesAreTerminalResponses(t *testing.T) {
+	t.Parallel()
 	for payload, want := range map[string]bool{
 		"Gi=1;OK":                         true,
 		"Gi=1;ENOTSUP: graphics disabled": true,
@@ -297,6 +307,7 @@ func kittyPlacementWindow(t *testing.T, child string) *muxWindow {
 }
 
 func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
+	t.Parallel()
 	// The child sits one column right and one row down of the placeholder
 	// origin (2, 4): 0-based row 3, columns 5 and 6, so 1-based y=4, x=6..7.
 	for _, tc := range []struct {
@@ -369,6 +380,7 @@ func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
 // of its whole buffer, the scrollback included, so a positional delete
 // matches a relative placement there too.
 func TestKittyPositionalDeletesPlaceChildrenOfRootsInTheScrollback(t *testing.T) {
+	t.Parallel()
 	// Image 2 relative to root's virtual placement, after cells are written
 	// to a 4-row screen.
 	window := func(t *testing.T, cells, root, child string) *muxWindow {
@@ -439,6 +451,7 @@ func observeKittyChunk(window *muxWindow, chunk string) {
 }
 
 func TestKittyPositionalDeletesSeeTheScreenAtTheCommand(t *testing.T) {
+	t.Parallel()
 	// The child is at 0-based row 3, column 5: 1-based 4;6.
 	window := kittyPlacementWindow(t, "H=1,V=1,c=1,r=1")
 	observeKittyChunk(window, "\x1b[H\x1b_Ga=d,d=c\x1b\\\x1b[4;6H")
@@ -460,6 +473,7 @@ func TestKittyPositionalDeletesSeeTheScreenAtTheCommand(t *testing.T) {
 }
 
 func TestKittyNaturallySizedPlacementsAreDroppedWhenADeleteMayReachThem(t *testing.T) {
+	t.Parallel()
 	// Sized by its own pixels the child may span cells to the right of and
 	// below its first one: 1-based x=8 on its row could be one of them.
 	window := kittyPlacementWindow(t, "H=1,V=1")
@@ -478,6 +492,7 @@ func TestKittyNaturallySizedPlacementsAreDroppedWhenADeleteMayReachThem(t *testi
 }
 
 func TestKittyScreenSwitchSplitAcrossChunks(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
 	window.observeKittyGraphicsLocked([]byte("prompt\x1b[?1049"))
 	window.privateModes["1049"] = true
@@ -497,6 +512,7 @@ func TestKittyScreenSwitchSplitAcrossChunks(t *testing.T) {
 }
 
 func TestKittyMissingParentPlacementIsARejection(t *testing.T) {
+	t.Parallel()
 	window := kittyPlacementWindow(t, "H=1")
 	window.observeKittyGraphicsLocked([]byte(
 		// Image 3 is stored but has no placement: ENOPARENT.
@@ -524,6 +540,7 @@ func TestKittyMissingParentPlacementIsARejection(t *testing.T) {
 }
 
 func TestKittyDeletesOnTheOtherScreenKeepPlacements(t *testing.T) {
+	t.Parallel()
 	window := kittyPlacementWindow(t, "H=1,V=1")
 	window.privateModes = map[string]bool{"1049": true}
 	window.observeKittyGraphicsLocked([]byte(
@@ -535,6 +552,7 @@ func TestKittyDeletesOnTheOtherScreenKeepPlacements(t *testing.T) {
 }
 
 func TestKittyRejectedParentKeepsThePlacement(t *testing.T) {
+	t.Parallel()
 	window := kittyPlacementWindow(t, "H=1")
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
@@ -548,6 +566,7 @@ func TestKittyRejectedParentKeepsThePlacement(t *testing.T) {
 }
 
 func TestKittyReparentedPlacementsReplayParentsFirst(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
@@ -567,6 +586,7 @@ func TestKittyReparentedPlacementsReplayParentsFirst(t *testing.T) {
 }
 
 func TestKittyPlacementsKeepTheScreenEachCommandRanOn(t *testing.T) {
+	t.Parallel()
 	// Main-screen placements and the switch to the alternate screen arrive in
 	// one chunk: the placements belong to the main screen.
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": true}}
@@ -591,6 +611,7 @@ func TestKittyPlacementsKeepTheScreenEachCommandRanOn(t *testing.T) {
 }
 
 func TestKittyReplayCarriesTheVirtualRootOfARelativePlacement(t *testing.T) {
+	t.Parallel()
 	// Image 1's own transmission makes the virtual root, which has no
 	// placeholder cell yet, and four newer images push it out of the
 	// recency replay.
@@ -615,6 +636,7 @@ func TestKittyReplayCarriesTheVirtualRootOfARelativePlacement(t *testing.T) {
 }
 
 func TestKittyKeptPlacementsKeepOnlyTheKeysAReplayNeeds(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
@@ -643,6 +665,7 @@ func TestKittyKeptPlacementsKeepOnlyTheKeysAReplayNeeds(t *testing.T) {
 }
 
 func TestKittyDeletedRootVirtualPlacementStaysDeleted(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, setup, delete string }{
 		{"by id", "", "\x1b_Ga=d,d=i,i=1\x1b\\"},
 		{"by its placement id", "", "\x1b_Ga=d,d=i,i=1,p=5\x1b\\"},
@@ -697,6 +720,7 @@ func TestKittyDeletedRootVirtualPlacementStaysDeleted(t *testing.T) {
 }
 
 func TestKittyRootVirtualPlacementFollowsTheClient(t *testing.T) {
+	t.Parallel()
 	// Once a display command replaces the root's virtual placement, the
 	// root's placement id names nothing on the client.
 	window := &muxWindow{id: "@1"}
@@ -726,6 +750,7 @@ func TestKittyRootVirtualPlacementFollowsTheClient(t *testing.T) {
 // leaves the virtual placement a main-screen image's own transmission made,
 // and the placements hanging off it, for the main screen and its replay.
 func TestKittyAlternateScreenDeleteKeepsTheMainScreenRoot(t *testing.T) {
+	t.Parallel()
 	for _, delete := range []string{
 		"\x1b_Ga=d,d=i,i=1\x1b\\",
 		"\x1b_Ga=d,d=i,i=1,p=5\x1b\\",
@@ -772,6 +797,7 @@ func TestKittyAlternateScreenDeleteKeepsTheMainScreenRoot(t *testing.T) {
 // while the other screen shows, it only stores the image, so a relative
 // placement under it there is rejected by the client as MonkeyMux rejects it.
 func TestKittyRootReplaysItsVirtualPlacementOnlyOnItsScreen(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=T,U=1,i=1,c=1,r=1," + kittyPixelRoot + "\x1b\\"))

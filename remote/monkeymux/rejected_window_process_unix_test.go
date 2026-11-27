@@ -26,6 +26,7 @@ func (p rejectedReapGate) Wait() error {
 }
 
 func TestRejectedWindowCleanupTerminatesProcessGroup(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("live process-group inspection requires Darwin or Linux")
 	}
@@ -52,6 +53,7 @@ exit 0`,
 		{name: "fast-exit", script: "exit 0", exited: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ready := filepath.Join(t.TempDir(), "ready")
 			cmd := exec.Command("/bin/sh", "-c", tc.script, "sh", ready)
 			windowPty, proc, err := startWindow(cmd, 80, 24)

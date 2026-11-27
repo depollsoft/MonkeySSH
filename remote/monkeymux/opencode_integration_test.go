@@ -80,6 +80,7 @@ func TestOpenCodeV2ConfigPreservesUserPlugins(t *testing.T) {
 }
 
 func TestOpenCodeJSONCEscapedStrings(t *testing.T) {
+	t.Parallel()
 	input := []byte(`{"plugins":[{"package":"file:///some/\"quoted\"/path","options":{"literal":"//not a comment,}",},},],/* comment */}`)
 	var parsed map[string]any
 	if err := json.Unmarshal(normalizeOpenCodeJSONC(input), &parsed); err != nil {

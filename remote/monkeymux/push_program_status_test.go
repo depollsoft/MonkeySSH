@@ -10,6 +10,7 @@ import (
 )
 
 func TestProgramStatusPushKind(t *testing.T) {
+	t.Parallel()
 	status := func(state, kind string) programStatusSummary {
 		return programStatusSummary{state: state, kind: kind}
 	}
@@ -225,6 +226,7 @@ func TestPushPayloadNamesTheWindowsAgent(t *testing.T) {
 // A push names the window as the window bar does, skipping titles that say
 // nothing the notification does not already.
 func TestPushWindowTitle(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)

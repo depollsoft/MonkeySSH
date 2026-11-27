@@ -42,6 +42,7 @@ func vtKittyUploads(ids ...int) string {
 }
 
 func TestVTKittyDirectPlacementIsAnchoredToItsCell(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 10)
 	s.Write([]byte("\x1b_Ga=t,f=100,i=1,q=2;AAAA\x1b\\" + vtKittyPlaceAt))
 	assertVTKittyPlaced(t, s, "1/1@4,2")
@@ -72,6 +73,7 @@ func TestVTKittyDirectPlacementIsAnchoredToItsCell(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementsReplaceAndAccumulateAsInTheClient(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 10)
 	// The same image and placement id move the placement; without one,
 	// each command adds another.
@@ -91,6 +93,7 @@ func TestVTKittyDirectPlacementsReplaceAndAccumulateAsInTheClient(t *testing.T) 
 }
 
 func TestVTKittyDirectPlacementsAreBounded(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 10)
 	s.Write([]byte(vtKittyUploads(1)))
 	for i := 1; i <= vtKittyPlacementLimit+3; i++ {
@@ -115,6 +118,7 @@ func TestVTKittyDirectPlacementsAreBounded(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementFollowsItsLineIntoTheScrollback(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 4)
 	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H\n\n"))
 	assertVTKittyPlaced(t, s, "1/@-1,2")
@@ -151,6 +155,7 @@ func TestVTKittyDirectPlacementFollowsItsLineIntoTheScrollback(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementFollowsRegionScrollsAsKitty(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		stream string
@@ -219,6 +224,7 @@ func TestVTKittyDirectPlacementFollowsRegionScrollsAsKitty(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementFollowsInsertedAndDeletedLines(t *testing.T) {
+	t.Parallel()
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 8)
 		s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;8r\x1b[4;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[7;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
@@ -246,6 +252,7 @@ func TestVTKittyDirectPlacementFollowsInsertedAndDeletedLines(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementFollowsInsertedAndDeletedCells(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;6H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[2;3H\x1b[2@"))
 	assertVTKittyPlaced(t, s, "1/@1,7")
@@ -263,6 +270,7 @@ func TestVTKittyDirectPlacementFollowsInsertedAndDeletedCells(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementSurvivesErases(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(vtKittyUploads(1) + "text\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\" +
 		"\x1b[2J\x1b[K\x1b[2;1H\x1b[2K\x1b[5X\x1b[1J\x1b[J"))
@@ -273,6 +281,7 @@ func TestVTKittyDirectPlacementSurvivesErases(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementDeletesMatchTheClient(t *testing.T) {
+	t.Parallel()
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 10)
 		s.Write([]byte(vtKittyUploads(1, 2, 3) +
@@ -320,6 +329,7 @@ func TestVTKittyDirectPlacementDeletesMatchTheClient(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementsGoWithResetsAndScreenClears(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(vtKittyUploads(1) + "\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h" + vtKittyUploads(2, 3) +
 		"\x1b[2;2H\x1b_Ga=p,i=2,C=1\x1b\\"))
@@ -342,6 +352,7 @@ func TestVTKittyDirectPlacementsGoWithResetsAndScreenClears(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	// The last chunk displays the image, at the cursor as it is then.
 	s.Write([]byte("\x1b_Ga=T,f=100,i=1,C=1,m=1;AAAA\x1b\\\x1b[3;4H\x1b_Gm=1;AAAA\x1b\\"))
@@ -360,6 +371,7 @@ func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
 // A placement right after a wide glyph comes back to its cell after a
 // one-column screen, which keeps the glyph whole, as in the client.
 func TestVTKittyPlacementAfterAWideGlyphSurvivesOneColumn(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(5, 4)
 	s.Write([]byte(vtKittyUploads(1) + "a界\x1b_Ga=p,i=1,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "1/@0,3")
@@ -371,6 +383,7 @@ func TestVTKittyPlacementAfterAWideGlyphSurvivesOneColumn(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 4)
 	// "0123456789ABCDE" wraps after 9; the placement is on C, the 13th cell.
 	s.Write([]byte(vtKittyUploads(1) + "0123456789ABCDE\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H"))
@@ -393,6 +406,7 @@ func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 }
 
 func TestVTKittyAltPlacementGoesWithTheRowsAShrinkGivesUp(t *testing.T) {
+	t.Parallel()
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 8)
 		s.Write([]byte("\x1b[?1049h" + vtKittyUploads(1, 2, 3, 4) +
@@ -420,6 +434,7 @@ func TestVTKittyAltPlacementGoesWithTheRowsAShrinkGivesUp(t *testing.T) {
 }
 
 func TestVTKittyDirectPlacementsSurviveAClone(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b_Ga=p,i=1,C=1\x1b\\"))
 	clone := s.Clone()
@@ -433,6 +448,7 @@ func TestVTKittyDirectPlacementsSurviveAClone(t *testing.T) {
 // frame leaves the cursor, the saved cursor and the modes as it would
 // without them.
 func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
+	t.Parallel()
 	stream := vtKittyUploads(1) + "\x1b[?6h\x1b[2;9r" + // origin mode inside a region
 		"\x1b[2;3Hhello\x1b7\x1b[1;5H\x1b(0q\x1b[4h\x1b[31m" +
 		"\x1b[4;3H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\\x1b[6;2H"
@@ -487,6 +503,7 @@ func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
 }
 
 func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;2H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h" +
 		vtKittyUploads(2) + "\x1b[3;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
@@ -518,6 +535,7 @@ func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testin
 // The client keeps a blank row an image is anchored to through a shrink, as
 // if it held text, and scrolls the top row away instead.
 func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 6)
 	s.Write([]byte("a\r\nb\r\nc" +
 		"\x1b_Ga=t,f=100,i=1,q=2;AAAA\x1b\\" +
@@ -539,6 +557,7 @@ func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
 // the client runs it: an image it does not hold on the screen shown is
 // answered with ENOENT and placed nowhere, so the model records nothing.
 func TestVTKittyRecordsOnlyImagesTheClientHolds(t *testing.T) {
+	t.Parallel()
 	const upload = "\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\"
 	const place = "\x1b_Ga=p,i=7,c=2,r=3\x1b\\X"
 	const placeAgain = "\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b[2;1H\x1b_Ga=p,i=7,p=2,C=1\x1b\\\x1b[H"
@@ -588,6 +607,7 @@ func TestVTKittyRecordsOnlyImagesTheClientHolds(t *testing.T) {
 // or the command says C=1. The model cannot follow either for certain, so
 // it keeps its cursor and leaves it unknown.
 func TestVTKittyPlacementLeavesTheCursorUnknown(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 6)
 	s.Write([]byte("\x1b[H\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=7,c=2,r=3\x1b\\"))
 	if row, col := s.CursorPosition(); row != 0 || col != 0 {
@@ -602,6 +622,7 @@ func TestVTKittyPlacementLeavesTheCursorUnknown(t *testing.T) {
 // TestVTKittyReplayCommandNamesKeysInDecimal: the client reads 0x keys as
 // numbers, and a replay names them in decimal.
 func TestVTKittyReplayCommandNamesKeysInDecimal(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 6)
 	s.Write([]byte("\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=0x7,c=0x2,r=1,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "7/@0,0")
@@ -614,6 +635,7 @@ func TestVTKittyReplayCommandNamesKeysInDecimal(t *testing.T) {
 // placement until the retransmission of its image ends: until then the
 // client still has it, and keeps its row through a shrink.
 func TestVTKittyRetransmissionReplacesPlacementsWhenItCompletes(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 6)
 	s.Write([]byte("A\r\nB\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
 		"\x1b[6;1H\x1b_Ga=p,i=1,c=2,r=1,C=1\x1b\\\x1b[2;2H" +
@@ -635,6 +657,7 @@ func TestVTKittyRetransmissionReplacesPlacementsWhenItCompletes(t *testing.T) {
 // by its in-cell offset (X=, Y=) inside the cells c= and r= give it, so the
 // offset never reaches another cell, for deletes and region scrolls alike.
 func TestVTKittyPixelOffsetsKeepThePlacementSpan(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 6)
 	s.Write([]byte("\x1b_Ga=t,i=42," + kittyPixelRoot + "\x1b\\" +
 		"\x1b[3;2H\x1b_Ga=p,i=42,c=2,r=1,X=1,Y=1,C=1\x1b\\" +
@@ -655,6 +678,7 @@ func TestVTKittyPixelOffsetsKeepThePlacementSpan(t *testing.T) {
 // int.tryParse, which takes whitespace, a sign, a 0x prefix and any 64-bit
 // value.
 func TestVTKittyNumbersReadAsTheClientReadsThem(t *testing.T) {
+	t.Parallel()
 	for value, want := range map[string]int64{
 		" 12": 12, "+5": 5, "0x10": 16, "-3": -3, "007": 7, "4294967295": 4294967295,
 	} {
@@ -677,6 +701,7 @@ func TestVTKittyNumbersReadAsTheClientReadsThem(t *testing.T) {
 // virtual, placement is not placed again, so no phantom placement keeps a
 // blank row through a shrink that the client gives up.
 func TestVTKittyFreedImageLeavesNoRowToKeep(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 5)
 	s.Write([]byte("\x1b_Ga=t,i=1,U=1,c=1,r=1,p=1," + kittyPixelRoot + "\x1b\\" +
 		"\x1b_Ga=d,d=I,i=1,p=1\x1b\\\x1b[5;1H\x1b_Ga=p,i=1,C=1\x1b\\" +
@@ -693,6 +718,7 @@ func TestVTKittyFreedImageLeavesNoRowToKeep(t *testing.T) {
 // the placements the client kept away from their cells, so it deletes all of
 // them; one that does not scroll deletes only the images it places again.
 func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(40, 10)
 	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;1H\x1b_Ga=p,i=1,C=1,q=2\x1b\\\x1b[4;1H\x1b_Ga=p,i=2,C=1,q=2\x1b\\"))
 	onlyOne := func(id string) bool { return id == "1" }
@@ -712,6 +738,7 @@ func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
 // image again. It forgets those that ended further back than a replay
 // reaches.
 func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
+	t.Parallel()
 	stream := "ab\x1b_Ga=T,I=9,f=100,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\cd" +
 		"\x1b_Ga=t,i=3,f=100;AAAA\x1b\\\x1b_Ga=p,i=3,c=2,C=1\x1b\\" +
 		"\x1b[?1049h\x1b_Ga=T,i=4,f=100;AAAA\x1b\\\x1b[?1049l\x1b_Ga=T,U=1,i=5,c=1,r=1,f=100;AAAA\x1b\\"
@@ -752,6 +779,7 @@ func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
 // the next command is lost until the main screen's column is set again: by
 // CR, CUP or RIS, or by DECRC of a cursor saved while the model had it.
 func TestVTKittyColumnLostUntilSetAgain(t *testing.T) {
+	t.Parallel()
 	const image = "\x1b_Ga=T,i=6,f=100,c=4,r=1;AAAA\x1b\\"
 	for _, c := range []struct {
 		name, between string

@@ -22,6 +22,7 @@ func (w auditAcpWriteCloser) Write(data []byte) (int, error) { return w.write(da
 func (w auditAcpWriteCloser) Close() error                   { return nil }
 
 func TestAcpAuditFastProviderResponse(t *testing.T) {
+	t.Parallel()
 	for _, method := range []string{"initialize", "session/new", "session/load", "session/prompt"} {
 		t.Run(method, func(t *testing.T) {
 			bridge := newTestAcpBridge()
@@ -102,6 +103,7 @@ func auditAcpStatus(t *testing.T, peer net.Conn, reader *bufio.Reader) *acpBridg
 }
 
 func TestAcpAuditFailedProviderWriteDoesNotRetainRequest(t *testing.T) {
+	t.Parallel()
 	for _, method := range []string{"initialize", "session/new", "session/load", "session/resume", "session/fork", "session/prompt"} {
 		for _, failOn := range []string{"payload", "newline"} {
 			t.Run(method+"/"+failOn, func(t *testing.T) {
@@ -128,6 +130,7 @@ func TestAcpAuditFailedProviderWriteDoesNotRetainRequest(t *testing.T) {
 }
 
 func TestAcpAuditSessionSetupCommitsOnlySuccessfulResponse(t *testing.T) {
+	t.Parallel()
 	responses := []struct {
 		name      string
 		body      string
@@ -190,6 +193,7 @@ func TestAcpAuditSessionSetupCommitsOnlySuccessfulResponse(t *testing.T) {
 }
 
 func TestAcpAuditStopInterruptsBlockedProviderWrite(t *testing.T) {
+	t.Parallel()
 	input, peer := net.Pipe()
 	defer peer.Close()
 	bridge := newTestAcpBridge()
@@ -230,6 +234,7 @@ func (r *auditAcpExhaustedReader) Read([]byte) (int, error) {
 }
 
 func TestAcpAuditOversizedFrameDoesNotDrain(t *testing.T) {
+	t.Parallel()
 	tail := &auditAcpExhaustedReader{}
 	reader := bufio.NewReader(io.MultiReader(strings.NewReader(strings.Repeat("x", acpMaxFrameBytes+4096)), tail))
 	if _, err := readBoundedAcpLine(reader); err == nil {
@@ -251,6 +256,7 @@ func TestAcpAuditReplayTrimWithinBudgetDoesNotAllocate(t *testing.T) {
 }
 
 func TestAcpAuditIncompleteHandshakeExpires(t *testing.T) {
+	t.Parallel()
 	for _, stopped := range []bool{false, true} {
 		t.Run(fmt.Sprint(stopped), func(t *testing.T) {
 			bridge := newTestAcpBridge()
@@ -278,6 +284,7 @@ func TestAcpAuditIncompleteHandshakeExpires(t *testing.T) {
 }
 
 func TestAcpAuditHandshakeDeadlineClearedAfterHello(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	peer, reader, conn := auditAcpAttach(t, bridge)
 	assertTestDeadline(t, conn.readDeadlines, false)

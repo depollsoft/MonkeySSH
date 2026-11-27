@@ -30,6 +30,7 @@ func inlineAgentChrome(width int) string {
 // cell Hermes left the cursor on, so the cursor has to stay on that cell for
 // the erase to take the whole old input area and nothing above it.
 func TestVTScreenRotationKeepsInlineAgentTranscript(t *testing.T) {
+	t.Parallel()
 	const wide, narrow = 30, 13
 	s := newTerminalScreen(wide, 8)
 	for line := 1; line <= 9; line++ {
@@ -67,6 +68,7 @@ func vtScrollbackTexts(s *terminalScreen) []string {
 }
 
 func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 3)
 	s.Write([]byte("0123456789abcd\r\nnext"))
 	if got := s.TextRows(); !slices.Equal(got, []string{"0123456789", "abcd", "next"}) ||
@@ -101,6 +103,7 @@ func TestVTScreenReflowKeepsLogicalLines(t *testing.T) {
 // An erased row no longer continues the one above it, so widening must not
 // join it, or bring back the text that was on it.
 func TestVTScreenEraseEndsSoftWrap(t *testing.T) {
+	t.Parallel()
 	for _, erase := range []string{"\x1b[2K", "\x1b[J", "\x1b[1J"} {
 		s := newTerminalScreen(4, 3)
 		s.Write([]byte("abcdefgh\x1b[2;1H" + erase))
@@ -117,6 +120,7 @@ func TestVTScreenEraseEndsSoftWrap(t *testing.T) {
 // A wide glyph that does not fit in the one cell left on a line moves to the
 // next line whole, as in the client's reflow.
 func TestVTScreenReflowMovesWideGlyphWhole(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(3, 3)
 	s.Write([]byte("abc界"))
 	s.Resize(4, 3)
@@ -134,6 +138,7 @@ func TestVTScreenReflowMovesWideGlyphWhole(t *testing.T) {
 // so a client painted from it reflows exactly as the model on the next width
 // change.
 func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
+	t.Parallel()
 	build := func(autowrap bool) *terminalScreen {
 		s := newTerminalScreen(8, 4)
 		s.Write([]byte("one\r\n0123456789abcdefghij\r\nab界cd\r\n"))
@@ -169,6 +174,7 @@ func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
 // there. A wide glyph that did not fit is reproduced the way it arose; a
 // wrap from a never-written cell is reached by a tab, which writes nothing.
 func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(4, 1)
 	s.Write([]byte("abc界"))
 	replica := vtRoundTrip(t, s)
@@ -207,6 +213,7 @@ func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 // that erases with it, as the model does. The default cells the stored line
 // leaves out must not come back coloured.
 func TestVTScreenFrameKeepsDefaultPaddingAfterWrappedScrollback(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(3, 2)
 	s.Write([]byte("\x1b[44mabcdefghij\r\nx\r\nx"))
 	s.Resize(4, 2)
@@ -229,6 +236,7 @@ func TestVTScreenFrameKeepsDefaultPaddingAfterWrappedScrollback(t *testing.T) {
 // The replay restores insert mode before the frame. Painting under it would
 // shift the glyph a soft wrap prints instead of painting over it.
 func TestVTScreenFrameSoftWrapsUnderInsertMode(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(6, 3)
 	s.Write([]byte("abcdefg\x1b[2Ci\x1b[4h"))
 	if !s.main.wrapped[1] || !s.insertMode {
@@ -241,6 +249,7 @@ func TestVTScreenFrameSoftWrapsUnderInsertMode(t *testing.T) {
 // the client: after the text on its line, or past the last column with the
 // wrap still pending when that text filled the line.
 func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 5)
 	s.Write([]byte("0123456789abcdef\r\nxy"))
 	s.Resize(8, 5)
@@ -283,6 +292,7 @@ func TestVTScreenReflowKeepsCursorOnItsCell(t *testing.T) {
 // different row starts a line of its own, as in the client, so a later width
 // change does not join it to its new neighbour.
 func TestVTScreenRowMovesEndSoftWraps(t *testing.T) {
+	t.Parallel()
 	for name, seq := range map[string]string{
 		"region scroll up":   "\x1b[2;4r\x1b[S\x1b[r",
 		"delete line":        "\x1b[2;1H\x1b[M",
@@ -310,6 +320,7 @@ func TestVTScreenRowMovesEndSoftWraps(t *testing.T) {
 // An erased row that still continues the text above it (ECH keeps the wrap)
 // stays after that text when a reflow joins them.
 func TestVTScreenReflowKeepsErasedContinuationAfterItsText(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(4, 3)
 	s.Write([]byte("abcde\x1b[2;1H\x1b[4X"))
 	if !s.main.wrapped[1] {
@@ -325,6 +336,7 @@ func TestVTScreenReflowKeepsErasedContinuationAfterItsText(t *testing.T) {
 // wrap pending, so the next glyph starts the next line, with or without a
 // resize in between.
 func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
+	t.Parallel()
 	for _, tab := range []string{"\t", "\x1b[I"} {
 		for _, resize := range []bool{false, true} {
 			s := newTerminalScreen(8, 3)
@@ -346,6 +358,7 @@ func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
 // half it leaves on the next, and a widening gives it its second half back,
 // which fills a row of two columns.
 func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
+	t.Parallel()
 	cells := func(s *terminalScreen) []string {
 		var rows []string
 		var decoder vtLineDecoder
@@ -417,6 +430,7 @@ func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
 // not by printing a space there, so a client painted from the frame lays the
 // line out the same on the next resize.
 func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
+	t.Parallel()
 	for _, tab := range []string{"\t", "\x1b[I"} {
 		s := newTerminalScreen(8, 3)
 		s.Write([]byte("hi" + tab))
@@ -447,6 +461,7 @@ func vtPromptMarks(s *terminalScreen) []uint8 {
 // stays on the row that holds the start of that row's text, as in the client,
 // unless a prompt starts on that row already.
 func TestVTScreenReflowKeepsMarksInsideLogicalLines(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(6, 8)
 	s.Write([]byte(osc133("A;click_events=2") + "12345678" + osc133("P;k=s") + "> " + osc133("B") + "ab"))
 	if got := s.main.prompt[:3]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptSecondary, vtPromptNone}) {

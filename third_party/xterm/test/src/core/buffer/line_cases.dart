@@ -1,0 +1,222 @@
+import 'package:test/test.dart';
+import 'package:xterm/xterm.dart';
+
+void registerBufferLineTests() {
+  group('BufferLine.eraseRange()', () {
+    test('empty ranges do not access or erase adjacent cells', () {
+      final line = BufferLine(4);
+      line.setCell(0, 0x754c, 2, CursorStyle());
+      for (final index in [0, 1, 4]) {
+        line.eraseRange(index, index, CursorStyle());
+      }
+      expect(line.getCodePoint(0), 0x754c);
+    });
+
+    for (final start in [0, 1]) {
+      test('erasing wide cell half $start clears both halves and anchors', () {
+        final terminal = Terminal()..resize(4, 2);
+        terminal.write('\x1b[41m界Z');
+        final line = terminal.buffer.lines[0];
+        final left = line.createAnchor(0);
+        final right = line.createAnchor(1);
+        final outside = line.createAnchor(2);
+        final physicalPlacement = line.createAnchor(0);
+        final erasedStyle = CursorStyle(background: 42);
+
+        line.eraseRange(start, start + 1, erasedStyle,
+            preservedAnchors: {physicalPlacement});
+
+        for (var x = 0; x < 2; x++) {
+          expect(line.getContent(x), 0);
+          expect(line.getBackground(x), 42);
+        }
+        expect(line.getCodePoint(2), 'Z'.codeUnitAt(0));
+        expect(left.attached, isFalse);
+        expect(right.attached, isFalse);
+        expect(outside.attached, isTrue);
+        expect(physicalPlacement.attached, isTrue);
+      });
+    }
+  });
+
+  group('BufferLine.getText()', () {
+    test('should return the text', () {
+      final terminal = Terminal();
+      terminal.write('Hello World');
+      expect(terminal.buffer.lines[0].getText(), 'Hello World');
+    });
+
+    test('getText() should support wide characters', () {
+      final text = '😀😁😂🤣😃';
+      final terminal = Terminal();
+      terminal.write(text);
+      expect(terminal.buffer.lines[0].getText(), equals(text));
+    });
+
+    test('can specify a range', () {
+      final terminal = Terminal();
+      terminal.write('Hello World');
+      expect(terminal.buffer.lines[0].getText(0, 5), 'Hello');
+    });
+
+    test('can handle invalid ranges', () {
+      final terminal = Terminal();
+      terminal.write('Hello World');
+      expect(terminal.buffer.lines[0].getText(0, 100), 'Hello World');
+    });
+
+    test('can handle negative ranges', () {
+      final terminal = Terminal();
+      terminal.write('Hello World');
+      expect(terminal.buffer.lines[0].getText(-100, 100), 'Hello World');
+    });
+
+    test('can handle reversed ranges', () {
+      final terminal = Terminal();
+      terminal.write('Hello World');
+      expect(terminal.buffer.lines[0].getText(5, 0), '');
+    });
+
+    test('reads cells skipped by cursor movement as spaces', () {
+      final terminal = Terminal();
+      terminal.write('Hello\x1b[1CWorld\x1b[3Cagain');
+      expect(terminal.buffer.lines[0].getText(), 'Hello World   again');
+    });
+
+    test('reads erased cells between text as spaces', () {
+      final terminal = Terminal();
+      terminal.write('Hello_World\x1b[6G\x1b[X');
+      expect(terminal.buffer.lines[0].getText(), 'Hello World');
+    });
+
+    test('keeps leading blank cells before text', () {
+      final terminal = Terminal();
+      terminal.write('\x1b[3CHello');
+      expect(terminal.buffer.lines[0].getText(), '   Hello');
+      expect(terminal.buffer.lines[0].getText(1), '  Hello');
+    });
+
+    test('drops trailing blank cells', () {
+      final terminal = Terminal();
+      terminal.write('Hello\x1b[3CWorld');
+      expect(terminal.buffer.lines[0].getText(0, 7), 'Hello');
+    });
+
+    test('does not read the second half of a wide character as a space', () {
+      final terminal = Terminal();
+      terminal.write('界\x1b[1CZ界Y');
+      expect(terminal.buffer.lines[0].getText(), '界 Z界Y');
+      expect(terminal.buffer.lines[0].getText(1), ' Z界Y');
+      expect(terminal.buffer.lines[0].getText(5), 'Y');
+    });
+  });
+
+  group('BufferLine.getTrimmedLength()', () {
+    test('can get trimmed length', () {
+      final line = BufferLine(10);
+
+      final text = 'ABCDEF';
+
+      for (var i = 0; i < text.length; i++) {
+        line.setCodePoint(i, text.codeUnitAt(i));
+      }
+
+      expect(line.getTrimmedLength(), equals(text.length));
+    });
+
+    test('can get trimmed length with wide characters', () {
+      final terminal = Terminal();
+      final text = '😀😁😂🤣😃';
+
+      terminal.write(text);
+
+      expect(terminal.buffer.lines[0].getTrimmedLength(), equals(text.length));
+    });
+
+    test('can handle length larger than the line', () {
+      final line = BufferLine(10);
+
+      final text = 'ABCDEF';
+
+      for (var i = 0; i < text.length; i++) {
+        line.setCodePoint(i, text.codeUnitAt(i));
+      }
+
+      expect(line.getTrimmedLength(1000), equals(text.length));
+    });
+
+    test('can handle negative start', () {
+      final line = BufferLine(10);
+
+      final text = 'ABCDEF';
+
+      for (var i = 0; i < text.length; i++) {
+        line.setCodePoint(i, text.codeUnitAt(i));
+      }
+
+      expect(line.getTrimmedLength(-1000), equals(0));
+    });
+  });
+
+  group('BufferLine.resize', () {
+    test('can resize', () {
+      final line = BufferLine(10);
+
+      final text = 'ABCDEF';
+
+      for (var i = 0; i < text.length; i++) {
+        line.setCodePoint(i, text.codeUnitAt(i));
+      }
+
+      line.resize(20);
+
+      expect(line.length, equals(20));
+    });
+
+    test(
+      'full visible erase after shrink preserves retained grapheme extras and style hints',
+      () {
+        final line = BufferLine(10);
+        final styled = CursorStyle()
+          ..setBackgroundColorRgb(10, 20, 30)
+          ..setUnderline();
+        line.setCell(7, 0x65, 1, styled);
+        line.addGraphemeExtra(7, 0x0301);
+
+        // Shrink below column 7, erase the entire visible portion with empty
+        // default style, then regrow back to 10.
+        line.resize(5);
+        line.eraseRange(0, 5, CursorStyle.empty);
+        line.resize(10);
+
+        expect(line.getGraphemeExtras(7), equals([0x0301]));
+        expect(line.hasNonDefaultBackground, isTrue);
+        expect(line.hasUnderline, isTrue);
+
+        // Erasing through the entire backing storage resets hints and extras.
+        line.eraseRange(0, 10, CursorStyle.empty);
+        expect(line.getGraphemeExtras(7), isEmpty);
+        expect(line.hasNonDefaultBackground, isFalse);
+        expect(line.hasUnderline, isFalse);
+      },
+    );
+  });
+
+  group('Buffer.createAnchor', () {
+    test('works', () {
+      final terminal = Terminal();
+      final line = terminal.buffer.lines[3];
+      final anchor = line.createAnchor(5);
+
+      terminal.insertLines(5);
+      expect(anchor.x, 5);
+      expect(anchor.y, 8);
+
+      terminal.buffer.clear();
+      expect(line.attached, false);
+      expect(anchor.attached, false);
+      expect(() => anchor.y, throwsStateError);
+      expect(() => anchor.offset, throwsStateError);
+    });
+  });
+}

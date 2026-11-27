@@ -167,6 +167,7 @@ func TestPushRegistrationWithoutSessionIsReplacedOnAttach(t *testing.T) {
 }
 
 func TestPushSessionKeyIsStableAndOpaque(t *testing.T) {
+	t.Parallel()
 	salt := make([]byte, 32)
 	work := pushSessionKey(salt, "work")
 	if work != pushSessionKey(salt, "work") {

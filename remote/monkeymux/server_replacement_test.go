@@ -8,6 +8,7 @@ import (
 )
 
 func TestStopServerForReplacement(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		exits        []bool
@@ -57,6 +58,7 @@ func TestStopServerForReplacement(t *testing.T) {
 }
 
 func TestTerminateConfirmedServerRechecksFailedSignal(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name           string
 		before, after  pidOwnership
@@ -93,6 +95,7 @@ func TestTerminateConfirmedServerRechecksFailedSignal(t *testing.T) {
 }
 
 func TestConfirmedServerProcessRejectsReusedOrUnknownIdentity(t *testing.T) {
+	t.Parallel()
 	original := processSnapshot{known: true, running: true, started: time.Unix(100, 1000)}
 	for _, tc := range []struct {
 		name      string
