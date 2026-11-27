@@ -227,6 +227,7 @@ class _JumpReconnectFixture {
 
   static Future<_JumpReconnectFixture> create({
     required Future<SSHForwardChannel> Function(int forwardCount) forward,
+    bool hangTargetAuth = false,
   }) async {
     final fixture = _JumpReconnectFixture();
     final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -278,6 +279,9 @@ class _JumpReconnectFixture {
               );
               if (isJump) return;
               await onPasswordRequest!();
+              if (hangTargetAuth) {
+                return Completer<void>().future;
+              }
               return Future<void>.error(
                 SSHAuthAbortError('Connection closed before authentication'),
               );
@@ -288,12 +292,15 @@ class _JumpReconnectFixture {
     return fixture;
   }
 
-  Future<SshConnectionResult> connect() => service.connect(
-    const SshConnectionConfig(
+  Future<SshConnectionResult> connect({
+    Duration connectionTimeout = const Duration(seconds: 30),
+  }) => service.connect(
+    SshConnectionConfig(
       hostname: 'target.example.com',
       port: 22,
       username: 'target',
-      jumpHost: SshConnectionConfig(
+      connectionTimeout: connectionTimeout,
+      jumpHost: const SshConnectionConfig(
         hostname: 'jump.example.com',
         port: 22,
         username: 'jump',
@@ -310,6 +317,7 @@ typedef _ServerAuthStep = Future<void> Function(
 /// A trusted host whose successive connections play [steps] in order.
 class _ReconnectFixture {
   final clients = <_MockSshClient>[];
+  final sockets = <_FakeHostKeySocket>[];
   final socketTimeouts = <Duration?>[];
   int socketCount = 0;
   late final SshService service;
@@ -318,6 +326,13 @@ class _ReconnectFixture {
     hostname: 'reconnect.example.com',
     port: 22,
     username: 'tester',
+  );
+
+  static const shortTimeoutConfig = SshConnectionConfig(
+    hostname: 'reconnect.example.com',
+    port: 22,
+    username: 'tester',
+    connectionTimeout: Duration(milliseconds: 40),
   );
 
   static Future<_ReconnectFixture> create({
@@ -348,7 +363,9 @@ class _ReconnectFixture {
         if (refusedSockets.contains(fixture.socketCount)) {
           throw const SocketException('Connection refused');
         }
-        return _FakeHostKeySocket(hostKeyBytes);
+        final socket = _FakeHostKeySocket(hostKeyBytes);
+        fixture.sockets.add(socket);
+        return socket;
       },
       clientFactory:
           (
@@ -9269,6 +9286,256 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(result.success, isFalse);
       expect(fixture.socketCount, 2);
+      expect(promptCalls, 1);
+    });
+
+    test('reconnects with the typed password when authentication times out '
+        'after answering', () async {
+      final challenges = <SshAuthChallenge>[];
+      final sentPasswords = <String?>[];
+      final progress = <String>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async {
+          challenges.add(challenge);
+          return ['typed-secret'];
+        },
+        steps: [
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Completer<void>().future;
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+        onProgress: (update) => progress.add(update.message),
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 2);
+      expect(fixture.sockets.first.destroyed, isTrue);
+      expect(fixture.sockets.last.destroyed, isFalse);
+      expect(sentPasswords, ['typed-secret', 'typed-secret']);
+      expect(challenges, hasLength(1));
+      expect(progress, contains('Authentication timed out; reconnecting…'));
+      verify(fixture.clients.first.close).called(1);
+      verifyNever(fixture.clients.last.close);
+    });
+
+    test('reconnects after a silent authentication timeout when the server '
+        'later accepts key auth', () async {
+      var promptCalls = 0;
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async {
+          promptCalls++;
+          return ['unlock-secret'];
+        },
+        refusedSockets: {2},
+        reconnectWindow: const Duration(seconds: 5),
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            // Server silently pivots root without sending FIN/RST.
+            return Completer<void>().future;
+          },
+          (_, _) async {},
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 3);
+      expect(fixture.clients, hasLength(2));
+      expect(promptCalls, 1);
+    });
+
+    test('reconnects after a timeout and again when the retry drops during '
+        'unlock', () async {
+      var promptCalls = 0;
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async {
+          promptCalls++;
+          return ['typed-secret'];
+        },
+        steps: [
+          // Attempt 1 stalls while the Mac sleeps during password entry.
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Completer<void>().future;
+          },
+          // Attempt 2 replays the password, unlocks FileVault, and drops.
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          // Attempt 3 signs in with the saved key once macOS finishes booting.
+          (_, _) async {},
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 3);
+      expect(promptCalls, 1);
+      expect(sentPasswords, ['typed-secret', 'typed-secret']);
+    });
+
+    test('reconnects after a drop and again when the retry times out '
+        'silently', () async {
+      var promptCalls = 0;
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async {
+          promptCalls++;
+          return ['typed-secret'];
+        },
+        steps: [
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Completer<void>().future;
+          },
+          (_, _) async {},
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 3);
+      expect(promptCalls, 1);
+      expect(sentPasswords, ['typed-secret', 'typed-secret']);
+    });
+
+    test('reconnects a host with a stored password when authentication times '
+        'out', () async {
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        steps: [
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Completer<void>().future;
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        const SshConnectionConfig(
+          hostname: 'reconnect.example.com',
+          port: 22,
+          username: 'tester',
+          password: 'stored-pass',
+          connectionTimeout: Duration(milliseconds: 40),
+        ),
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 2);
+      expect(sentPasswords, ['stored-pass', 'stored-pass']);
+    });
+
+    for (final (label, answer, step)
+        in <(String, List<String>?, _ServerAuthStep)>[
+          (
+            'nothing was asked',
+            ['typed-secret'],
+            (_, _) => Completer<void>().future,
+          ),
+          (
+            'the user declined the prompt',
+            null,
+            (onPassword, _) async {
+              expect(await onPassword!(), isNull);
+              return Completer<void>().future;
+            },
+          ),
+        ]) {
+      test('does not reconnect on timeout when $label', () async {
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (_) async => answer,
+          steps: [step],
+        );
+
+        final result = await fixture.service.connect(
+          _ReconnectFixture.shortTimeoutConfig,
+        );
+
+        expect(result.success, isFalse);
+        expect(result.error, 'Authentication timed out');
+        expect(fixture.socketCount, 1);
+        expect(fixture.sockets.first.destroyed, isTrue);
+      });
+    }
+
+    test('does not reconnect on timeout through a jump connection that '
+        'dropped', () async {
+      final fixture = await _JumpReconnectFixture.create(
+        hangTargetAuth: true,
+        forward: (_) => Future.value(
+          _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+        ),
+      );
+      when(() => fixture.jumpClient.isClosed).thenReturn(true);
+
+      final result = await fixture.connect(
+        connectionTimeout: const Duration(milliseconds: 40),
+      );
+
+      expect(result.success, isFalse);
+      expect(result.error, 'Authentication timed out');
+      expect(fixture.forwardCount, 1);
+    });
+
+    test('reconnects only once on repeated authentication timeouts', () async {
+      var promptCalls = 0;
+      Future<void> answerThenHang(
+        SSHPasswordRequestHandler? onPassword,
+        SSHUserInfoRequestHandler? _,
+      ) async {
+        await onPassword!();
+        return Completer<void>().future;
+      }
+
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (_) async {
+          promptCalls++;
+          return ['typed-secret'];
+        },
+        steps: [answerThenHang, answerThenHang],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.shortTimeoutConfig,
+      );
+
+      expect(result.success, isFalse);
+      expect(result.error, 'Authentication timed out');
+      expect(fixture.socketCount, 2);
+      expect(fixture.sockets.first.destroyed, isTrue);
+      expect(fixture.sockets.last.destroyed, isTrue);
       expect(promptCalls, 1);
     });
 

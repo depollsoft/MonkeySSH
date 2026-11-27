@@ -2096,6 +2096,7 @@ class SshService {
   }) async {
     SSHClient? client;
     SSHSocket? unownedSocket;
+    _InteractiveAuthGate? authGate;
     var connected = false;
     final dependentClients = <SSHClient>[];
     SSHClient? jumpClient;
@@ -2136,8 +2137,9 @@ class SshService {
         },
       );
       final verificationService = _createHostKeyVerificationService(config);
-      final authGate = _InteractiveAuthGate();
-      final authHandlers = _buildInteractiveAuthHandlers(config, authGate);
+      final gate = _InteractiveAuthGate();
+      authGate = gate;
+      final authHandlers = _buildInteractiveAuthHandlers(config, gate);
 
       final identities =
           parsedIdentities ?? await guard(_parseIdentities(config));
@@ -2231,6 +2233,7 @@ class SshService {
       }
 
       var reconnectedAfterDrop = false;
+      var reconnectedAfterTimeout = false;
 
       Future<void> authenticate(
         SSHSocket socket,
@@ -2268,12 +2271,12 @@ class SshService {
         try {
           await _awaitAuthentication(
             createdClient,
-            authGate,
+            gate,
             timeout: config.connectionTimeout,
             isJumpHost: isJumpHost,
             cancellationToken: cancellationToken,
           );
-          authGate.forgetTypedPassword();
+          gate.forgetTypedPassword();
         } on SSHAuthAbortError catch (error) {
           // A Mac unlocked over SSH after a restart (FileVault) drops the
           // connection once the password is in, restarts every process and
@@ -2282,9 +2285,9 @@ class SshService {
           // user do it. A prompt still open is waited for, so its answer is
           // not lost.
           if (reconnectedAfterDrop || !_isDroppedConnection(error)) rethrow;
-          await guard(authGate.idle);
+          await guard(gate.idle);
           // A dropped jump connection can't carry the reconnect.
-          if (!authGate.answeredLastPrompt || (jumpClient?.isClosed ?? false)) {
+          if (!gate.answeredLastPrompt || (jumpClient?.isClosed ?? false)) {
             rethrow;
           }
           reconnectedAfterDrop = true;
@@ -2297,8 +2300,36 @@ class SshService {
             },
           );
           client = null;
-          await createdClient.close();
-          authGate.startRetry();
+          await _closeSshClients(createdClient, const []);
+          gate.startRetry();
+          await authenticate(await reopenEndpointSocket(), verify);
+        } on TimeoutException {
+          // A freshly rebooted Mac in FileVault pre-boot can enter maintenance
+          // sleep while the password prompt is open (stalling the existing
+          // TCP socket in retransmit backoff when the password is submitted),
+          // or tear down sshd and its network during pivot-root without
+          // delivering a TCP FIN/RST. Either leaves authentication hanging
+          // until this timeout. Destroy the stalled socket so close() cannot
+          // block on unsent bytes, then reconnect once.
+          socket.destroy();
+          if (reconnectedAfterTimeout ||
+              !gate.answeredLastPrompt ||
+              (jumpClient?.isClosed ?? false)) {
+            rethrow;
+          }
+          reconnectedAfterTimeout = true;
+          DiagnosticsLogService.instance.info(
+            'ssh.connect',
+            'auth_reconnect_after_timeout',
+            fields: {'isJumpHost': isJumpHost},
+          );
+          client = null;
+          await _closeSshClients(createdClient, const []);
+          report(
+            SshConnectionState.connecting,
+            'Authentication timed out; reconnecting…',
+          );
+          gate.startRetry();
           await authenticate(await reopenEndpointSocket(), verify);
         }
       }
@@ -2488,6 +2519,7 @@ class SshService {
       );
       return SshConnectionResult(success: false, error: error);
     } finally {
+      authGate?.forgetTypedPassword();
       if (!connected) {
         try {
           unownedSocket?.destroy();
