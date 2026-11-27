@@ -989,9 +989,13 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 	return exec.Command(shell, "-NoLogo", "-Command", command) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 }
 
-// programResumeSupported reports whether a reported OSC 7577 command can be
-// run here.
-func programResumeSupported() bool { return true }
+// programResumeRunnable reports whether a reported OSC 7577 command can be
+// run here: its program must be found now, because a window whose process
+// cannot start is not restored at all.
+func programResumeRunnable(resume programResumeState) bool {
+	_, err := exec.LookPath(resume.Argv[0])
+	return err == nil
+}
 
 // programResumeCommand starts a reported OSC 7577 command as the window's own
 // process, with each element as one argument. No shell reads it, and a bare

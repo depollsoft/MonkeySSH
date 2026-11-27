@@ -687,9 +687,11 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 	return cmd
 }
 
-// programResumeSupported reports whether a reported OSC 7577 command can be
-// run here. It needs a POSIX shell: other shells restore the usual way.
-func programResumeSupported() bool {
+// programResumeRunnable reports whether a reported OSC 7577 command can be
+// run here. It needs a POSIX shell: other shells restore the usual way. A
+// program that is missing shows the shell's error in the restored window.
+func programResumeRunnable(resume programResumeState) bool {
+	_ = resume
 	return isPosixShell(defaultShellPath())
 }
 

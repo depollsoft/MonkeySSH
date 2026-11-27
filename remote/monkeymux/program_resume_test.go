@@ -410,11 +410,16 @@ func TestChooseProgramResumePrefersAnAncestor(t *testing.T) {
 }
 
 func TestRestoreRunsTheReportedProgramResumeCommand(t *testing.T) {
-	if !programResumeSupported() {
+	// The test binary is a program every platform can find.
+	program, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !programResumeRunnable(programResumeState{Argv: []string{program}}) {
 		t.Skip("the default shell cannot run a reported command")
 	}
 	directory := t.TempDir()
-	resume := &programResumeState{Argv: []string{"nvim", "-S", "session file.vim"}, Cwd: directory}
+	resume := &programResumeState{Argv: []string{program, "-S", "session file.vim"}, Cwd: directory}
 
 	options := createWindowOptionsForRestore(restoreWindowState{
 		CurrentCommand: "nvim",
@@ -429,7 +434,7 @@ func TestRestoreRunsTheReportedProgramResumeCommand(t *testing.T) {
 	// An agent MonkeyMux has no session for comes back the way it reported.
 	options = createWindowOptionsForRestore(restoreWindowState{
 		AgentTool:     "claude",
-		ProgramResume: &programResumeState{Argv: []string{"claude", "--resume", "abc"}},
+		ProgramResume: &programResumeState{Argv: []string{program, "--resume", "abc"}},
 	}, false)
 	if options.programResume == nil || options.command != "" || options.agentTool != "claude" {
 		t.Fatalf("options = %+v, want the agent's reported command", options)

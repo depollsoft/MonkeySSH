@@ -428,8 +428,7 @@ func processHasAncestorIn(processes map[int]processInfo, pid int, owners map[int
 // session, because it also restores the launch flags and the session binding.
 func programResumeForRestore(state restoreWindowState, agentTool string) *programResumeState {
 	resume := state.ProgramResume
-	if resume == nil || len(resume.Argv) == 0 || len(resume.Argv) > programResumeMaxArgvElements ||
-		!programResumeSupported() {
+	if resume == nil || len(resume.Argv) == 0 || len(resume.Argv) > programResumeMaxArgvElements {
 		return nil
 	}
 	if agentTool != "" && strings.TrimSpace(state.AgentSessionID) != "" {
@@ -444,6 +443,9 @@ func programResumeForRestore(state restoreWindowState, agentTool string) *progra
 		}
 	}
 	if resume.Cwd != "" && (!filepath.IsAbs(resume.Cwd) || !directoryExists(resume.Cwd)) {
+		return nil
+	}
+	if !programResumeRunnable(*resume) {
 		return nil
 	}
 	return resume

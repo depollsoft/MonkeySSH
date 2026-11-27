@@ -334,7 +334,7 @@ shell returns to a shell when the program ends. The command is not run when
 its directory is gone, when the default shell is not a POSIX shell, or when
 MonkeyMux already knows the agent session to resume, which also restores the
 agent's launch flags. On Windows the command starts directly as the window's
-process. Set `MONKEYMUX_PROGRAM_RESUME=0` in the server's environment to turn
+process, and only when its program is found. Set `MONKEYMUX_PROGRAM_RESUME=0` in the server's environment to turn
 the protocol off; windows then get no token.
 
 MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
