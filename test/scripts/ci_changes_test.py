@@ -548,12 +548,31 @@ class WorkflowContractsTest(unittest.TestCase):
             self.assertIn("github.ref == 'refs/heads/main'", jobs[name]['if'])
         # The payload cache is written from main, so that job stays enabled on push.
         self.assertNotIn("github.event_name != 'push'", jobs['monkeymux-assets']['if'])
-        # Apple builds warm on push when lockfiles move or cache-probe finds a cold cache.
+        # Apple builds and Windows pub warmer gate deps on their own platform so
+        # a single-platform Package.resolved push does not burn other platform slots.
         for platform in ['ios', 'macos']:
             condition = jobs[f'build-{platform}']['if']
             self.assertIn("github.event_name == 'push'", condition)
             self.assertIn(f"needs.cache-probe.outputs.warm_{platform} == 'true'", condition)
-            self.assertIn("needs.changes.outputs.deps == 'true'", condition)
+            self.assertIn(
+                f"(needs.changes.outputs.deps == 'true' && needs.changes.outputs.{platform} == 'true')",
+                condition,
+            )
+        self.assertIn(
+            "(needs.changes.outputs.deps == 'true' && needs.changes.outputs.windows == 'true')",
+            jobs['warm-windows-pub']['if'],
+        )
+        # Consumers of fetch-monkeymux-assets must download the artifact whenever
+        # monkeymux-assets ran (so a rebuild after a corrupt cache is always used).
+        for name in ['check', 'test', 'go-test', 'build-android', 'build-linux']:
+            fetch = next(
+                s for s in jobs[name]['steps']
+                if s.get('uses') == '$/.github/actions/fetch-monkeymux-assets'
+            )
+            self.assertEqual(
+                fetch['with']['source'],
+                "${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}",
+            )
 
     def test_pull_requests_skip_apple_and_windows_builds_without_native_changes(self):
         jobs = self.workflows['ci.yml']['jobs']

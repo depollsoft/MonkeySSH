@@ -143,7 +143,7 @@ jobs:
        needs.changes.outputs.go == 'true' ||
        (github.event_name == 'merge_group' && (needs.changes.outputs.ios == 'true' || needs.changes.outputs.macos == 'true' || needs.changes.outputs.windows == 'true')) ||
        (github.event_name == 'pull_request' && (needs.changes.outputs.ios_native == 'true' || needs.changes.outputs.macos_native == 'true' || needs.changes.outputs.windows_native == 'true')) ||
-       (github.event_name == 'push' && (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_ios == 'true' || needs.cache-probe.outputs.warm_macos == 'true')))
+       (github.event_name == 'push' && ((needs.changes.outputs.deps == 'true' && (needs.changes.outputs.ios == 'true' || needs.changes.outputs.macos == 'true')) || needs.cache-probe.outputs.warm_ios == 'true' || needs.cache-probe.outputs.warm_macos == 'true')))
     runs-on: ubicloud-standard-4
     timeout-minutes: 10
     steps:
@@ -237,7 +237,7 @@ jobs:
         background: true
         uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: $/.github/actions/flutter-setup
@@ -367,7 +367,7 @@ jobs:
         background: true
         uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: $/.github/actions/flutter-setup
@@ -524,7 +524,7 @@ jobs:
         background: true
         uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          source: ${{ matrix.name == 'linux' && needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - uses: actions/setup-go@v7.0.0
@@ -646,7 +646,7 @@ jobs:
         background: true
         uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       - name: Restore Android CMake cache
@@ -789,7 +789,8 @@ jobs:
       (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
       needs.monkeymux-assets.result == 'success' &&
       ((github.event_name == 'push' &&
-        (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_ios == 'true')) ||
+        ((needs.changes.outputs.deps == 'true' && needs.changes.outputs.ios == 'true') ||
+         needs.cache-probe.outputs.warm_ios == 'true')) ||
        (github.event_name != 'push' &&
         needs.changes.outputs.ios == 'true' &&
         (github.event_name != 'pull_request' || needs.changes.outputs.ios_native == 'true')))
@@ -918,7 +919,8 @@ jobs:
       (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
       needs.monkeymux-assets.result == 'success' &&
       ((github.event_name == 'push' &&
-        (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_macos == 'true')) ||
+        ((needs.changes.outputs.deps == 'true' && needs.changes.outputs.macos == 'true') ||
+         needs.cache-probe.outputs.warm_macos == 'true')) ||
        (github.event_name != 'push' &&
         needs.changes.outputs.macos == 'true' &&
         (github.event_name != 'pull_request' || needs.changes.outputs.macos_native == 'true')))
@@ -1018,7 +1020,8 @@ jobs:
       (needs.cache-probe.result == 'success' || needs.cache-probe.result == 'skipped') &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      (needs.changes.outputs.deps == 'true' || needs.cache-probe.outputs.warm_windows_pub == 'true')
+      ((needs.changes.outputs.deps == 'true' && needs.changes.outputs.windows == 'true') ||
+       needs.cache-probe.outputs.warm_windows_pub == 'true')
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -1137,7 +1140,7 @@ jobs:
         background: true
         uses: $/.github/actions/fetch-monkeymux-assets
         with:
-          source: ${{ needs.changes.outputs.monkeymux_cached == 'true' && 'cache' || 'artifact' }}
+          source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
       # Not awalsh128/cache-apt-pkgs-action: it pins actions/cache by the
