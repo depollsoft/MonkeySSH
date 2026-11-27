@@ -1,0 +1,15 @@
+# Scope code generation to the only file that uses Drift annotations so
+# `dart run build_runner build` does not scan all 800+ Dart files in the repo.
+# Add additional paths here if new @DriftDatabase / @DriftAccessor / part '*.g.dart'
+# sources are introduced.
+targets:
+  $default:
+    builders:
+      drift_dev:
+        generate_for:
+          include:
+            - lib/data/database/database.dart
+      source_gen:combining_builder:
+        generate_for:
+          include:
+            - lib/data/database/database.dart

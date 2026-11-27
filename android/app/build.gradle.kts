@@ -137,6 +137,21 @@ extensions.configure<ApplicationExtension>("android") {
     }
 
     buildTypes {
+        debug {
+            // Skip Crashlytics mapping-file upload on local debug builds when
+            // google-services.json is present.
+            if (hasGoogleServicesConfig) {
+                extensions.findByName("firebaseCrashlytics")?.let { ext ->
+                    ext.javaClass
+                        .methods
+                        .firstOrNull {
+                            it.name == "setMappingFileUploadEnabled" &&
+                                it.parameterCount == 1
+                        }
+                        ?.invoke(ext, false)
+                }
+            }
+        }
         release {
             if (hasCompleteReleaseSigningConfig) {
                 signingConfig = signingConfigs.getByName("release")

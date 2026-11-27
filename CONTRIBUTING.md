@@ -34,10 +34,9 @@ Be respectful and constructive in all interactions.
    ```bash
    git remote add upstream https://github.com/depoll/monkeyssh.git
    ```
-4. Install dependencies:
+4. Install git hooks and dependencies (builds/restores MonkeyMux assets and runs `flutter pub get` in parallel):
    ```bash
-   ./scripts/build_monkeymux_assets.sh
-   flutter pub get
+   ./scripts/setup.sh
    ```
 5. Run the app:
    ```bash
@@ -67,18 +66,23 @@ Be respectful and constructive in all interactions.
 
 4. Ensure local checks cover your change:
    ```bash
-   # Format code
-   dart format .
+   # Fast inner-loop check (changed files: parallel format, daemon-backed analyze, mapped tests)
+   ./scripts/dev_check.sh
 
-   # Analyze code
-   flutter analyze
+   # Or check the entire repository (parallel format across lib/ test/ tool/ + full analyze)
+   ./scripts/dev_check.sh --all --format --analyze
+
+   # Format only your source directories (avoid `dart format .` when build/ or third_party/ exist)
+   dart format lib test tool
+
+   # Regenerate Drift database code (scoped via build.yaml to lib/data/database/database.dart)
+   dart run build_runner build --delete-conflicting-outputs
 
    # Run tests relevant to the changed behavior
-   flutter test test/path/to/relevant_test.dart
+   flutter test --no-pub test/path/to/relevant_test.dart
    ```
 
-   Run the full `flutter test` suite locally for broad or high-risk changes.
-   CI runs the full suite for every pull request.
+   `scripts/setup.sh` installs delegating `pre-commit` and `pre-push` hooks backed by a per-worktree Dart analysis daemon (`scripts/dart_analyze_fast.py`). Run the full `flutter test --no-pub` suite locally for broad or high-risk changes. CI runs the full suite for every pull request.
 
 5. Commit your changes:
    ```bash
@@ -199,7 +203,7 @@ test: add unit tests for host repository
 
 ## Pull Request Process
 
-1. Ensure your PR targets the `develop` branch
+1. Ensure your PR targets the `main` branch
 2. Fill out the PR template completely
 3. Link any related issues
 4. Ensure CI checks pass
@@ -249,7 +253,11 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer  # Xcode 27.1
 Do not validate with side-by-side Xcode versions unless their iOS runtime is installed.
 
 ```bash
-flutter build apk --flavor private --release
+# Fast local single-ABI Android debug build (auto-detects JDK 17)
+./scripts/dev_check.sh --android-debug
+
+# Release flavor builds
+flutter build apk --flavor private --release --target-platform android-arm64
 flutter build apk --flavor production --release
 flutter build ios --flavor private --release --no-codesign
 flutter build ios --flavor production --release --no-codesign
