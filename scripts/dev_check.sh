@@ -177,11 +177,6 @@ if [[ "$mode" == "changed" ]]; then
 fi
 
 run_format() {
-  local format_flags=()
-  if [[ "$do_fix" == false ]]; then
-    format_flags+=(--output=none --set-exit-if-changed)
-  fi
-
   if [[ "$mode" == "all" ]]; then
     local format_dirs=()
     local dir
@@ -191,8 +186,13 @@ run_format() {
       fi
     done
     echo "Running parallel dart format across ${format_dirs[*]} ($FORMAT_WORKERS workers)..."
-    find "${format_dirs[@]}" -name '*.dart' -print0 \
-      | xargs -0 -n 64 -P "$FORMAT_WORKERS" dart format "${format_flags[@]}"
+    if [[ "$do_fix" == true ]]; then
+      find "${format_dirs[@]}" -name '*.dart' -print0 \
+        | xargs -0 -n 64 -P "$FORMAT_WORKERS" dart format
+    else
+      find "${format_dirs[@]}" -name '*.dart' -print0 \
+        | xargs -0 -n 64 -P "$FORMAT_WORKERS" dart format --output=none --set-exit-if-changed
+    fi
     return
   fi
 
@@ -201,7 +201,11 @@ run_format() {
     return
   fi
   echo "Running dart format on ${#changed_dart[@]} changed Dart file(s)..."
-  dart format "${format_flags[@]}" -- "${changed_dart[@]}"
+  if [[ "$do_fix" == true ]]; then
+    dart format -- "${changed_dart[@]}"
+  else
+    dart format --output=none --set-exit-if-changed -- "${changed_dart[@]}"
+  fi
 }
 
 run_analyze() {

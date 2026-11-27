@@ -186,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
             cmd = cmd[1:]
         if not cmd:
             raise SystemExit('--run requires a command after `--`')
+        if not files:
+            print(f'No *_test.dart files discovered under {test_root}.', file=sys.stderr)
+            return 1
         if not selected:
             print('No test files assigned to this shard; skipping.', file=sys.stderr)
             return 0

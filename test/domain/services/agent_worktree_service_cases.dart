@@ -470,637 +470,640 @@ void registerAgentWorktreeCoreTests() {
 }
 
 void registerAgentWorktreeShellTests(String shellPath) {
-  if (!File(shellPath).existsSync()) return;
-  group(
-    'against a real repository with $shellPath',
-    skip: Platform.isWindows,
-    () {
-      late Directory root;
-      late String home;
-      late String repository;
-      late _LocalShell shell;
-      const service = AgentWorktreeService();
+  final skipReason = Platform.isWindows
+      ? 'POSIX shell tests do not run on Windows'
+      : (!File(shellPath).existsSync() ? '$shellPath not available' : false);
+  group('against a real repository with $shellPath', skip: skipReason, () {
+    late Directory root;
+    late String home;
+    late String repository;
+    late _LocalShell shell;
+    const service = AgentWorktreeService();
 
-      Future<String> git(String directory, List<String> args) =>
-          _git(home, directory, args);
+    Future<String> git(String directory, List<String> args) =>
+        _git(home, directory, args);
 
-      late Directory templateRoot;
-      late String templateRepo;
+    late Directory templateRoot;
+    late String templateRepo;
 
-      setUpAll(() async {
-        templateRoot = await _createRoot();
-        final templateHome = templateRoot.resolveSymbolicLinksSync();
-        templateRepo = '$templateHome/repo';
-        await Directory('$templateRepo/packages/app').create(recursive: true);
-        await _git(templateHome, templateHome, ['init', '-q', 'repo']);
-        await File('$templateRepo/packages/app/README').writeAsString('hi\n');
-        await _git(templateHome, templateRepo, ['add', '.']);
-        await _git(templateHome, templateRepo, ['commit', '-q', '-m', 'init']);
-      });
+    setUpAll(() async {
+      templateRoot = await _createRoot();
+      final templateHome = templateRoot.resolveSymbolicLinksSync();
+      templateRepo = '$templateHome/repo';
+      await Directory('$templateRepo/packages/app').create(recursive: true);
+      await _git(templateHome, templateHome, ['init', '-q', 'repo']);
+      await File('$templateRepo/packages/app/README').writeAsString('hi\n');
+      await _git(templateHome, templateRepo, ['add', '.']);
+      await _git(templateHome, templateRepo, ['commit', '-q', '-m', 'init']);
+    });
 
-      tearDownAll(() async {
-        await templateRoot.delete(recursive: true);
-      });
+    tearDownAll(() async {
+      await templateRoot.delete(recursive: true);
+    });
 
-      setUp(() async {
-        root = await _createRoot();
-        home = root.resolveSymbolicLinksSync();
-        repository = '$home/repo';
-        _copyDirectorySync(Directory(templateRepo), Directory(repository));
-        shell = _LocalShell(shellPath, home: home);
-      });
+    setUp(() async {
+      root = await _createRoot();
+      home = root.resolveSymbolicLinksSync();
+      repository = '$home/repo';
+      _copyDirectorySync(Directory(templateRepo), Directory(repository));
+      shell = _LocalShell(shellPath, home: home);
+    });
 
-      tearDown(() async {
-        await root.delete(recursive: true);
-      });
+    tearDown(() async {
+      await root.delete(recursive: true);
+    });
 
-      var launches = 0;
-      Future<AgentWorktreeRecord> create({
-        String? repositoryPath,
-        String baseRef = 'HEAD',
-        AgentWorktreeLaunchOptions options = const AgentWorktreeLaunchOptions(),
-        bool withLaunchId = true,
-      }) => service.create(
-        shell,
-        hostId: 7,
-        repository: repositoryPath ?? repository,
-        baseRef: baseRef,
-        target: renderAgentWorktreeTarget(options, _values),
-        launchId: withLaunchId ? 'launch-${++launches}' : null,
+    var launches = 0;
+    Future<AgentWorktreeRecord> create({
+      String? repositoryPath,
+      String baseRef = 'HEAD',
+      AgentWorktreeLaunchOptions options = const AgentWorktreeLaunchOptions(),
+      bool withLaunchId = true,
+    }) => service.create(
+      shell,
+      hostId: 7,
+      repository: repositoryPath ?? repository,
+      baseRef: baseRef,
+      target: renderAgentWorktreeTarget(options, _values),
+      launchId: withLaunchId ? 'launch-${++launches}' : null,
+    );
+
+    Future<void> commit(String directory, String file, String message) async {
+      await File('$directory/$file').writeAsString('$message\n');
+      await git(directory, ['add', '.']);
+      await git(directory, ['commit', '-q', '-m', message]);
+    }
+
+    test('creates a worktree on a new branch beside the repository', () async {
+      final record = await create();
+
+      expect(record.branch, 'agent/claude-20261009-abc123');
+      expect(record.repository, repository);
+      expect(record.path, '$repository.worktrees/agent-claude-20261009-abc123');
+      expect(record.startDirectory, record.path);
+      expect(record.pending, isFalse);
+      expect(record.baseCommit, await git(repository, ['rev-parse', 'HEAD']));
+      expect(
+        await git(record.path, ['rev-parse', '--abbrev-ref', 'HEAD']),
+        record.branch,
+      );
+      expect(File('${record.path}/packages/app/README').existsSync(), isTrue);
+    });
+
+    test('starts in the subdirectory the repository path points at', () async {
+      final record = await create(repositoryPath: '$repository/packages/app');
+
+      expect(record.repository, repository);
+      expect(record.startDirectory, '${record.path}/packages/app');
+    });
+
+    test('expands a leading ~ to the host home directory', () async {
+      final record = await create(
+        repositoryPath: '~/repo',
+        options: const AgentWorktreeLaunchOptions(
+          pathTemplate: '~/trees/{name}',
+        ),
       );
 
-      Future<void> commit(String directory, String file, String message) async {
-        await File('$directory/$file').writeAsString('$message\n');
-        await git(directory, ['add', '.']);
-        await git(directory, ['commit', '-q', '-m', message]);
-      }
+      expect(record.path, '$home/trees/agent-claude-20261009-abc123');
+    });
 
-      test(
-        'creates a worktree on a new branch beside the repository',
-        () async {
-          final record = await create();
+    test('suffixes names when the branch or folder already exists', () async {
+      final first = await create();
+      await git(repository, ['branch', 'agent/claude-20261009-abc123-2']);
+      final second = await create();
+      await Directory('$repository.worktrees/agent-claude-20261009-abc123-4')
+          .create(recursive: true);
+      final third = await create();
 
-          expect(record.branch, 'agent/claude-20261009-abc123');
-          expect(record.repository, repository);
-          expect(
-            record.path,
-            '$repository.worktrees/agent-claude-20261009-abc123',
-          );
-          expect(record.startDirectory, record.path);
-          expect(record.pending, isFalse);
-          expect(
-            record.baseCommit,
-            await git(repository, ['rev-parse', 'HEAD']),
-          );
-          expect(
-            await git(record.path, ['rev-parse', '--abbrev-ref', 'HEAD']),
-            record.branch,
-          );
-          expect(
-            File('${record.path}/packages/app/README').existsSync(),
-            isTrue,
-          );
-        },
+      expect(first.branch, 'agent/claude-20261009-abc123');
+      expect(second.branch, 'agent/claude-20261009-abc123-3');
+      expect(second.path, endsWith('agent-claude-20261009-abc123-3'));
+      expect(third.branch, 'agent/claude-20261009-abc123-5');
+    });
+
+    test('suffixes a branch that would collide with nested branches', () async {
+      await git(repository, ['branch', 'agent/claude-20261009-abc123/sub']);
+
+      final record = await create();
+
+      expect(record.branch, 'agent/claude-20261009-abc123-2');
+    });
+
+    test('explains a branch that blocks the branch template', () async {
+      await git(repository, ['branch', 'agent']);
+
+      await expectLater(
+        create(),
+        _throwsKind(AgentWorktreeErrorKind.branchConflict),
       );
+      expect(Directory('$repository.worktrees').existsSync(), isFalse);
+    });
 
-      test(
-        'starts in the subdirectory the repository path points at',
-        () async {
-          final record = await create(
-            repositoryPath: '$repository/packages/app',
-          );
-
-          expect(record.repository, repository);
-          expect(record.startDirectory, '${record.path}/packages/app');
-        },
-      );
-
-      test('expands a leading ~ to the host home directory', () async {
-        final record = await create(
-          repositoryPath: '~/repo',
+    test(
+      'keeps collision suffixes beside a folder template ending in /',
+      () async {
+        const options = AgentWorktreeLaunchOptions(
+          branchTemplate: 'agent/{tool}-{id}',
+          pathTemplate: '{repo}.worktrees/{tool}/',
+        );
+        final first = await create(options: options);
+        final second = await create(
           options: const AgentWorktreeLaunchOptions(
-            pathTemplate: '~/trees/{name}',
-          ),
-        );
-
-        expect(record.path, '$home/trees/agent-claude-20261009-abc123');
-      });
-
-      test('suffixes names when the branch or folder already exists', () async {
-        final first = await create();
-        await git(repository, ['branch', 'agent/claude-20261009-abc123-2']);
-        final second = await create();
-        await Directory('$repository.worktrees/agent-claude-20261009-abc123-4')
-            .create(recursive: true);
-        final third = await create();
-
-        expect(first.branch, 'agent/claude-20261009-abc123');
-        expect(second.branch, 'agent/claude-20261009-abc123-3');
-        expect(second.path, endsWith('agent-claude-20261009-abc123-3'));
-        expect(third.branch, 'agent/claude-20261009-abc123-5');
-      });
-
-      test(
-        'suffixes a branch that would collide with nested branches',
-        () async {
-          await git(repository, ['branch', 'agent/claude-20261009-abc123/sub']);
-
-          final record = await create();
-
-          expect(record.branch, 'agent/claude-20261009-abc123-2');
-        },
-      );
-
-      test('explains a branch that blocks the branch template', () async {
-        await git(repository, ['branch', 'agent']);
-
-        await expectLater(
-          create(),
-          _throwsKind(AgentWorktreeErrorKind.branchConflict),
-        );
-        expect(Directory('$repository.worktrees').existsSync(), isFalse);
-      });
-
-      test(
-        'keeps collision suffixes beside a folder template ending in /',
-        () async {
-          const options = AgentWorktreeLaunchOptions(
-            branchTemplate: 'agent/{tool}-{id}',
+            branchTemplate: 'agent/{tool}-{id}-b',
             pathTemplate: '{repo}.worktrees/{tool}/',
-          );
-          final first = await create(options: options);
-          final second = await create(
-            options: const AgentWorktreeLaunchOptions(
-              branchTemplate: 'agent/{tool}-{id}-b',
-              pathTemplate: '{repo}.worktrees/{tool}/',
-            ),
-          );
-
-          expect(first.path, '$repository.worktrees/claude');
-          expect(second.path, '$repository.worktrees/claude-2');
-          expect((await service.status(shell, first)).isDirty, isFalse);
-        },
-      );
-
-      test('branches from a resolved base ref without tracking it', () async {
-        final firstCommit = await git(repository, ['rev-parse', 'HEAD']);
-        await commit(repository, 'second', 'second');
-
-        final record = await create(baseRef: 'HEAD~1');
-
-        expect(record.baseCommit, firstCommit);
-        expect(await git(record.path, ['rev-parse', 'HEAD']), firstCommit);
-      });
-
-      test('reports bad inputs without creating anything', () async {
-        await expectLater(
-          create(baseRef: 'no-such-ref'),
-          _throwsKind(AgentWorktreeErrorKind.invalidBase),
-        );
-        await expectLater(
-          create(repositoryPath: '$home/missing'),
-          _throwsKind(AgentWorktreeErrorKind.repositoryMissing),
-        );
-        await Directory('$home/plain').create();
-        await expectLater(
-          create(repositoryPath: '$home/plain'),
-          _throwsKind(AgentWorktreeErrorKind.notRepository),
-        );
-        await expectLater(
-          service.create(
-            shell,
-            hostId: 7,
-            repository: repository,
-            baseRef: 'HEAD',
-            target: const AgentWorktreeTarget(
-              branch: 'bad..name',
-              path: '.worktrees/x',
-              pathIsRepositoryRelative: true,
-            ),
           ),
-          _throwsKind(AgentWorktreeErrorKind.invalidBranch),
         );
-        expect(Directory('$repository.worktrees').existsSync(), isFalse);
-        expect(await git(repository, ['branch', '--list', 'agent/*']), isEmpty);
-      });
 
-      test('treats hostile text in names as literal data', () async {
-        final marker = File('$home/pwned');
-        final record = await service.create(
+        expect(first.path, '$repository.worktrees/claude');
+        expect(second.path, '$repository.worktrees/claude-2');
+        expect((await service.status(shell, first)).isDirty, isFalse);
+      },
+    );
+
+    test('branches from a resolved base ref without tracking it', () async {
+      final firstCommit = await git(repository, ['rev-parse', 'HEAD']);
+      await commit(repository, 'second', 'second');
+
+      final record = await create(baseRef: 'HEAD~1');
+
+      expect(record.baseCommit, firstCommit);
+      expect(await git(record.path, ['rev-parse', 'HEAD']), firstCommit);
+    });
+
+    test('reports bad inputs without creating anything', () async {
+      await expectLater(
+        create(baseRef: 'no-such-ref'),
+        _throwsKind(AgentWorktreeErrorKind.invalidBase),
+      );
+      await expectLater(
+        create(repositoryPath: '$home/missing'),
+        _throwsKind(AgentWorktreeErrorKind.repositoryMissing),
+      );
+      await Directory('$home/plain').create();
+      await expectLater(
+        create(repositoryPath: '$home/plain'),
+        _throwsKind(AgentWorktreeErrorKind.notRepository),
+      );
+      await expectLater(
+        service.create(
           shell,
           hostId: 7,
           repository: repository,
           baseRef: 'HEAD',
-          target: AgentWorktreeTarget(
-            branch: r"agent/$(touch-pwned)'x",
-            path: "$home/wt/\$(touch ${marker.path})'; touch ${marker.path}",
-            pathIsRepositoryRelative: false,
+          target: const AgentWorktreeTarget(
+            branch: 'bad..name',
+            path: '.worktrees/x',
+            pathIsRepositoryRelative: true,
           ),
-        );
+        ),
+        _throwsKind(AgentWorktreeErrorKind.invalidBranch),
+      );
+      expect(Directory('$repository.worktrees').existsSync(), isFalse);
+      expect(await git(repository, ['branch', '--list', 'agent/*']), isEmpty);
+    });
 
-        expect(marker.existsSync(), isFalse);
-        expect(record.branch, r"agent/$(touch-pwned)'x");
-        expect(Directory(record.path).existsSync(), isTrue);
-      });
+    test('treats hostile text in names as literal data', () async {
+      final marker = File('$home/pwned');
+      final record = await service.create(
+        shell,
+        hostId: 7,
+        repository: repository,
+        baseRef: 'HEAD',
+        target: AgentWorktreeTarget(
+          branch: r"agent/$(touch-pwned)'x",
+          path: "$home/wt/\$(touch ${marker.path})'; touch ${marker.path}",
+          pathIsRepositoryRelative: false,
+        ),
+      );
 
-      test('does not run repository hooks while checking out', () async {
-        final marker = File('$home/hook-ran');
-        final hook = File('$repository/.git/hooks/post-checkout');
-        await hook.writeAsString('#!/bin/sh\ntouch "${marker.path}"\n');
-        await Process.run('chmod', ['+x', hook.path]);
+      expect(marker.existsSync(), isFalse);
+      expect(record.branch, r"agent/$(touch-pwned)'x");
+      expect(Directory(record.path).existsSync(), isTrue);
+    });
 
-        await create();
+    test('does not run repository hooks while checking out', () async {
+      final marker = File('$home/hook-ran');
+      final hook = File('$repository/.git/hooks/post-checkout');
+      await hook.writeAsString('#!/bin/sh\ntouch "${marker.path}"\n');
+      await Process.run('chmod', ['+x', hook.path]);
 
-        expect(marker.existsSync(), isFalse);
-      });
+      await create();
 
-      test('finds tmux through the login shell PATH', () async {
-        // Only reachable through ~/.profile, which also prints noise.
-        final bin = Directory('$home/custom-bin')..createSync();
-        File('${bin.path}/tmux').writeAsStringSync(
-          '#!/bin/sh\n'
-          r'case "$1" in has-session) exit 0 ;; list-panes) echo /from/profile ;; *) exit 2 ;; esac'
-          '\n',
-        );
-        await Process.run('chmod', ['+x', '${bin.path}/tmux']);
-        File('$home/.profile').writeAsStringSync(
-          'echo "profile noise"\n'
-          r'PATH="$HOME/custom-bin:$PATH"; export PATH'
-          '\n',
-        );
-        final loginShell = _LocalShell(
-          shellPath,
-          home: home,
-          loginShell: '/bin/sh',
-        );
+      expect(marker.existsSync(), isFalse);
+    });
 
-        expect(await service.tmuxSessionDirectories(loginShell, 'agents'), [
-          '/from/profile',
+    test('finds tmux through the login shell PATH', () async {
+      // Only reachable through ~/.profile, which also prints noise.
+      final bin = Directory('$home/custom-bin')..createSync();
+      File('${bin.path}/tmux').writeAsStringSync(
+        '#!/bin/sh\n'
+        r'case "$1" in has-session) exit 0 ;; list-panes) echo /from/profile ;; *) exit 2 ;; esac'
+        '\n',
+      );
+      await Process.run('chmod', ['+x', '${bin.path}/tmux']);
+      File('$home/.profile').writeAsStringSync(
+        'echo "profile noise"\n'
+        r'PATH="$HOME/custom-bin:$PATH"; export PATH'
+        '\n',
+      );
+      final loginShell = _LocalShell(
+        shellPath,
+        home: home,
+        loginShell: '/bin/sh',
+      );
+
+      expect(await service.tmuxSessionDirectories(loginShell, 'agents'), [
+        '/from/profile',
+      ]);
+    });
+
+    test('removes a clean worktree and its untouched branch', () async {
+      final record = await create();
+
+      final status = await service.status(shell, record);
+      final removal = await service.remove(shell, record);
+
+      expect(status.exists, isTrue);
+      expect(status.blocksRemoval, isFalse);
+      expect(status.branchHasNewCommits, isFalse);
+      expect(removal.branchDeleted, isTrue);
+      expect(Directory(record.path).existsSync(), isFalse);
+      expect(
+        await git(repository, ['branch', '--list', record.branch]),
+        isEmpty,
+      );
+    });
+
+    test('refuses to remove a worktree with uncommitted changes', () async {
+      final record = await create();
+      await File('${record.path}/notes.txt').writeAsString('work\n');
+      await File('${record.path}/packages/app/README').writeAsString('edit\n');
+
+      final status = await service.status(shell, record);
+
+      expect(status.isDirty, isTrue);
+      expect(status.changedFiles, 2);
+      await expectLater(
+        service.remove(shell, record),
+        _throwsKind(AgentWorktreeErrorKind.dirty),
+      );
+      expect(File('${record.path}/notes.txt').existsSync(), isTrue);
+    });
+
+    test('refuses to drop commits made on a detached HEAD', () async {
+      final record = await create();
+      await git(record.path, ['checkout', '-q', '--detach']);
+      await commit(record.path, 'detached', 'detached work');
+      final detached = await git(record.path, ['rev-parse', 'HEAD']);
+
+      final status = await service.status(shell, record);
+
+      expect(status.isDirty, isFalse);
+      expect(status.unsavedCommits, isTrue);
+      expect(status.blocksRemoval, isTrue);
+      await expectLater(
+        service.remove(shell, record),
+        _throwsKind(AgentWorktreeErrorKind.unsavedCommits),
+      );
+      expect(Directory(record.path).existsSync(), isTrue);
+      expect(await git(repository, ['cat-file', '-t', detached]), 'commit');
+    });
+
+    test('removes a detached worktree whose commits are on a branch', () async {
+      final record = await create();
+      await git(record.path, ['checkout', '-q', '--detach']);
+      await commit(record.path, 'saved', 'saved work');
+      await git(record.path, ['branch', 'saved-work']);
+
+      final status = await service.status(shell, record);
+      await service.remove(shell, record);
+
+      expect(status.unsavedCommits, isFalse);
+      expect(Directory(record.path).existsSync(), isFalse);
+      expect(
+        await git(repository, ['branch', '--list', 'saved-work']),
+        contains('saved-work'),
+      );
+    });
+
+    test(
+      'refuses to remove a worktree stopped part-way through a rebase',
+      () async {
+        final record = await create();
+        await commit(record.path, 'one', 'one');
+        await commit(record.path, 'two', 'two');
+        final editor = File('$home/sequence-editor')
+          ..writeAsStringSync(
+            "#!/bin/sh\nsed -i.bak '1s/^pick/edit/' \"\$1\"\n",
+          );
+        await Process.run('chmod', ['+x', editor.path]);
+        await git(record.path, [
+          '-c',
+          'sequence.editor=${editor.path}',
+          'rebase',
+          '-i',
+          'HEAD~2',
         ]);
-      });
-
-      test('removes a clean worktree and its untouched branch', () async {
-        final record = await create();
-
-        final status = await service.status(shell, record);
-        final removal = await service.remove(shell, record);
-
-        expect(status.exists, isTrue);
-        expect(status.blocksRemoval, isFalse);
-        expect(status.branchHasNewCommits, isFalse);
-        expect(removal.branchDeleted, isTrue);
-        expect(Directory(record.path).existsSync(), isFalse);
-        expect(
-          await git(repository, ['branch', '--list', record.branch]),
-          isEmpty,
-        );
-      });
-
-      test('refuses to remove a worktree with uncommitted changes', () async {
-        final record = await create();
-        await File('${record.path}/notes.txt').writeAsString('work\n');
-        await File('${record.path}/packages/app/README')
-            .writeAsString('edit\n');
-
-        final status = await service.status(shell, record);
-
-        expect(status.isDirty, isTrue);
-        expect(status.changedFiles, 2);
-        await expectLater(
-          service.remove(shell, record),
-          _throwsKind(AgentWorktreeErrorKind.dirty),
-        );
-        expect(File('${record.path}/notes.txt').existsSync(), isTrue);
-      });
-
-      test('refuses to drop commits made on a detached HEAD', () async {
-        final record = await create();
-        await git(record.path, ['checkout', '-q', '--detach']);
-        await commit(record.path, 'detached', 'detached work');
-        final detached = await git(record.path, ['rev-parse', 'HEAD']);
 
         final status = await service.status(shell, record);
 
         expect(status.isDirty, isFalse);
-        expect(status.unsavedCommits, isTrue);
-        expect(status.blocksRemoval, isTrue);
+        expect(status.operationInProgress, 'rebase-merge');
         await expectLater(
           service.remove(shell, record),
-          _throwsKind(AgentWorktreeErrorKind.unsavedCommits),
+          _throwsKind(AgentWorktreeErrorKind.operationInProgress),
         );
         expect(Directory(record.path).existsSync(), isTrue);
-        expect(await git(repository, ['cat-file', '-t', detached]), 'commit');
-      });
+      },
+    );
 
-      test(
-        'removes a detached worktree whose commits are on a branch',
-        () async {
-          final record = await create();
-          await git(record.path, ['checkout', '-q', '--detach']);
-          await commit(record.path, 'saved', 'saved work');
-          await git(record.path, ['branch', 'saved-work']);
+    test('leaves alone a different worktree made at a recorded path', () async {
+      final record = await create();
+      await service.remove(shell, record);
+      await git(repository, [
+        'worktree',
+        'add',
+        '-q',
+        '-b',
+        'mine',
+        record.path,
+      ]);
 
-          final status = await service.status(shell, record);
-          await service.remove(shell, record);
+      final status = await service.status(shell, record);
 
-          expect(status.unsavedCommits, isFalse);
-          expect(Directory(record.path).existsSync(), isFalse);
-          expect(
-            await git(repository, ['branch', '--list', 'saved-work']),
-            contains('saved-work'),
-          );
-        },
+      expect(status.stale, isTrue);
+      await expectLater(
+        service.remove(shell, record),
+        _throwsKind(AgentWorktreeErrorKind.stale),
       );
+      expect(Directory(record.path).existsSync(), isTrue);
+    });
 
-      test(
-        'refuses to remove a worktree stopped part-way through a rebase',
-        () async {
-          final record = await create();
-          await commit(record.path, 'one', 'one');
-          await commit(record.path, 'two', 'two');
-          final editor = File('$home/sequence-editor')
-            ..writeAsStringSync(
-              "#!/bin/sh\nsed -i.bak '1s/^pick/edit/' \"\$1\"\n",
-            );
-          await Process.run('chmod', ['+x', editor.path]);
-          await git(record.path, [
-            '-c',
-            'sequence.editor=${editor.path}',
-            'rebase',
-            '-i',
-            'HEAD~2',
-          ]);
+    test('treats a plain folder at a recorded path as stale', () async {
+      final record = await create();
+      await service.remove(shell, record);
+      await Directory(record.path).create(recursive: true);
+      await File('${record.path}/keep').writeAsString('mine');
 
-          final status = await service.status(shell, record);
-
-          expect(status.isDirty, isFalse);
-          expect(status.operationInProgress, 'rebase-merge');
-          await expectLater(
-            service.remove(shell, record),
-            _throwsKind(AgentWorktreeErrorKind.operationInProgress),
-          );
-          expect(Directory(record.path).existsSync(), isTrue);
-        },
+      expect((await service.status(shell, record)).stale, isTrue);
+      await expectLater(
+        service.remove(shell, record),
+        _throwsKind(AgentWorktreeErrorKind.stale),
       );
+      expect(File('${record.path}/keep').existsSync(), isTrue);
+    });
 
-      test(
-        'leaves alone a different worktree made at a recorded path',
-        () async {
-          final record = await create();
-          await service.remove(shell, record);
-          await git(repository, [
-            'worktree',
-            'add',
-            '-q',
-            '-b',
-            'mine',
-            record.path,
-          ]);
-
-          final status = await service.status(shell, record);
-
-          expect(status.stale, isTrue);
-          await expectLater(
-            service.remove(shell, record),
-            _throwsKind(AgentWorktreeErrorKind.stale),
-          );
-          expect(Directory(record.path).existsSync(), isTrue);
-        },
-      );
-
-      test('treats a plain folder at a recorded path as stale', () async {
+    test(
+      'keeps a worktree recorded through a branch switch and rename',
+      () async {
         final record = await create();
-        await service.remove(shell, record);
-        await Directory(record.path).create(recursive: true);
-        await File('${record.path}/keep').writeAsString('mine');
-
-        expect((await service.status(shell, record)).stale, isTrue);
-        await expectLater(
-          service.remove(shell, record),
-          _throwsKind(AgentWorktreeErrorKind.stale),
-        );
-        expect(File('${record.path}/keep').existsSync(), isTrue);
-      });
-
-      test(
-        'keeps a worktree recorded through a branch switch and rename',
-        () async {
-          final record = await create();
-          await git(record.path, ['checkout', '-q', '-b', 'feature/x']);
-
-          var status = await service.status(shell, record);
-          expect(status.stale, isFalse);
-          expect(status.currentBranch, 'feature/x');
-          expect(status.branchHasNewCommits, isTrue);
-
-          await git(record.path, ['branch', '-m', 'feature/x', 'feat/pretty']);
-          status = await service.status(shell, record);
-          expect(status.stale, isFalse);
-          expect(status.currentBranch, 'feat/pretty');
-
-          await service.remove(shell, record);
-          expect(Directory(record.path).existsSync(), isFalse);
-          expect(
-            await git(repository, ['branch', '--list', 'feat/pretty']),
-            contains('feat/pretty'),
-          );
-          expect(
-            await git(repository, ['branch', '--list', record.branch]),
-            isEmpty,
-          );
-        },
-      );
-
-      test('records without a launch id fall back to the branch', () async {
-        final record = await create(withLaunchId: false);
         await git(record.path, ['checkout', '-q', '-b', 'feature/x']);
 
-        expect((await service.status(shell, record)).stale, isTrue);
-      });
-
-      test('does not count per-worktree refs as keeping a commit', () async {
-        final record = await create();
-        await git(record.path, ['checkout', '-q', '--detach']);
-        await commit(record.path, 'kept', 'kept by a worktree ref');
-        await git(record.path, ['update-ref', 'refs/worktree/keep', 'HEAD']);
-
-        expect((await service.status(shell, record)).unsavedCommits, isTrue);
-        await expectLater(
-          service.remove(shell, record),
-          _throwsKind(AgentWorktreeErrorKind.unsavedCommits),
-        );
-        expect(Directory(record.path).existsSync(), isTrue);
-      });
-
-      test('keeps a branch that has new commits', () async {
-        final record = await create();
-        await commit(record.path, 'feature', 'feature');
-
-        final status = await service.status(shell, record);
-        final removal = await service.remove(shell, record);
-
+        var status = await service.status(shell, record);
+        expect(status.stale, isFalse);
+        expect(status.currentBranch, 'feature/x');
         expect(status.branchHasNewCommits, isTrue);
-        expect(removal.branchDeleted, isFalse);
+
+        await git(record.path, ['branch', '-m', 'feature/x', 'feat/pretty']);
+        status = await service.status(shell, record);
+        expect(status.stale, isFalse);
+        expect(status.currentBranch, 'feat/pretty');
+
+        await service.remove(shell, record);
         expect(Directory(record.path).existsSync(), isFalse);
         expect(
-          await git(repository, ['branch', '--list', record.branch]),
-          contains(record.branch),
+          await git(repository, ['branch', '--list', 'feat/pretty']),
+          contains('feat/pretty'),
         );
-      });
+        expect(
+          await git(repository, ['branch', '--list', record.branch]),
+          isEmpty,
+        );
+      },
+    );
 
-      test(
-        'counts ignored files even when untracked files are hidden',
-        () async {
-          await File('$repository/.gitignore').writeAsString('build/\n');
-          await git(repository, ['add', '.']);
-          await git(repository, ['commit', '-q', '-m', 'ignore']);
-          await git(repository, ['config', 'status.showUntrackedFiles', 'no']);
-          final record = await create();
-          await Directory('${record.path}/build').create();
-          await File('${record.path}/build/out').writeAsString('x');
+    test('records without a launch id fall back to the branch', () async {
+      final record = await create(withLaunchId: false);
+      await git(record.path, ['checkout', '-q', '-b', 'feature/x']);
 
-          final status = await service.status(shell, record);
+      expect((await service.status(shell, record)).stale, isTrue);
+    });
 
-          expect(status.isDirty, isFalse);
-          expect(status.ignoredEntries, 1);
-        },
+    test('does not count per-worktree refs as keeping a commit', () async {
+      final record = await create();
+      await git(record.path, ['checkout', '-q', '--detach']);
+      await commit(record.path, 'kept', 'kept by a worktree ref');
+      await git(record.path, ['update-ref', 'refs/worktree/keep', 'HEAD']);
+
+      expect((await service.status(shell, record)).unsavedCommits, isTrue);
+      await expectLater(
+        service.remove(shell, record),
+        _throwsKind(AgentWorktreeErrorKind.unsavedCommits),
       );
+      expect(Directory(record.path).existsSync(), isTrue);
+    });
 
-      test('forgets a worktree folder that is already gone', () async {
+    test('keeps a branch that has new commits', () async {
+      final record = await create();
+      await commit(record.path, 'feature', 'feature');
+
+      final status = await service.status(shell, record);
+      final removal = await service.remove(shell, record);
+
+      expect(status.branchHasNewCommits, isTrue);
+      expect(removal.branchDeleted, isFalse);
+      expect(Directory(record.path).existsSync(), isFalse);
+      expect(
+        await git(repository, ['branch', '--list', record.branch]),
+        contains(record.branch),
+      );
+    });
+
+    test('counts ignored files even when untracked files are hidden', () async {
+      await File('$repository/.gitignore').writeAsString('build/\n');
+      await git(repository, ['add', '.']);
+      await git(repository, ['commit', '-q', '-m', 'ignore']);
+      await git(repository, ['config', 'status.showUntrackedFiles', 'no']);
+      final record = await create();
+      await Directory('${record.path}/build').create();
+      await File('${record.path}/build/out').writeAsString('x');
+
+      final status = await service.status(shell, record);
+
+      expect(status.isDirty, isFalse);
+      expect(status.ignoredEntries, 1);
+    });
+
+    test('forgets a worktree folder that is already gone', () async {
+      final record = await create();
+      await Directory(record.path).delete(recursive: true);
+
+      final status = await service.status(shell, record);
+      final removal = await service.remove(shell, record);
+
+      expect(status.exists, isFalse);
+      expect(removal.branchDeleted, isTrue);
+      expect(
+        await git(repository, ['worktree', 'list', '--porcelain']),
+        isNot(contains('worktree ${record.path}')),
+      );
+    });
+
+    test(
+      'leaves other missing worktrees registered when one is gone',
+      () async {
         final record = await create();
+        // The user's own worktree, on a volume that is unmounted now.
+        final mine = '$home/mine';
+        await git(repository, ['worktree', 'add', '-q', '-b', 'mine', mine]);
+        await Directory(mine).rename('$home/mine-unmounted');
         await Directory(record.path).delete(recursive: true);
 
-        final status = await service.status(shell, record);
         final removal = await service.remove(shell, record);
 
-        expect(status.exists, isFalse);
         expect(removal.branchDeleted, isTrue);
-        expect(
-          await git(repository, ['worktree', 'list', '--porcelain']),
-          isNot(contains('worktree ${record.path}')),
+        final worktrees = await git(repository, [
+          'worktree',
+          'list',
+          '--porcelain',
+        ]);
+        expect(worktrees, isNot(contains('worktree ${record.path}')));
+        expect(worktrees, contains('worktree $mine'));
+      },
+    );
+
+    test(
+      'keeps a branch it cannot show it made when the folder never existed',
+      () async {
+        // A pending record whose create never ran, and a branch of the
+        // same name the user made at the same commit.
+        final plan = await service.plan(
+          shell,
+          repository: repository,
+          baseRef: 'HEAD',
+          target: renderAgentWorktreeTarget(
+            const AgentWorktreeLaunchOptions(),
+            _values,
+          ),
         );
+        final pending = plan.pendingRecord(
+          hostId: 7,
+          createdAt: DateTime.utc(2026, 10, 9),
+          launchId: 'launch-pending',
+        );
+        await git(repository, ['branch', plan.branch]);
+
+        final removal = await service.remove(shell, pending);
+
+        expect(removal.branchDeleted, isFalse);
+        expect(
+          await git(repository, ['branch', '--list', plan.branch]),
+          contains(plan.branch),
+        );
+      },
+    );
+
+    test('undoes a worktree whose launch marker cannot be written', () async {
+      // A git that cannot name the new worktree's admin folder, so the
+      // marker that later proves the worktree is MonkeySSH's is missing.
+      final realGit = await _systemGit();
+      final bin = Directory('$home/bin')..createSync();
+      File('${bin.path}/git').writeAsStringSync(
+        '#!/bin/sh\n'
+        'for a in "\$@"; do\n'
+        '  [ "\$a" != --absolute-git-dir ] || exit 1\n'
+        'done\n'
+        'exec ${quoteAgentWorktreeShellWord(realGit)} "\$@"\n',
+      );
+      await Process.run('chmod', ['+x', '${bin.path}/git']);
+      final wrapped = _LocalShell(
+        shellPath,
+        home: home,
+        loginShell: _noLoginShell,
+      );
+
+      await expectLater(
+        service.create(
+          wrapped,
+          hostId: 7,
+          repository: repository,
+          baseRef: 'HEAD',
+          target: renderAgentWorktreeTarget(
+            const AgentWorktreeLaunchOptions(),
+            _values,
+          ),
+          launchId: 'launch-unmarked',
+        ),
+        _throwsKind(AgentWorktreeErrorKind.addFailed),
+      );
+
+      expect(Directory('$repository.worktrees').listSync(), isEmpty);
+      expect(await git(repository, ['branch', '--list', 'agent/*']), isEmpty);
+      expect(
+        await git(repository, ['worktree', 'list', '--porcelain']),
+        isNot(contains('.worktrees')),
+      );
+    });
+
+    group('launcher', () {
+      late MemoryAgentWorktreeRegistry registry;
+      var now = DateTime.utc(2026, 10, 9, 12);
+      AgentLaunchPreset launchPreset() => AgentLaunchPreset(
+        tool: AgentLaunchTool.claudeCode,
+        workingDirectory: repository,
+        tmuxSessionName: 'agents',
+        worktree: const AgentWorktreeLaunchOptions(),
+      );
+
+      AgentWorktreeLauncher launcher() => AgentWorktreeLauncher(
+        service: service,
+        registry: registry,
+        clock: () => now,
+      );
+
+      setUp(() {
+        registry = MemoryAgentWorktreeRegistry();
+        now = DateTime.utc(2026, 10, 9, 12);
       });
 
-      test(
-        'leaves other missing worktrees registered when one is gone',
-        () async {
-          final record = await create();
-          // The user's own worktree, on a volume that is unmounted now.
-          final mine = '$home/mine';
-          await git(repository, ['worktree', 'add', '-q', '-b', 'mine', mine]);
-          await Directory(mine).rename('$home/mine-unmounted');
-          await Directory(record.path).delete(recursive: true);
-
-          final removal = await service.remove(shell, record);
-
-          expect(removal.branchDeleted, isTrue);
-          final worktrees = await git(repository, [
-            'worktree',
-            'list',
-            '--porcelain',
-          ]);
-          expect(worktrees, isNot(contains('worktree ${record.path}')));
-          expect(worktrees, contains('worktree $mine'));
-        },
-      );
-
-      test(
-        'keeps a branch it cannot show it made when the folder never existed',
-        () async {
-          // A pending record whose create never ran, and a branch of the
-          // same name the user made at the same commit.
-          final plan = await service.plan(
-            shell,
-            repository: repository,
-            baseRef: 'HEAD',
-            target: renderAgentWorktreeTarget(
-              const AgentWorktreeLaunchOptions(),
-              _values,
-            ),
-          );
-          final pending = plan.pendingRecord(
-            hostId: 7,
-            createdAt: DateTime.utc(2026, 10, 9),
-            launchId: 'launch-pending',
-          );
-          await git(repository, ['branch', plan.branch]);
-
-          final removal = await service.remove(shell, pending);
-
-          expect(removal.branchDeleted, isFalse);
-          expect(
-            await git(repository, ['branch', '--list', plan.branch]),
-            contains(plan.branch),
-          );
-        },
-      );
-
-      test('undoes a worktree whose launch marker cannot be written', () async {
-        // A git that cannot name the new worktree's admin folder, so the
-        // marker that later proves the worktree is MonkeySSH's is missing.
-        final realGit = await _systemGit();
-        final bin = Directory('$home/bin')..createSync();
-        File('${bin.path}/git').writeAsStringSync(
-          '#!/bin/sh\n'
-          'for a in "\$@"; do\n'
-          '  [ "\$a" != --absolute-git-dir ] || exit 1\n'
-          'done\n'
-          'exec ${quoteAgentWorktreeShellWord(realGit)} "\$@"\n',
-        );
-        await Process.run('chmod', ['+x', '${bin.path}/git']);
-        final wrapped = _LocalShell(
-          shellPath,
-          home: home,
-          loginShell: _noLoginShell,
-        );
+      test('a create that times out stays recorded and a later launch cleans it up', () async {
+        shell.timeOutAfter = 'worktree add';
 
         await expectLater(
-          service.create(
-            wrapped,
+          launcher().create(
+            shell,
             hostId: 7,
-            repository: repository,
-            baseRef: 'HEAD',
-            target: renderAgentWorktreeTarget(
-              const AgentWorktreeLaunchOptions(),
-              _values,
-            ),
-            launchId: 'launch-unmarked',
+            preset: launchPreset(),
+            windowsHost: false,
           ),
-          _throwsKind(AgentWorktreeErrorKind.addFailed),
+          _throwsKind(AgentWorktreeErrorKind.unavailable),
+        );
+        final orphan = registry.records.single;
+        expect(orphan.pending, isTrue);
+        expect(Directory(orphan.path).existsSync(), isTrue);
+
+        shell.timeOutAfter = null;
+        now = now.add(const Duration(minutes: 11));
+        final record = await launcher().create(
+          shell,
+          hostId: 7,
+          preset: launchPreset(),
+          windowsHost: false,
         );
 
-        expect(Directory('$repository.worktrees').listSync(), isEmpty);
-        expect(await git(repository, ['branch', '--list', 'agent/*']), isEmpty);
+        expect(Directory(orphan.path).existsSync(), isFalse);
         expect(
-          await git(repository, ['worktree', 'list', '--porcelain']),
-          isNot(contains('.worktrees')),
+          await git(repository, ['branch', '--list', orphan.branch]),
+          isEmpty,
         );
+        expect(registry.records, [record]);
       });
 
-      group('launcher', () {
-        late MemoryAgentWorktreeRegistry registry;
-        var now = DateTime.utc(2026, 10, 9, 12);
-        AgentLaunchPreset launchPreset() => AgentLaunchPreset(
-          tool: AgentLaunchTool.claudeCode,
-          workingDirectory: repository,
-          tmuxSessionName: 'agents',
-          worktree: const AgentWorktreeLaunchOptions(),
-        );
-
-        AgentWorktreeLauncher launcher() => AgentWorktreeLauncher(
-          service: service,
-          registry: registry,
-          clock: () => now,
-        );
-
-        setUp(() {
-          registry = MemoryAgentWorktreeRegistry();
-          now = DateTime.utc(2026, 10, 9, 12);
-        });
-
-        test('a create that times out stays recorded and a later launch cleans it up', () async {
+      test(
+        'a fresh pending record from another launch is left alone',
+        () async {
           shell.timeOutAfter = 'worktree add';
-
           await expectLater(
             launcher().create(
               shell,
@@ -1110,75 +1113,37 @@ void registerAgentWorktreeShellTests(String shellPath) {
             ),
             _throwsKind(AgentWorktreeErrorKind.unavailable),
           );
-          final orphan = registry.records.single;
-          expect(orphan.pending, isTrue);
-          expect(Directory(orphan.path).existsSync(), isTrue);
-
+          final inFlight = registry.records.single;
           shell.timeOutAfter = null;
-          now = now.add(const Duration(minutes: 11));
-          final record = await launcher().create(
+
+          await launcher().create(
             shell,
             hostId: 7,
             preset: launchPreset(),
             windowsHost: false,
           );
 
-          expect(Directory(orphan.path).existsSync(), isFalse);
-          expect(
-            await git(repository, ['branch', '--list', orphan.branch]),
-            isEmpty,
-          );
-          expect(registry.records, [record]);
-        });
+          expect(Directory(inFlight.path).existsSync(), isTrue);
+          expect(registry.records, contains(inFlight));
+        },
+      );
 
-        test(
-          'a fresh pending record from another launch is left alone',
-          () async {
-            shell.timeOutAfter = 'worktree add';
-            await expectLater(
-              launcher().create(
-                shell,
-                hostId: 7,
-                preset: launchPreset(),
-                windowsHost: false,
-              ),
-              _throwsKind(AgentWorktreeErrorKind.unavailable),
-            );
-            final inFlight = registry.records.single;
-            shell.timeOutAfter = null;
+      test('undoes the worktree when recording it fails', () async {
+        registry.failAdd = (record) => !record.pending;
 
-            await launcher().create(
-              shell,
-              hostId: 7,
-              preset: launchPreset(),
-              windowsHost: false,
-            );
-
-            expect(Directory(inFlight.path).existsSync(), isTrue);
-            expect(registry.records, contains(inFlight));
-          },
+        await expectLater(
+          launcher().create(
+            shell,
+            hostId: 7,
+            preset: launchPreset(),
+            windowsHost: false,
+          ),
+          _throwsKind(AgentWorktreeErrorKind.unavailable),
         );
 
-        test('undoes the worktree when recording it fails', () async {
-          registry.failAdd = (record) => !record.pending;
-
-          await expectLater(
-            launcher().create(
-              shell,
-              hostId: 7,
-              preset: launchPreset(),
-              windowsHost: false,
-            ),
-            _throwsKind(AgentWorktreeErrorKind.unavailable),
-          );
-
-          expect(Directory('$repository.worktrees').listSync(), isEmpty);
-          expect(
-            await git(repository, ['branch', '--list', 'agent/*']),
-            isEmpty,
-          );
-        });
+        expect(Directory('$repository.worktrees').listSync(), isEmpty);
+        expect(await git(repository, ['branch', '--list', 'agent/*']), isEmpty);
       });
-    },
-  );
+    });
+  });
 }

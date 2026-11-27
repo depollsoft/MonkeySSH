@@ -2628,58 +2628,60 @@ void registerTerminalScreenTests({required int partIndex}) {
       await tester.pumpAndSettle();
     }
 
-    for (final cancel in [false, true]) {
-      testWidgets(
-        'snippet sheet substitutes once and tracks usage, cancel=$cancel',
-        (tester) async {
-          final repository = SnippetRepository(db);
-          final id = await repository.insert(
-            SnippetsCompanion.insert(
-              name: 'Literal variables',
-              command: 'echo {{a}} {{b}} {{a}}',
-            ),
-          );
-          await pumpScreen(tester);
-          await tester.pumpAndSettle();
-          shellWrites.clear();
-          await openTerminalOverflowMenu(tester);
-          await tester.tap(terminalMenuItemButton('Snippets'));
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Literal variables'));
-          await tester.pumpAndSettle();
-          expect(find.byType(TextFormField), findsNWidgets(2));
-          await tester.enterText(find.byType(TextFormField).at(0), '{{b}}');
-          await tester.enterText(find.byType(TextFormField).at(1), 'world');
-          await tester.tap(
-            find.widgetWithText(
-              cancel ? TextButton : FilledButton,
-              cancel ? 'Cancel' : 'Insert',
-            ),
-          );
-          await tester.pump();
-          await tester.pump(const Duration(milliseconds: 50));
-          expect(tester.takeException(), isNull);
-          await tester.pumpAndSettle();
-          expect(find.byType(TextFormField), findsNothing);
-          if (!cancel && find.text('Insert command').evaluate().isNotEmpty) {
-            await tester.tap(find.text('Insert command'));
+    if (partIndex == 0) {
+      for (final cancel in [false, true]) {
+        testWidgets(
+          'snippet sheet substitutes once and tracks usage, cancel=$cancel',
+          (tester) async {
+            final repository = SnippetRepository(db);
+            final id = await repository.insert(
+              SnippetsCompanion.insert(
+                name: 'Literal variables',
+                command: 'echo {{a}} {{b}} {{a}}',
+              ),
+            );
+            await pumpScreen(tester);
             await tester.pumpAndSettle();
-          }
-          final output = utf8.decode(
-            shellWrites.expand((chunk) => chunk).toList(),
-          );
-          expect(
-            output,
-            cancel
-                ? isNot(contains('echo'))
-                : contains('echo {{b}} world {{b}}'),
-          );
-          expect((await repository.getById(id))!.usageCount, cancel ? 0 : 1);
-          await tester.pumpWidget(const SizedBox.shrink());
-          await tester.pump();
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.android),
-      );
+            shellWrites.clear();
+            await openTerminalOverflowMenu(tester);
+            await tester.tap(terminalMenuItemButton('Snippets'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Literal variables'));
+            await tester.pumpAndSettle();
+            expect(find.byType(TextFormField), findsNWidgets(2));
+            await tester.enterText(find.byType(TextFormField).at(0), '{{b}}');
+            await tester.enterText(find.byType(TextFormField).at(1), 'world');
+            await tester.tap(
+              find.widgetWithText(
+                cancel ? TextButton : FilledButton,
+                cancel ? 'Cancel' : 'Insert',
+              ),
+            );
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 50));
+            expect(tester.takeException(), isNull);
+            await tester.pumpAndSettle();
+            expect(find.byType(TextFormField), findsNothing);
+            if (!cancel && find.text('Insert command').evaluate().isNotEmpty) {
+              await tester.tap(find.text('Insert command'));
+              await tester.pumpAndSettle();
+            }
+            final output = utf8.decode(
+              shellWrites.expand((chunk) => chunk).toList(),
+            );
+            expect(
+              output,
+              cancel
+                  ? isNot(contains('echo'))
+                  : contains('echo {{b}} world {{b}}'),
+            );
+            expect((await repository.getById(id))!.usageCount, cancel ? 0 : 1);
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pump();
+          },
+          variant: TargetPlatformVariant.only(TargetPlatform.android),
+        );
+      }
     }
 
     Future<void> runSnippetFromSheet(

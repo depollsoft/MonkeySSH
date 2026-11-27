@@ -470,7 +470,7 @@ func TestRequestAcpBridgeStopAndWaitPreservesStatusFailures(t *testing.T) {
 						t.Fatalf("status error = %v, want preserved JSON error", err)
 					}
 				}
-				if time.Since(started) > 2*acpRequestTimeout {
+				if time.Since(started) > acpRequestTimeout+time.Second {
 					t.Error("status request exceeded its deadline")
 				}
 			}

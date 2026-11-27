@@ -884,7 +884,7 @@ func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t 
 
 func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *testing.T) {
 	restore := stubForegroundResize(t)
-	defer restore()
+	t.Cleanup(restore)
 	for _, tc := range []struct {
 		name     string
 		midChunk bool

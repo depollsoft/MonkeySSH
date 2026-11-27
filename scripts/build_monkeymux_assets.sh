@@ -128,28 +128,59 @@ restore_from_local_cache() {
 
 save_to_local_cache() {
   local fp="$1"
-  local cache_dir cache_parent stage_dir
+  local cache_dir cache_parent stage_dir lock_dir obsolete_dir
   cache_dir="$(local_cache_dir_for "$fp")"
   cache_parent="$(dirname "$cache_dir")"
+  lock_dir="${cache_dir}.lock"
   if ! mkdir -p "$cache_parent" 2>/dev/null; then
     return 0
   fi
   if [[ -f "$cache_dir/.build-inputs.sha256" ]] &&
-    [[ "$(<"$cache_dir/.build-inputs.sha256")" == "$fp" ]]; then
+    [[ "$(<"$cache_dir/.build-inputs.sha256")" == "$fp" ]] &&
+    python3 "$ROOT_DIR/scripts/verify_monkeymux_assets.py" "$cache_dir" "$VERSION" >/dev/null 2>&1; then
     return 0
+  fi
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    # Recover if a previous writer crashed and left a stale lock (>5 min old).
+    if [[ -n "$(find "$lock_dir" -maxdepth 0 -mmin +5 2>/dev/null || true)" ]]; then
+      rmdir "$lock_dir" 2>/dev/null || true
+      mkdir "$lock_dir" 2>/dev/null || return 0
+    else
+      # Another worktree is actively publishing this exact fingerprint.
+      return 0
+    fi
   fi
   stage_dir="$(mktemp -d "$cache_parent/.stage.XXXXXX" 2>/dev/null || true)"
   if [[ -z "$stage_dir" ]]; then
+    rmdir "$lock_dir" 2>/dev/null || true
     return 0
   fi
   if cp -R "$ASSET_DIR/bin" "$stage_dir/bin" &&
     cp "$ASSET_DIR/manifest.json" "$stage_dir/manifest.json" &&
     cp "$STAMP_FILE" "$stage_dir/.build-inputs.sha256"; then
-    rm -rf "$cache_dir"
-    mv "$stage_dir" "$cache_dir" 2>/dev/null || rm -rf "$stage_dir"
+    if [[ -d "$cache_dir" ]]; then
+      if [[ -f "$cache_dir/.build-inputs.sha256" ]] &&
+        [[ "$(<"$cache_dir/.build-inputs.sha256")" == "$fp" ]] &&
+        python3 "$ROOT_DIR/scripts/verify_monkeymux_assets.py" "$cache_dir" "$VERSION" >/dev/null 2>&1; then
+        rm -rf "$stage_dir"
+      else
+        obsolete_dir="$(mktemp -d "$cache_parent/.obsolete.XXXXXX" 2>/dev/null || true)"
+        if [[ -n "$obsolete_dir" ]]; then
+          rmdir "$obsolete_dir" 2>/dev/null || true
+          mv "$cache_dir" "$obsolete_dir" 2>/dev/null || rm -rf "$cache_dir"
+          mv "$stage_dir" "$cache_dir" 2>/dev/null || rm -rf "$stage_dir"
+          rm -rf "$obsolete_dir"
+        else
+          rm -rf "$stage_dir"
+        fi
+      fi
+    else
+      mv "$stage_dir" "$cache_dir" 2>/dev/null || rm -rf "$stage_dir"
+    fi
   else
     rm -rf "$stage_dir"
   fi
+  rmdir "$lock_dir" 2>/dev/null || true
 }
 
 fingerprint="$(build_fingerprint)"

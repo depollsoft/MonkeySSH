@@ -51,6 +51,19 @@ class DartAnalyzeFastUnitTest(unittest.TestCase):
         sock = dart_analyze_fast.socket_path_for(deep)
         self.assertLess(len(str(sock)), 96)
 
+    def test_scan_dart_files_excludes_generated_and_ignored_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / 'lib').mkdir()
+            (root / 'third_party').mkdir()
+            (root / 'lib' / 'real.dart').write_text('int x = 1;\n', encoding='utf-8')
+            (root / 'lib' / 'real.g.dart').write_text('// generated\n', encoding='utf-8')
+            (root / 'lib' / 'real.freezed.dart').write_text('// generated\n', encoding='utf-8')
+            (root / 'lib' / 'real.mocks.dart').write_text('// generated\n', encoding='utf-8')
+            (root / 'third_party' / 'vendored.dart').write_text('int y = 2;\n', encoding='utf-8')
+            scanned = dart_analyze_fast.scan_dart_files(root)
+            self.assertEqual(list(scanned.keys()), [str(root / 'lib' / 'real.dart')])
+
 
 @unittest.skipUnless(shutil.which('dart'), 'dart SDK is required')
 class DartAnalyzeFastIntegrationTest(unittest.TestCase):
@@ -229,6 +242,44 @@ class DartAnalyzeFastIntegrationTest(unittest.TestCase):
         )
         self.assertNotEqual(bad.returncode, 0, bad.stdout + bad.stderr)
         self.assertIn('undefined_identifier', bad.stdout)
+
+        # Subdirectory relative targets must resolve against cwd before falling back.
+        sub_ok = subprocess.run(
+            [sys.executable, str(SCRIPT), '--root', str(self.pkg), '--no-daemon',
+             '--fatal-warnings', '--fatal-infos', '--', 'a.dart'],
+            cwd=self.pkg / 'lib',
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(sub_ok.returncode, 0, sub_ok.stdout + sub_ok.stderr)
+
+    def test_concurrent_cold_starts_serialize_to_single_daemon(self):
+        proc1 = subprocess.Popen(
+            [sys.executable, str(SCRIPT), '--root', str(self.pkg),
+             '--fatal-warnings', '--fatal-infos', 'lib/clean.dart'],
+            cwd=self.pkg,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        proc2 = subprocess.Popen(
+            [sys.executable, str(SCRIPT), '--root', str(self.pkg),
+             '--fatal-warnings', '--fatal-infos', 'lib/clean.dart'],
+            cwd=self.pkg,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        out1, err1 = proc1.communicate(timeout=90)
+        out2, err2 = proc2.communicate(timeout=90)
+        self.assertEqual(proc1.returncode, 0, out1 + err1)
+        self.assertEqual(proc2.returncode, 0, out2 + err2)
+        status = self._run_fast('--status')
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
 
 
 if __name__ == '__main__':

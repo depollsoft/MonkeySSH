@@ -574,6 +574,55 @@ class WorkflowContractsTest(unittest.TestCase):
                 "${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}",
             )
 
+    def test_jobs_downstream_of_skippable_prerequisites_override_implicit_success(self):
+        # cache-probe only runs on push to main and monkeymux-assets is skipped
+        # on cached Linux-only PRs. In GitHub Actions, any job without an
+        # explicit status check (!cancelled() / always()) gets implicit
+        # success(), which evaluates transitive skipped ancestors as false and
+        # silently skips the job.
+        jobs = self.workflows['ci.yml']['jobs']
+
+        def transitive_needs(name):
+            seen = set()
+            stack = list(jobs[name].get('needs', []) if isinstance(jobs[name].get('needs'), list)
+                         else ([jobs[name]['needs']] if jobs[name].get('needs') else []))
+            while stack:
+                dep = stack.pop()
+                if dep in seen:
+                    continue
+                seen.add(dep)
+                dep_needs = jobs[dep].get('needs')
+                if isinstance(dep_needs, list):
+                    stack.extend(dep_needs)
+                elif isinstance(dep_needs, str):
+                    stack.append(dep_needs)
+            return seen
+
+        skippable = {'cache-probe', 'monkeymux-assets'}
+        for name, job in jobs.items():
+            if name == 'ci':
+                continue
+            ancestors = transitive_needs(name)
+            if not (ancestors & skippable):
+                continue
+            with self.subTest(job=name):
+                cond = job.get('if', '')
+                self.assertTrue(
+                    '!cancelled()' in cond or 'always()' in cond,
+                    f'{name} depends on {ancestors & skippable} without overriding implicit success()',
+                )
+                direct = job.get('needs', [])
+                if isinstance(direct, str):
+                    direct = [direct]
+                for dep in direct:
+                    self.assertIn(f'needs.{dep}.result', cond, (name, dep))
+
+        for required_job in ['go-test', 'build-windows']:
+            cond = jobs[required_job]['if']
+            self.assertIn('!cancelled()', cond, required_job)
+            self.assertIn("needs.changes.result == 'success'", cond, required_job)
+            self.assertIn("needs.monkeymux-assets.result == 'success'", cond, required_job)
+
     def test_pull_requests_skip_apple_and_windows_builds_without_native_changes(self):
         jobs = self.workflows['ci.yml']['jobs']
         outputs = self.workflows['ci.yml']['jobs']['changes']['outputs']
@@ -842,6 +891,18 @@ class TestShardAndHelperScriptsTest(unittest.TestCase):
                 cwd=root, capture_output=True, text=True, check=True,
             )
             self.assertEqual(proc_nonempty.stdout.strip(), 'test/heavy_test.dart')
+
+            # Zero total discovered test files must fail --run instead of passing silently.
+            empty_dir = root / 'empty_tests'
+            empty_dir.mkdir()
+            proc_empty_root = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/ci_test_shard.py'),
+                 '--test-dir', 'empty_tests', '--total-shards', '4',
+                 '--shard-index', '0', '--run', '--', 'true'],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(proc_empty_root.returncode, 0)
+            self.assertIn('No *_test.dart files discovered', proc_empty_root.stderr)
 
     def test_ci_cache_probe_matches_cache_prefixes_and_fails_open(self):
         import ci_cache_probe as cache_probe

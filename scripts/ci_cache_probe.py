@@ -3,8 +3,9 @@
 
 Queries the GitHub Actions Caches API for ``refs/heads/main`` so push-to-main
 CI can warm Apple compilation/SPM caches and Windows pub caches when they are
-missing (e.g. after a Flutter bump, Xcode bump, or 10 GB LRU eviction) without
-allocating macOS or Windows runners when caches are already warm.
+missing (e.g. after a Flutter/lockfile bump or 10 GB LRU eviction; Xcode-only
+image bumps are not detected because prefixes stop before the Xcode key)
+without allocating macOS or Windows runners when caches are already warm.
 
 Fails open (outputs ``false`` with a warning) on transient API errors so a
 GitHub API hiccup never fails a push-to-main run.

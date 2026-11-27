@@ -10,6 +10,9 @@ install_hook() {
     local hook_name="$1"
     local dest="$HOOKS_DIR/$hook_name"
 
+    # Remove any pre-existing file or symlink first so we never follow a
+    # symlinked hook back into scripts/<hook> and overwrite it with an exec loop.
+    rm -f "$dest"
     # Install a tiny delegating wrapper so hooks always run the current
     # checkout or worktree's scripts/<hook> without drifting stale or breaking
     # when a temporary worktree is removed.

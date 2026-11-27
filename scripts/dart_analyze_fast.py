@@ -21,6 +21,10 @@ Guarantees parity with `dart analyze --fatal-warnings --fatal-infos`:
 from __future__ import annotations
 
 import argparse
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses fallback mode
+    fcntl = None
 import hashlib
 import json
 import os
@@ -108,6 +112,10 @@ def socket_path_for(root: Path) -> Path:
     return Path(tempfile.gettempdir()) / f'monkeyssh-dart-an-{uid}-{digest}.sock'
 
 
+def lock_path_for(root: Path) -> Path:
+    return Path(f'{socket_path_for(root)}.lock')
+
+
 def meta_path_for(root: Path) -> Path:
     return root / '.dart_tool' / 'dart_analyze_daemon.json'
 
@@ -128,6 +136,9 @@ def scan_dart_files(root: Path) -> dict[str, tuple[int, int]]:
             if not name.endswith('.dart'):
                 continue
             full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root_str).replace(os.sep, '/')
+            if is_excluded_by_default(rel):
+                continue
             try:
                 st = os.stat(full)
             except OSError:
@@ -243,7 +254,8 @@ class AnalysisServerBridge:
                     params = msg.get('params', {})
                     file_path = params.get('file')
                     if file_path:
-                        self._errors_by_file[file_path] = params.get('errors', [])
+                        with self._lock:
+                            self._errors_by_file[file_path] = params.get('errors', [])
                 elif event == 'server.status':
                     analysis = msg.get('params', {}).get('analysis')
                     if analysis is not None:
@@ -361,8 +373,10 @@ class AnalysisServerBridge:
 
         changed = sorted(added | modified)
         if added or removed:
+            with self._lock:
+                for path in removed:
+                    self._errors_by_file.pop(path, None)
             for path in removed:
-                self._errors_by_file.pop(path, None)
                 self._content_hashes.pop(path, None)
             with self._idle_cond:
                 self._seen_analyzing = False
@@ -409,12 +423,14 @@ class AnalysisServerBridge:
             # Ensure all pending analysis notifications have been flushed.
             self._wait_for_idle(require_analyzing_edge=False, timeout=REQUEST_TIMEOUT)
             root_prefix = str(self.root) + os.sep
-            for file_path in sorted(self._errors_by_file):
+            with self._lock:
+                snapshot_errors = list(self._errors_by_file.items())
+            for file_path, file_errors in sorted(snapshot_errors, key=lambda item: item[0]):
                 if not file_path.startswith(root_prefix):
                     continue
                 if not os.path.isfile(file_path):
                     continue
-                results.extend(self._errors_by_file[file_path])
+                results.extend(file_errors)
             return results
 
         for file_path in files:
@@ -501,43 +517,99 @@ def format_errors(root: Path, errors: list[dict]) -> str:
     return '\n'.join(lines)
 
 
+def _wait_for_socket_release(sock_path: Path, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not sock_path.exists():
+            return
+        if request_daemon(sock_path, {'action': 'ping'}, timeout=0.3) is None:
+            return
+        time.sleep(0.05)
+
+
 def run_daemon(root: Path, dart_bin: str, fingerprint: str, idle_timeout: int) -> int:
     sock_path = socket_path_for(root)
+    lock_path = lock_path_for(root)
     meta_path = meta_path_for(root)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Remove stale socket if present.
-    try:
-        sock_path.unlink()
-    except FileNotFoundError:
-        pass
+    lock_file = open(lock_path, 'a+', encoding='utf-8')
+    lock_held = False
+    bridge: AnalysisServerBridge | None = None
+    server_sock: socket.socket | None = None
+    bound_inode: int | None = None
 
-    bridge = AnalysisServerBridge(root, dart_bin)
+    def _release_startup_lock() -> None:
+        nonlocal lock_held
+        if lock_held:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            lock_held = False
+        try:
+            lock_file.close()
+        except OSError:
+            pass
+
     try:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            lock_held = True
+
+        # If a live daemon with the same config already started while we waited
+        # on the startup lock, reuse it instead of spawning a second server.
+        existing_resp = request_daemon(sock_path, {'action': 'ping'}, timeout=1.0)
+        if existing_resp and existing_resp.get('ok'):
+            if existing_resp.get('fingerprint') == fingerprint:
+                return 0
+            request_daemon(sock_path, {'action': 'shutdown'}, timeout=1.0)
+            _wait_for_socket_release(sock_path, timeout=3.0)
+
+        # Remove stale socket if present.
+        try:
+            sock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        bridge = AnalysisServerBridge(root, dart_bin)
         bridge.initialize()
+
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old_umask = os.umask(0o177)
+        try:
+            server_sock.bind(str(sock_path))
+        finally:
+            os.umask(old_umask)
+        bound_inode = os.lstat(sock_path).st_ino
+        server_sock.listen(16)
+        server_sock.setblocking(False)
+
+        meta = {
+            'pid': os.getpid(),
+            'root': str(root.resolve()),
+            'socket': str(sock_path),
+            'fingerprint': fingerprint,
+            'started_at': time.time(),
+        }
+        meta_tmp = meta_path.with_suffix('.tmp')
+        meta_tmp.write_text(json.dumps(meta, indent=2) + '\n', encoding='utf-8')
+        meta_tmp.replace(meta_path)
     except Exception:
-        bridge.shutdown()
+        if server_sock is not None:
+            server_sock.close()
+        if bound_inode is not None:
+            try:
+                if os.lstat(sock_path).st_ino == bound_inode:
+                    sock_path.unlink()
+            except FileNotFoundError:
+                pass
+        if bridge is not None:
+            bridge.shutdown()
         raise
-
-    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    old_umask = os.umask(0o177)
-    try:
-        server_sock.bind(str(sock_path))
     finally:
-        os.umask(old_umask)
-    server_sock.listen(16)
-    server_sock.setblocking(False)
-
-    meta = {
-        'pid': os.getpid(),
-        'root': str(root.resolve()),
-        'socket': str(sock_path),
-        'fingerprint': fingerprint,
-        'started_at': time.time(),
-    }
-    meta_tmp = meta_path.with_suffix('.tmp')
-    meta_tmp.write_text(json.dumps(meta, indent=2) + '\n', encoding='utf-8')
-    meta_tmp.replace(meta_path)
+        _release_startup_lock()
 
     stop_requested = False
 
@@ -601,11 +673,15 @@ def run_daemon(root: Path, dart_bin: str, fingerprint: str, idle_timeout: int) -
     finally:
         sel.close()
         server_sock.close()
-        bridge.shutdown()
-        try:
-            sock_path.unlink()
-        except FileNotFoundError:
-            pass
+        # Unlink only the socket inode owned by this process and do it before
+        # bridge.shutdown() so a replacement daemon can bind cleanly without
+        # having its new socket removed seconds later.
+        if bound_inode is not None:
+            try:
+                if os.lstat(sock_path).st_ino == bound_inode:
+                    sock_path.unlink()
+            except FileNotFoundError:
+                pass
         try:
             if meta_path.is_file():
                 existing = json.loads(meta_path.read_text(encoding='utf-8'))
@@ -613,6 +689,7 @@ def run_daemon(root: Path, dart_bin: str, fingerprint: str, idle_timeout: int) -
                     meta_path.unlink()
         except Exception:
             pass
+        bridge.shutdown()
     return 0
 
 
@@ -654,7 +731,7 @@ def request_daemon(sock_path: Path, payload: dict, timeout: float = REQUEST_TIME
         sock.close()
 
 
-def spawn_daemon(root: Path, idle_timeout: int) -> bool:
+def spawn_daemon(root: Path, idle_timeout: int, expected_fingerprint: str | None = None) -> bool:
     sock_path = socket_path_for(root)
     log_path = root / '.dart_tool' / 'dart_analyze_daemon.log'
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -679,7 +756,8 @@ def spawn_daemon(root: Path, idle_timeout: int) -> bool:
     while time.monotonic() < deadline:
         resp = request_daemon(sock_path, {'action': 'ping'}, timeout=2.0)
         if resp and resp.get('ok'):
-            return True
+            if expected_fingerprint is None or resp.get('fingerprint') == expected_fingerprint:
+                return True
         time.sleep(0.05)
     return False
 
@@ -692,14 +770,27 @@ def run_fallback_dart_analyze(
     fatal_warnings: bool,
     fatal_infos: bool,
 ) -> int:
+    root_resolved = root.resolve()
+    resolved_targets: list[str] = []
+    for raw in raw_targets:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        else:
+            p = p.resolve()
+        try:
+            resolved_targets.append(str(p.relative_to(root_resolved)))
+        except ValueError:
+            resolved_targets.append(str(p))
+
     cmd = [dart_bin, 'analyze']
     cmd.append('--fatal-warnings' if fatal_warnings else '--no-fatal-warnings')
     if fatal_infos:
         cmd.append('--fatal-infos')
-    if raw_targets:
+    if resolved_targets:
         cmd.append('--')
-        cmd.extend(raw_targets)
-    proc = subprocess.run(cmd, cwd=str(root))
+        cmd.extend(resolved_targets)
+    proc = subprocess.run(cmd, cwd=str(root_resolved))
     return proc.returncode
 
 
@@ -816,8 +907,8 @@ def main(argv: list[str] | None = None) -> int:
     if resp is None or resp.get('stale'):
         # Start (or restart after stale config) the daemon, then retry once.
         if resp and resp.get('stale'):
-            time.sleep(0.1)
-        if spawn_daemon(root, args.idle_timeout):
+            _wait_for_socket_release(sock_path, timeout=3.0)
+        if spawn_daemon(root, args.idle_timeout, expected_fingerprint=fingerprint):
             resp = request_daemon(sock_path, payload)
 
     if not resp or not resp.get('ok'):

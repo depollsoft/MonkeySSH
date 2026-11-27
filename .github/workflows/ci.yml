@@ -87,10 +87,40 @@ jobs:
           key: monkeymux-assets-v1-Linux-${{ steps.monkeymux-fingerprint.outputs.value }}
           lookup-only: true
 
+      # Warm the Linux tooling Pillow venv cache on push to main so new PRs and
+      # merge_group runs hit on refs/heads/main instead of always missing.
+      - name: Detect Python version for tooling cache
+        id: tooling-python
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 -c 'import sys; print(f"version={sys.version_info.major}.{sys.version_info.minor}")' >> "$GITHUB_OUTPUT"
+
+      - name: Check tooling Pillow venv cache
+        id: tooling-pillow-cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: .venv
+          key: tooling-pillow-v1-${{ runner.os }}-py${{ steps.tooling-python.outputs.version }}
+          lookup-only: true
+
+      - name: Build tooling Pillow venv
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tooling-pillow-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --quiet Pillow
+
+      - name: Save tooling Pillow venv cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tooling-pillow-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: .venv
+          key: ${{ steps.tooling-pillow-cache.outputs.cache-primary-key }}
+
   # Lightweight GitHub-hosted probe on push to main: checks whether Apple build
   # caches or the Windows pub cache are missing on refs/heads/main (after a
-  # Flutter bump, Xcode bump, or 10 GB LRU eviction) without allocating macOS
-  # or Windows runners on normal merges when caches are already warm.
+  # Flutter/lockfile bump or 10 GB LRU eviction; Xcode-only bumps are not
+  # detected by prefix matching) without allocating macOS or Windows runners on
+  # normal merges when caches are already warm.
   cache-probe:
     name: Probe Build Caches
     needs: changes
@@ -290,13 +320,17 @@ jobs:
           echo "79ec84c191667fd935a277e6fd3662cf5d3669cccc9e99998731d8f306f373b6  $RUNNER_TEMP/gh-actions-lock" | sha256sum --check
           chmod +x "$RUNNER_TEMP/gh-actions-lock"
 
+      - name: Detect Python version
+        id: python-version
+        run: python3 -c 'import sys; print(f"version={sys.version_info.major}.{sys.version_info.minor}")' >> "$GITHUB_OUTPUT"
+
       - name: Restore Pillow venv cache
         id: pillow-cache
         background: true
         uses: actions/cache/restore@v6.1.0
         with:
           path: .venv
-          key: tooling-pillow-v1-${{ runner.os }}-py3
+          key: tooling-pillow-v1-${{ runner.os }}-py${{ steps.python-version.outputs.version }}
 
       - uses: ruby/setup-ruby@v1.329.0
         with:
@@ -499,7 +533,12 @@ jobs:
   go-test:
     name: Go Tests (${{ matrix.name }})
     needs: [changes, monkeymux-assets]
-    if: needs.changes.outputs.go == 'true' && github.event_name != 'push'
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.monkeymux-assets.result == 'success' &&
+      needs.changes.outputs.go == 'true' &&
+      github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -649,13 +688,23 @@ jobs:
           source: ${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}
           fingerprint: ${{ needs.changes.outputs.monkeymux_fingerprint }}
 
+      - name: Resolve Android SDK path
+        id: android-sdk
+        run: |
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$ANDROID_SDK" ]; then
+            echo "::error title=Missing Android SDK::ANDROID_HOME or ANDROID_SDK_ROOT must be set."
+            exit 1
+          fi
+          echo "path=$ANDROID_SDK" >> "$GITHUB_OUTPUT"
+
       - name: Restore Android CMake cache
         id: android-cmake-cache
         background: true
         uses: actions/cache/restore@v6.1.0
         with:
-          path: ~/.cache/android-cmake-3.22.1
-          key: android-cmake-v1-${{ runner.os }}-3.22.1
+          path: ${{ steps.android-sdk.outputs.path }}/cmake/3.22.1
+          key: android-cmake-${{ runner.os }}-3.22.1
 
       - uses: actions/setup-java@v6.1.0
         with:
@@ -728,12 +777,6 @@ jobs:
             echo "::warning::Could not read Flutter's NDK version; Gradle will install the NDK itself."
             exit 0
           fi
-          cmake_cache="$HOME/.cache/android-cmake-3.22.1"
-          if [ ! -x "${ANDROID_HOME:?}/cmake/3.22.1/bin/cmake" ] && [ -x "$cmake_cache/bin/cmake" ]; then
-            mkdir -p "$ANDROID_HOME/cmake"
-            rm -rf "$ANDROID_HOME/cmake/3.22.1"
-            cp -a "$cmake_cache" "$ANDROID_HOME/cmake/3.22.1"
-          fi
           missing=()
           [ -d "$ANDROID_HOME/ndk/$ndk" ] || missing+=("ndk;$ndk")
           [ -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" ] || missing+=("cmake;3.22.1")
@@ -751,17 +794,12 @@ jobs:
               exit 1
             fi
           fi
-          if [ -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" ] && [ ! -x "$cmake_cache/bin/cmake" ]; then
-            rm -rf "$cmake_cache"
-            mkdir -p "$(dirname "$cmake_cache")"
-            cp -a "$ANDROID_HOME/cmake/3.22.1" "$cmake_cache"
-          fi
 
       - name: Save Android CMake cache
         if: github.event_name != 'merge_group' && steps.android-cmake-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         with:
-          path: ~/.cache/android-cmake-3.22.1
+          path: ${{ steps.android-sdk.outputs.path }}/cmake/3.22.1
           key: ${{ steps.android-cmake-cache.outputs.cache-primary-key }}
 
       - name: Build release APK
@@ -1053,6 +1091,9 @@ jobs:
     name: Build Windows
     needs: [changes, monkeymux-assets]
     if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      needs.monkeymux-assets.result == 'success' &&
       needs.changes.outputs.windows == 'true' &&
       github.event_name != 'push' &&
       (github.event_name != 'pull_request' || needs.changes.outputs.windows_native == 'true')
