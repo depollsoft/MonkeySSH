@@ -364,11 +364,18 @@ class WorkflowContractsTest(unittest.TestCase):
               for name in ['apple-cache-restore', 'apple-cache-save']]], text=True))
         restore, save = [action['runs']['steps'] for action in actions]
         keyed = {step['id']: step for step in restore if 'id' in step}
-        suffix = "${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}"
-        self.assertEqual(keyed['compilation']['with']['key'], '${{ inputs.platform }}-compile-v1-' + suffix +
-                         '-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}')
-        self.assertEqual(keyed['workspace']['with']['key'], 'spm-workspace-v1-' + suffix +
-                         '-${{ inputs.platform }}-${{ inputs.dependency-fingerprint }}')
+        prefix = '${{ runner.os }}-${{ runner.arch }}-${{ inputs.flutter-version }}'
+        xcode = '${{ steps.toolchain.outputs.xcode }}'
+        self.assertEqual(
+            keyed['compilation']['with']['key'],
+            '${{ inputs.platform }}-compile-v1-' + prefix +
+            '-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}-' + xcode,
+        )
+        self.assertEqual(
+            keyed['workspace']['with']['key'],
+            'spm-workspace-v1-' + prefix +
+            '-${{ inputs.platform }}-${{ inputs.dependency-fingerprint }}-' + xcode,
+        )
         spm_key = "spm-${{ runner.os }}-${{ hashFiles('ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}"
         self.assertEqual(keyed['swiftpm']['with']['key'], spm_key)
         self.assertEqual(keyed['swiftpm']['with']['restore-keys'], 'spm-${{ runner.os }}-')
@@ -383,12 +390,12 @@ class WorkflowContractsTest(unittest.TestCase):
             du = root / 'du'
             du.write_text('#!/bin/sh\nprintf "%s\\tcache\\n" "$TEST_CACHE_KIB"\n')
             du.chmod(0o755)
-            for limit in [1048576, 2097152]:
+            for limit in [3145728, 5242880]:
                 for size in [0, 1, limit, limit + 1]:
                     output = root / 'output'
                     output.write_text('')
-                    subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', save[0]['run']],
-                                   cwd=root, check=True, env={**os.environ,
+                    proc = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', save[0]['run']],
+                                   cwd=root, check=True, capture_output=True, text=True, env={**os.environ,
                                        'PATH': str(root) + os.pathsep + os.environ['PATH'],
                                        'PLATFORM': 'ios', 'TEST_CACHE_KIB': str(size),
                                        'COMPILATION_LIMIT_KIB': str(limit), 'WORKSPACE_LIMIT_KIB': '2097152',
@@ -396,8 +403,9 @@ class WorkflowContractsTest(unittest.TestCase):
                     expected = ('compilation=true\n' if 0 < size <= limit else '') + (
                         'workspace=true\n' if 0 < size <= 2097152 else '')
                     self.assertEqual(output.read_text(), expected)
-        for workflow, platform, configuration, limit in [('ci.yml', 'ios', 'production', 1048576),
-                ('ci.yml', 'macos', 'release', 2097152), ('build-deploy.yml', 'ios', '${{ inputs.flavor }}', 1048576)]:
+                    self.assertIn(f'Compilation cache: {size} KiB', proc.stdout)
+        for workflow, platform, configuration, limit in [('ci.yml', 'ios', 'production', 3145728),
+                ('ci.yml', 'macos', 'release', 5242880), ('build-deploy.yml', 'ios', '${{ inputs.flavor }}', 3145728)]:
             steps = self.workflows[workflow]['jobs']['build-' + platform]['steps']
             caches = [step for step in steps if step.get('with', {}).get('phase') == 'build']
             self.assertEqual(caches[0]['with']['configuration'], configuration)
@@ -409,7 +417,9 @@ class WorkflowContractsTest(unittest.TestCase):
                 for field in ['key', 'hit']:
                     self.assertEqual(caches[1]['with'][kind + '-' + field], '${{ steps.apple-cache.outputs.' + kind + '-' + field + ' }}')
             if workflow == 'ci.yml':
-                self.assertEqual(steps[-1]['if'], "steps.spm-cache.outputs.swiftpm-hit != 'true'")
+                self.assertEqual(caches[1]['if'], "github.event_name != 'merge_group'")
+                self.assertEqual(steps[-1]['if'],
+                                 "github.event_name != 'merge_group' && steps.spm-cache.outputs.swiftpm-hit != 'true'")
             else:
                 self.assertEqual(caches[0]['if'], "inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'")
                 self.assertEqual(caches[1]['if'], "steps.apple-cache.outcome == 'success'")
@@ -429,15 +439,19 @@ class WorkflowContractsTest(unittest.TestCase):
 
     def test_daemon_test_jobs_receive_the_asset_manifest(self):
         jobs = self.workflows['ci.yml']['jobs']
-        self.assertEqual(jobs['monkeymux-assets']['if'],
-                         "needs.changes.outputs.run_check == 'true' || needs.changes.outputs.go == 'true'")
+        mm_if = jobs['monkeymux-assets']['if']
+        self.assertIn("needs.changes.outputs.run_check == 'true' || needs.changes.outputs.go == 'true'", mm_if)
+        self.assertIn("needs.changes.outputs.monkeymux_cached != 'true'", mm_if)
+        self.assertIn("needs.changes.outputs.go == 'true'", mm_if)
         self.assertIn('monkeymux-assets', jobs['go-test']['needs'])
+        self.assertEqual(self.workflows['build-deploy.yml']['jobs']['monkeymux-assets']['runs-on'],
+                         'ubicloud-standard-4')
 
     def test_tooling_discovers_all_python_suites_and_publication_validates_artifacts(self):
         steps = self.workflows['ci.yml']['jobs']['tooling']['steps']
         python = next(s['run'] for s in steps if "-p '*_test.py'" in s.get('run', ''))
         self.assertIn('pip install --quiet Pillow', python)
-        self.assertIn('-m unittest discover -s test/scripts', python)
+        self.assertIn('scripts/run_script_tests.py -s test/scripts', python)
         publisher = self.workflows['publish-store-assets.yml']['jobs']['publish']['steps']
         commands = '\n'.join(s.get('run', '') for s in publisher)
         self.assertNotIn('unittest', commands)
@@ -462,7 +476,7 @@ class WorkflowContractsTest(unittest.TestCase):
                 subject = 'lib/' + test.removeprefix('test/').replace('_test.dart', '.dart')
                 if (ROOT / subject).exists():
                     expected.add(subject)
-                if '--plain-name' in line:
+                if '--plain-name' in line or '--name' in line:
                     continue
                 source = (ROOT / test).read_text()
                 for target in re.findall(r"""(?:import|require\()\s*['"]([^'"]+)['"]""", source):
@@ -519,21 +533,46 @@ class WorkflowContractsTest(unittest.TestCase):
 
     def test_push_to_main_only_warms_caches(self):
         jobs = self.workflows['ci.yml']['jobs']
-        warm = {'changes', 'monkeymux-assets', 'ci', 'build-ios', 'build-macos'}
+        warm = {
+            'changes', 'cache-probe', 'monkeymux-assets', 'ci',
+            'build-ios', 'build-macos', 'warm-windows-pub',
+        }
         for name, job in jobs.items():
             with self.subTest(job=name):
                 if name in warm:
                     continue
                 self.assertIn("github.event_name != 'push'", job['if'])
-        # The payload cache is written from main, so that job keeps running.
-        self.assertNotIn('push', jobs['monkeymux-assets']['if'])
-        # The Apple compilation caches are keyed on the dependency lockfiles and
-        # can only be written from main, so a lockfile bump still builds there.
+        # Push-only cache-warming jobs must never run on PRs or merge_group.
+        for name in ['cache-probe', 'warm-windows-pub']:
+            self.assertIn("github.event_name == 'push'", jobs[name]['if'])
+            self.assertIn("github.ref == 'refs/heads/main'", jobs[name]['if'])
+        # The payload cache is written from main, so that job stays enabled on push.
+        self.assertNotIn("github.event_name != 'push'", jobs['monkeymux-assets']['if'])
+        # Apple builds and Windows pub warmer gate deps on their own platform so
+        # a single-platform Package.resolved push does not burn other platform slots.
         for platform in ['ios', 'macos']:
             condition = jobs[f'build-{platform}']['if']
+            self.assertIn("github.event_name == 'push'", condition)
+            self.assertIn(f"needs.cache-probe.outputs.warm_{platform} == 'true'", condition)
             self.assertIn(
-                "(github.event_name != 'push' || needs.changes.outputs.deps == 'true')",
-                condition)
+                f"(needs.changes.outputs.deps == 'true' && needs.changes.outputs.{platform} == 'true')",
+                condition,
+            )
+        self.assertIn(
+            "(needs.changes.outputs.deps == 'true' && needs.changes.outputs.windows == 'true')",
+            jobs['warm-windows-pub']['if'],
+        )
+        # Consumers of fetch-monkeymux-assets must download the artifact whenever
+        # monkeymux-assets ran (so a rebuild after a corrupt cache is always used).
+        for name in ['check', 'test', 'go-test', 'build-android', 'build-linux']:
+            fetch = next(
+                s for s in jobs[name]['steps']
+                if s.get('uses') == '$/.github/actions/fetch-monkeymux-assets'
+            )
+            self.assertEqual(
+                fetch['with']['source'],
+                "${{ needs.monkeymux-assets.result == 'skipped' && 'cache' || 'artifact' }}",
+            )
 
     def test_pull_requests_skip_apple_and_windows_builds_without_native_changes(self):
         jobs = self.workflows['ci.yml']['jobs']
@@ -557,10 +596,31 @@ class WorkflowContractsTest(unittest.TestCase):
 
     def test_shards_use_the_whole_runner_and_no_build_artifacts_are_uploaded(self):
         jobs = self.workflows['ci.yml']['jobs']
+        self.assertEqual(jobs['test']['runs-on'], 'ubicloud-standard-8')
         self.assertEqual(jobs['test']['strategy']['matrix']['shard-index'], [0, 1, 2, 3, 4, 5])
         self.assertIn('Shard ${{ matrix.shard-index }}/6', jobs['test']['name'])
         shard = next(s for s in jobs['test']['steps'] if s.get('name') == 'Run tests')
-        self.assertIn('-j 4 --total-shards 6', shard['run'])
+        self.assertIn('scripts/ci_test_shard.py --total-shards 6', shard['run'])
+        self.assertIn('flutter test --no-pub -j 8', shard['run'])
+        # Linux builds stay on Ubicloud to share the Linux Flutter cache and keep
+        # GitHub's 10 GB cache free for Apple/Windows caches; merge_group stays
+        # read-only on Gradle and Apple caches.
+        self.assertEqual(jobs['build-linux']['runs-on'], 'ubicloud-standard-4')
+        self.assertEqual(jobs['build-android']['runs-on'], 'ubicloud-standard-8')
+        self.assertEqual(jobs['ci']['runs-on'], 'ubicloud-standard-4')
+        gradle = next(s for s in jobs['build-android']['steps'] if s.get('id') == 'gradle-setup')
+        self.assertIn("github.event_name == 'merge_group'", gradle['with']['cache-read-only'])
+        # Every platform build skips redundant implicit pub get after flutter-setup.
+        for job_name, prefix in [
+            ('build-android', 'flutter build apk'),
+            ('build-ios', 'flutter build ios'),
+            ('build-macos', 'flutter build macos'),
+            ('build-windows', 'flutter build windows'),
+            ('build-linux', 'flutter build linux'),
+        ]:
+            commands = '\n'.join(s.get('run', '') for s in jobs[job_name]['steps'])
+            self.assertIn(prefix, commands)
+            self.assertIn('--no-pub', commands)
         # Nothing downstream consumes the compiled builds; only the diagnostics
         # logs are worth retaining.
         uploads = [step['with']['name'] for job in jobs.values()
@@ -591,7 +651,7 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertEqual(action['inputs']['pub-cache']['default'], 'true')
         for workflow, expected in [
                 ('ci.yml', {'check', 'test', 'build-android', 'build-ios',
-                            'build-macos', 'build-windows', 'build-linux'}),
+                            'build-macos', 'warm-windows-pub', 'build-windows', 'build-linux'}),
                 ('build-deploy.yml', {'build-android', 'build-ios'})]:
             jobs = self.workflows[workflow]['jobs']
             users = {name for name, job in jobs.items() for step in job.get('steps', [])
@@ -608,13 +668,14 @@ class WorkflowContractsTest(unittest.TestCase):
         jobs = self.workflows['ci.yml']['jobs']
         windows = next(s for s in jobs['build-windows']['steps']
                        if s.get('uses') == '$/.github/actions/flutter-setup')
-        # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is
-        # safe, but only a pull_request run can read it back (a merge-queue
-        # cache is scoped to its throwaway ref), so the gating run skips the
-        # ~2m45s post-job save.
+        # The 2.1 GB SDK archive cancelled jobs during post-job save; download it
+        # instead and restore the main-warmed Windows pub cache read-only.
         self.assertEqual(windows['with']['cache'], 'false')
-        self.assertEqual(windows['with']['pub-cache'],
-                         "${{ github.event_name == 'pull_request' }}")
+        self.assertEqual(windows['with']['pub-cache'], 'false')
+        win_restore = next(s for s in jobs['build-windows']['steps']
+                           if s.get('name') == 'Restore Windows pub cache')
+        self.assertEqual(win_restore['uses'], 'actions/cache/restore@v6.1.0')
+        self.assertIn('windows-pub-v1-', win_restore['with']['key'])
 
     def test_background_steps_are_joined_before_their_consumers(self):
         # Setup steps overlap via `background: true`; a later `wait:` in the
@@ -710,6 +771,139 @@ class WorkflowContractsTest(unittest.TestCase):
         triggers = workflow.get('on', workflow.get('true'))
         self.assertEqual(triggers['workflow_dispatch']['inputs']['profile-type']['options'],
                          ['appstore', 'adhoc'])
+
+
+class TestShardAndHelperScriptsTest(unittest.TestCase):
+    def test_ci_test_shard_covers_every_repo_test_file_exactly_once(self):
+        import ci_test_shard as sharder
+
+        test_root = ROOT / 'test'
+        discovered = sharder.discover_test_files(test_root)
+        self.assertGreater(len(discovered), 0)
+        expected = sorted(p.relative_to(ROOT).as_posix() for p in discovered)
+
+        shards_a = sharder.partition_shards(discovered, 6, test_root, base_dir=ROOT)
+        shards_b = sharder.partition_shards(discovered, 6, test_root, base_dir=ROOT)
+        self.assertEqual(shards_a, shards_b)
+
+        seen = []
+        weights = []
+        for weight, items in shards_a:
+            self.assertGreater(weight, 0)
+            weights.append(weight)
+            seen.extend(items)
+        # Zero omissions and zero duplicates across shards.
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(sorted(seen), expected)
+        # LPT packing keeps shard weights tightly balanced.
+        self.assertLessEqual(max(weights) - min(weights), max(weights) * 0.15)
+
+    def test_ci_test_shard_weights_bundled_cases_and_handles_empty_shards(self):
+        import ci_test_shard as sharder
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            test_dir = root / 'test'
+            test_dir.mkdir()
+            (test_dir / 'heavy_cases.dart').write_text(
+                'void register() {\n' + '  testWidgets("w", (t) async {});\n' * 20 + '}\n'
+            )
+            (test_dir / 'heavy_test.dart').write_text("import 'heavy_cases.dart';\nvoid main() {}\n")
+            (test_dir / 'light_test.dart').write_text('void main() { test("x", () {}); }\n')
+
+            files = sharder.discover_test_files(test_dir)
+            self.assertGreater(
+                sharder.estimate_weight(test_dir / 'heavy_test.dart', test_dir),
+                sharder.estimate_weight(test_dir / 'light_test.dart', test_dir) * 5,
+            )
+            # 2 files across 4 shards leaves shards 2 and 3 empty; --run must skip cleanly.
+            shards = sharder.partition_shards(files, 4, test_dir, base_dir=root)
+            self.assertEqual(sorted(p for _, items in shards for p in items),
+                             ['test/heavy_test.dart', 'test/light_test.dart'])
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/ci_test_shard.py'),
+                 '--total-shards', '4', '--shard-index', '3', '--run', '--', 'false'],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            proc_nonempty = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/ci_test_shard.py'),
+                 '--total-shards', '4', '--shard-index', '0', '--run', '--',
+                 sys.executable, '-c', 'import sys; print(",".join(sys.argv[1:]))'],
+                cwd=root, capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(proc_nonempty.stdout.strip(), 'test/heavy_test.dart')
+
+    def test_ci_cache_probe_matches_cache_prefixes_and_fails_open(self):
+        import ci_cache_probe as cache_probe
+
+        prefixes = cache_probe.required_cache_prefixes(ROOT, '3.47.4')
+        self.assertEqual(set(prefixes.keys()), {'warm_ios', 'warm_macos', 'warm_windows_pub'})
+        for key in prefixes['warm_ios']:
+            self.assertIn('-3.47.4-', key)
+            self.assertTrue(key.endswith('-'))
+        for key in prefixes['warm_macos']:
+            self.assertIn('-3.47.4-', key)
+            self.assertTrue(key.endswith('-'))
+        self.assertTrue(prefixes['warm_windows_pub'][0].startswith('windows-pub-v1-3.47.4-'))
+
+        # Simulate iOS warm, macOS compile missing, Windows pub missing.
+        class _FakeResp:
+            def __init__(self, count):
+                self._payload = json.dumps({'total_count': count}).encode('utf-8')
+            def read(self):
+                return self._payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        def fake_urlopen(request, timeout=15):
+            url = request.full_url
+            if 'ios-compile-v1-' in url or 'spm-workspace-v1-macOS-ARM64-3.47.4-ios-' in url:
+                return _FakeResp(1)
+            if 'spm-workspace-v1-macOS-ARM64-3.47.4-macos-' in url:
+                return _FakeResp(1)
+            return _FakeResp(0)
+
+        result = cache_probe.probe(ROOT, '3.47.4', 'owner/repo', 'tok', urlopen=fake_urlopen)
+        self.assertEqual(result, {'warm_ios': False, 'warm_macos': True, 'warm_windows_pub': True})
+
+        # Missing token fails open cleanly with exit 0 and all false.
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp) / 'gh_output'
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/ci_cache_probe.py')],
+                cwd=ROOT, capture_output=True, text=True, check=True,
+                env={**os.environ, 'FLUTTER_VERSION': '3.47.4', 'GITHUB_REPOSITORY': 'o/r',
+                     'GH_TOKEN': '', 'GITHUB_OUTPUT': str(out)},
+            )
+            self.assertIn('::warning::', proc.stdout)
+            self.assertEqual(out.read_text(), 'warm_ios=false\nwarm_macos=false\nwarm_windows_pub=false\n')
+
+    def test_run_script_tests_discovers_parallel_suites_and_propagates_failures(self):
+        import run_script_tests as runner
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            suite_dir = root / 'tests'
+            suite_dir.mkdir()
+            (suite_dir / 'a_test.py').write_text(
+                'import unittest\nclass A(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n'
+            )
+            (suite_dir / 'b_test.py').write_text(
+                'import unittest\nclass B(unittest.TestCase):\n    def test_ok(self): self.assertEqual(1, 1)\n'
+            )
+            code, results = runner.run_suites(suite_dir, jobs=2, repo_root=root)
+            self.assertEqual(code, 0)
+            self.assertEqual([r[0] for r in results], ['tests/a_test.py', 'tests/b_test.py'])
+
+            (suite_dir / 'c_test.py').write_text(
+                'import unittest\nclass C(unittest.TestCase):\n    def test_fail(self): self.fail("boom")\n'
+            )
+            code, results = runner.run_suites(suite_dir, jobs=2, repo_root=root)
+            self.assertEqual(code, 1)
+            self.assertEqual(len(results), 3)
 
 
 if __name__ == '__main__':

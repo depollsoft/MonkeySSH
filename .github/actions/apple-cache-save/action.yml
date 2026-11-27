@@ -9,7 +9,7 @@ inputs:
     default: ''
   compilation-limit-kib:
     description: Maximum uncompressed compilation cache size
-    default: '1048576'
+    default: '3145728'
   workspace-limit-kib:
     description: Maximum uncompressed resolved package size
     default: '2097152'
@@ -42,12 +42,18 @@ runs:
         if [ -d "build/$PLATFORM/SourcePackages" ]; then
           workspace_kib=$(du -sk "build/$PLATFORM/SourcePackages" | cut -f1)
         fi
-        echo "Compilation cache: ${compilation_kib} KiB; Swift packages: ${workspace_kib} KiB" >> "$GITHUB_STEP_SUMMARY"
+        summary="Compilation cache: ${compilation_kib} KiB (limit ${COMPILATION_LIMIT_KIB} KiB); Swift packages: ${workspace_kib} KiB (limit ${WORKSPACE_LIMIT_KIB} KiB)"
+        echo "$summary"
+        echo "$summary" >> "$GITHUB_STEP_SUMMARY"
         if [ "$compilation_kib" -gt 0 ] && [ "$compilation_kib" -le "$COMPILATION_LIMIT_KIB" ]; then
           echo "compilation=true" >> "$GITHUB_OUTPUT"
+        elif [ "$compilation_kib" -gt "$COMPILATION_LIMIT_KIB" ]; then
+          echo "::notice::Skipping Apple compilation cache save (${compilation_kib} KiB > ${COMPILATION_LIMIT_KIB} KiB)."
         fi
         if [ "$workspace_kib" -gt 0 ] && [ "$workspace_kib" -le "$WORKSPACE_LIMIT_KIB" ]; then
           echo "workspace=true" >> "$GITHUB_OUTPUT"
+        elif [ "$workspace_kib" -gt "$WORKSPACE_LIMIT_KIB" ]; then
+          echo "::notice::Skipping Swift package cache save (${workspace_kib} KiB > ${WORKSPACE_LIMIT_KIB} KiB)."
         fi
 
     - name: Save Apple compilation cache
