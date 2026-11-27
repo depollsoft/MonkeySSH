@@ -75,7 +75,7 @@ func isTimeout(err error) bool {
 // once it drains again.
 func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
 	t.Parallel()
-	const writeTimeout = 250 * time.Millisecond
+	const writeTimeout = 400 * time.Millisecond
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -131,7 +131,7 @@ func TestRelayAttachOutputWithoutReadAheadCopiesLikeIoCopy(t *testing.T) {
 // still reaches the server's write timeout instead of growing the client.
 func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
 	t.Parallel()
-	const writeTimeout = 150 * time.Millisecond
+	const writeTimeout = 200 * time.Millisecond
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()

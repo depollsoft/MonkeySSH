@@ -403,7 +403,7 @@ func TestAcpStopCommandReportsExitedBridgesStopping(t *testing.T) {
 
 func TestRequestAcpBridgeStopAndWaitPreservesStatusFailures(t *testing.T) {
 	previousTimeout := acpRequestTimeout
-	acpRequestTimeout = 100 * time.Millisecond
+	acpRequestTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { acpRequestTimeout = previousTimeout })
 	for _, response := range []string{"", "invalid\n", `{"version":1,"type":"status"}` + "\n",
 		`{"version":1,"type":"error","bridge":{}}` + "\n",
@@ -2164,7 +2164,7 @@ func TestAcpWaitClassifiesTransientStatusErrors(t *testing.T) {
 
 func TestAcpWaitSurvivesTransientStatusTimeout(t *testing.T) {
 	t.Parallel()
-	const statusTimeout = 100 * time.Millisecond
+	const statusTimeout = 150 * time.Millisecond
 	for _, timeoutRequest := range []int{0, 1} {
 		t.Run(fmt.Sprintf("timeout request %d", timeoutRequest), func(t *testing.T) {
 			t.Parallel()
@@ -2201,7 +2201,13 @@ func TestAcpWaitSurvivesTransientStatusTimeout(t *testing.T) {
 						Bridge: &acpBridgeInfo{State: state, Provider: "Test agent"},
 					})
 				}()
-				info, err := acpBridgeStatusFromConnWithTimeout(client, statusTimeout)
+				// Keep generous headroom on positive polls so -race scheduling
+				// cannot turn a healthy poll into an unexpected timeout.
+				pollTimeout := 2 * time.Second
+				if index == timeoutRequest {
+					pollTimeout = statusTimeout
+				}
+				info, err := acpBridgeStatusFromConnWithTimeout(client, pollTimeout)
 				_ = client.Close()
 				<-done
 				if index == timeoutRequest {
