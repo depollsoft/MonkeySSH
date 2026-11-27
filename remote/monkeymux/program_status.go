@@ -9,7 +9,7 @@ import (
 )
 
 // MonkeyMux is the terminal for every window, so it implements the Program
-// Status Protocol (OSC 7501, revision 0.3,
+// Status Protocol (OSC 7501, revision 0.4,
 // https://superlogical.com/rex/docs/build/program-status) itself: it answers
 // feature detection, keeps each window's records, and publishes the most
 // urgent record in the window snapshot. Programs such as Claude Code report
@@ -36,7 +36,10 @@ const (
 )
 
 // programStatusQueryReply answers feature detection. The reply never echoes
-// anything the program sent.
+// anything the program sent. Revision 0.4 lets a reply list `states` and
+// `kinds`; one that lists neither means exactly the spec's fixed lists, which
+// are the ones MonkeyMux implements, and programs written against revision
+// 0.3 expect this form.
 var programStatusQueryReply = []byte("\x1b]7501;?\x1b\\")
 
 // Record owners: the process a report is attributed to. Unattributed records
@@ -631,6 +634,7 @@ func (s *muxServer) dropExitedProgramStatus() {
 		if window.closed {
 			continue
 		}
+		window.dropExitedProgramResumeLocked()
 		if dropped := window.dropExitedProgramStatusLocked(); !dropped && !changed[window] {
 			continue
 		}

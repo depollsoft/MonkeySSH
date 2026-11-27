@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.262"
+	monkeyMuxVersion                  = "0.1.263"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -832,7 +832,10 @@ type restoreWindowState struct {
 	ApplicationKeypadEnabled bool                      `json:"applicationKeypadEnabled,omitempty"`
 	ApplicationKeypadKnown   bool                      `json:"applicationKeypadKnown,omitempty"`
 	TerminalProgress         *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
-	Active                   bool                      `json:"active,omitempty"`
+	// ProgramResume is the command the window's program reported through
+	// OSC 7577; see programResumeForRestore.
+	ProgramResume *programResumeState `json:"programResume,omitempty"`
+	Active        bool                `json:"active,omitempty"`
 	// HistoryGraphemeClusterOff records that grapheme clustering (mode
 	// 2027) was reset where HistoryBase64 starts.
 	HistoryGraphemeClusterOff bool `json:"historyGraphemeClusterOff,omitempty"`
@@ -1075,6 +1078,15 @@ type muxWindow struct {
 	// several reports raises the push each change calls for.
 	programStatusSteps    []programStatusSummary
 	programStatusStepping bool
+	// programResumeToken signs the window's OSC 7577 reports; it is empty
+	// when the protocol is off. programResume holds what each owning process
+	// last reported, and programResumeClock orders the reports.
+	// programResumeShellWindow marks a window restored from a shell window's
+	// report, which goes back to a shell when the program ends.
+	programResumeToken       string
+	programResume            map[int]programResumeRecord
+	programResumeClock       uint64
+	programResumeShellWindow bool
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -6882,10 +6894,20 @@ func createWindowOptionsForRestore(
 	// CLI and shell restoration starts a new process. Its old task progress is
 	// stale until the new process reports its own OSC 9;4 state. The native ACP
 	// branch above preserves progress because its agent process keeps running.
+	// A command the program reported itself replaces the one worked out
+	// above; it runs in the directory the program named, if it named one.
+	resume := programResumeForRestore(state, agentTool)
+	if resume != nil {
+		command = ""
+		if resume.Cwd != "" {
+			state.Cwd = resume.Cwd
+		}
+	}
 	return createWindowOptions{
 		name:                      firstNonEmptyString(state.Name, state.PaneTitle, state.CurrentCommand, "shell"),
 		cwd:                       state.Cwd,
 		command:                   command,
+		programResume:             resume,
 		launchCommand:             state.LaunchCommand,
 		restoreCommand:            state.RestoreCommand,
 		history:                   history,
@@ -6952,6 +6974,9 @@ type createWindowOptions struct {
 	terminalProgress          *terminalProgressSnapshot
 	themeHint                 []byte
 	capabilityHint            []byte
+	// programResume starts the window with a command reported through
+	// OSC 7577 instead of command.
+	programResume *programResumeState
 }
 
 func newWindowAgentTool(
@@ -7008,9 +7033,14 @@ func (s *muxServer) createWindowWithStarter(
 	shell := defaultShellPath()
 	cmd := shellCommand(shell)
 	name := filepath.Base(shell)
+	resumedDirectly := false
 	if len(options.args) > 0 {
 		cmd = exec.Command(options.args[0], options.args[1:]...)
 		name = filepath.Base(options.args[0])
+	} else if options.programResume != nil {
+		options.command = ""
+		cmd, resumedDirectly = programResumeCommand(shell, *options.programResume)
+		name = filepath.Base(options.programResume.Argv[0])
 	} else if strings.TrimSpace(options.command) != "" {
 		cmd = shellCommandForScript(shell, strings.TrimSpace(options.command))
 	}
@@ -7040,7 +7070,14 @@ func (s *muxServer) createWindowWithStarter(
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.Env = withForwardedAgentSocket(terminalEnvironment(os.Environ()))
+	resumeToken := ""
+	if programResumeEnabled() {
+		resumeToken = newProgramResumeToken()
+	}
+	cmd.Env = withProgramResumeToken(
+		withForwardedAgentSocket(terminalEnvironment(os.Environ())),
+		resumeToken,
+	)
 
 	s.mu.Lock()
 	if s.closed {
@@ -7114,8 +7151,12 @@ func (s *muxServer) createWindowWithStarter(
 		foregroundPid:             proc.Pid(),
 		foregroundCommand:         filepath.Base(cmd.Path),
 		foregroundCommandPid:      proc.Pid(),
-		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
-		directProcess:             len(options.args) > 0,
+		interactiveShell: len(options.args) == 0 && options.programResume == nil &&
+			strings.TrimSpace(options.command) == "",
+		directProcess:      len(options.args) > 0 || resumedDirectly,
+		programResumeToken: resumeToken,
+		programResumeShellWindow: options.programResume != nil &&
+			options.programResume.ShellWindow,
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,
@@ -10897,9 +10938,25 @@ func (s *muxServer) snapshotsLocked() []windowSnapshot {
 
 func (s *muxServer) restoreSnapshot() *serverRestore {
 	s.refreshAllProcessMetadata()
+	restore, resumes := s.restoreSnapshotWithResumeCandidates()
+	// Choosing between several owners reads the process table, so it happens
+	// off the server lock.
+	for index, candidates := range resumes {
+		restore.Windows[index].ProgramResume = chooseProgramResume(candidates)
+	}
+	return restore
+}
+
+// restoreSnapshotWithResumeCandidates returns the restore snapshot and, by
+// window position in it, the OSC 7577 commands of each window's live owners.
+func (s *muxServer) restoreSnapshotWithResumeCandidates() (
+	*serverRestore,
+	map[int][]programResumeCandidate,
+) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	resumes := map[int][]programResumeCandidate{}
 	restore := &serverRestore{
 		SchemaVersion: restoreSchemaVersion,
 		Windows:       make([]restoreWindowState, 0, len(s.windows)),
@@ -10951,9 +11008,12 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 				)
 			}
 		}
+		if candidates := window.programResumeCandidatesLocked(); len(candidates) > 0 {
+			resumes[len(restore.Windows)] = candidates
+		}
 		restore.Windows = append(restore.Windows, state)
 	}
-	return restore
+	return restore, resumes
 }
 
 func (s *muxServer) snapshot(window *muxWindow) windowSnapshot {
@@ -19115,6 +19175,8 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 	case programStatusOscCode:
 		w.applyProgramStatusPayloadLocked(value)
 		w.noteProgramStatusStepLocked()
+	case programResumeOscCode:
+		w.applyProgramResumePayloadLocked(value)
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
 		w.applyAgentIdentityPayloadLocked(value)

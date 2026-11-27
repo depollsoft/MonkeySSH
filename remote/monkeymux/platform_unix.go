@@ -687,6 +687,36 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 	return cmd
 }
 
+// programResumeSupported reports whether a reported OSC 7577 command can be
+// run here. It needs a POSIX shell: other shells restore the usual way.
+func programResumeSupported() bool {
+	return isPosixShell(defaultShellPath())
+}
+
+// programResumeCommand runs a reported OSC 7577 command in the user's shell
+// environment: a login, interactive shell that has read its startup files.
+// The elements are the shell's positional parameters, never shell source, so
+// each reaches the program as one argument whatever it contains. env starts
+// the program, because it only ever runs a file found on PATH: the shell's
+// own lookup would let a function, an alias or a builtin named like the
+// program, such as eval, run in its place (zsh's exec runs builtins too).
+// env reads a leading NAME=value as an assignment, which is why
+// isProgramResumeProgram refuses a program with `=` in its name. A shell
+// window's program runs in a subshell and the shell takes over when it ends,
+// as it did before.
+func programResumeCommand(shell string, resume programResumeState) (cmd *exec.Cmd, direct bool) {
+	script := `\exec /usr/bin/env "$@"`
+	if resume.ShellWindow {
+		script = `(\exec /usr/bin/env "$@"); \exec "$0" -i`
+	}
+	arguments := append([]string{"-i", "-c", script, shell}, resume.Argv...)
+	cmd = exec.Command(shell, arguments...)
+	if base := filepath.Base(shell); base != "" {
+		cmd.Args[0] = "-" + base
+	}
+	return cmd, false
+}
+
 // agentWindowHoldThresholdSeconds bounds how soon after launch an abnormal agent
 // exit still holds the window open. Startup failures surface within a couple of
 // seconds; a later exit is treated as the user ending the session normally, so

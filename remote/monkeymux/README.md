@@ -305,8 +305,40 @@ process's progress, so an idle resumed agent does not inherit a stuck busy bar.
 Restored shell history also drops old OSC 9;4 markers; normal reconnect history
 is unchanged.
 
+MonkeyMux implements the [Program Resume Protocol](https://superlogical.com/rex/docs/build/program-resume)
+(OSC 7577, revision 0.5) the same way, so a program that reports how to bring
+itself back survives an upgrade that restarts its window. Each window's first
+process starts with its own random `OSC7577_TOKEN`; a token inherited from the
+terminal MonkeyMux runs in is never passed on. A report is
+`OSC 7577 ; pid=…:time=…:argv=…[:cwd=…]:mac=… ST`, where `mac` is the SHA-256
+of the body, a colon and the token. MonkeyMux checks the `mac` and that `time`
+is within 60 seconds of its clock and not older than the owner's last report
+before reading anything else, so output that does not hold the token (a file
+printed to the terminal, a remote host) cannot create or remove a command.
+Parsing is strict: a report that passes those checks but breaks a rule (a
+relative program or directory, both `argv` and `clear`, a `need` key MonkeyMux
+lacks, bad base64 or control characters, more than 256 arguments) removes the
+owner's command instead of leaving an older one in place. A command ends when
+its owning process exits or sends `clear=1`; RIS, prompt marks and screen
+switches leave it alone.
+
+The upgrade restore snapshot carries one command per window, never the token.
+When several processes of a window reported, an ancestor wins over what it
+started, then the most recent report. The restored window runs the command in
+the reported directory (or the window's own when none was reported) from a
+login, interactive shell that has read its startup files, with a new token.
+The arguments are passed as arguments, never as shell text, and `env` starts
+the program so that no shell function, alias or builtin can stand in for it;
+a program name containing `=` is refused for that reason. A window that was a
+shell returns to a shell when the program ends. The command is not run when
+its directory is gone, when the default shell is not a POSIX shell, or when
+MonkeyMux already knows the agent session to resume, which also restores the
+agent's launch flags. On Windows the command starts directly as the window's
+process. Set `MONKEYMUX_PROGRAM_RESUME=0` in the server's environment to turn
+the protocol off; windows then get no token.
+
 MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
-(OSC 7501, revision 0.3) as each window's terminal. It answers the `OSC 7501 ; ?`
+(OSC 7501, revision 0.4) as each window's terminal. It answers the `OSC 7501 ; ?`
 feature query itself, even in a window no client is showing, and strips that
 query from what clients receive (it answers exactly the queries it strips, so
 none is answered twice); Claude Code reports nothing until it gets the reply. Each window keeps up to 64 records with the spec's id hierarchy, `app`
