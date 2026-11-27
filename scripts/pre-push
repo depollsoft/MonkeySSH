@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pre-push hook for Flutty
-# Install via scripts/setup.sh or copy into "$(git rev-parse --git-path hooks)".
+# Install via scripts/setup.sh (installs a delegating wrapper into git hooks).
 
 set -euo pipefail
 
@@ -14,11 +14,11 @@ echo 'Running pre-push checks...'
 # entirely when the push carries none. A push often has no Dart changes at all
 # (a Go-only change under remote/monkeymux, a docs edit), and running a
 # whole-repo analysis for those is both slow and, in a fresh worktree that has
-# never had `flutter pub get`, guaranteed to fail: --no-pub leaves every
-# package import unresolved, so every Flutter symbol reads as undefined and the
-# analyzer reports tens of thousands of spurious errors. This mirrors the
-# pre-commit hook, which scopes its analysis to the staged Dart files. CI still
-# runs the full analysis and test suite.
+# never had `flutter pub get`, guaranteed to fail: without package_config.json
+# every package import reads as undefined and the analyzer reports tens of
+# thousands of spurious errors. This mirrors the pre-commit hook, which scopes
+# its analysis to the staged Dart files. CI still runs the full analysis and
+# test suite.
 
 is_zero_sha() {
     # A deleted or not-yet-created ref is reported as an all-zero object id
@@ -37,10 +37,10 @@ EMPTY_TREE=$(git hash-object -t tree /dev/null)
 # Dart file that still exists at each pushed tip. Uses a net diff against the
 # push's base rather than a per-commit union, so a file added or edited in an
 # earlier commit and then deleted later in the same push is not analyzed: it no
-# longer exists at the tip and `flutter analyze` rejects a nonexistent path.
+# longer exists at the tip and the analyzer rejects a nonexistent path.
 collect_pushed_dart_files() {
-    local local_ref local_sha remote_ref remote_sha base oldest
-    while read -r local_ref local_sha remote_ref remote_sha; do
+    local local_ref local_sha _remote_ref remote_sha base oldest
+    while read -r local_ref local_sha _remote_ref remote_sha; do
         [ -z "${local_ref:-}" ] && continue
         if is_zero_sha "$local_sha"; then
             continue # Branch deletion: nothing to analyze.
@@ -75,7 +75,12 @@ if [ "${#dart_files[@]}" -eq 0 ]; then
 fi
 
 echo "Running analyzer on ${#dart_files[@]} pushed Dart file(s)..."
-flutter analyze --fatal-warnings --fatal-infos --no-pub -- "${dart_files[@]}"
+if command -v python3 >/dev/null 2>&1 && [ -f "$REPO_ROOT/scripts/dart_analyze_fast.py" ]; then
+    python3 "$REPO_ROOT/scripts/dart_analyze_fast.py" \
+        --fatal-warnings --fatal-infos -- "${dart_files[@]}"
+else
+    dart analyze --fatal-warnings --fatal-infos -- "${dart_files[@]}"
+fi
 
 echo 'Skipping full test suite in pre-push; run targeted tests for changed behavior locally.'
 echo 'CI runs the full test suite.'

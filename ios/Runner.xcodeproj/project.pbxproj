@@ -472,7 +472,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n\nFIREBASE_FLAVOR=production\ncase \"${PRODUCT_BUNDLE_IDENTIFIER:-}\" in\n  *.private) FIREBASE_FLAVOR=private ;;\nesac\n\nSOURCE_PLIST=\"${PROJECT_DIR}/Runner/Firebase/${FIREBASE_FLAVOR}/GoogleService-Info.plist\"\nDESTINATION_PLIST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"\n\nif [ -f \"$SOURCE_PLIST\" ]; then\n  mkdir -p \"$(dirname \"$DESTINATION_PLIST\")\"\n  cp \"$SOURCE_PLIST\" \"$DESTINATION_PLIST\"\nelse\n  rm -f \"$DESTINATION_PLIST\"\n  echo \"Skipping Firebase config copy; $SOURCE_PLIST not present.\"\nfi\n";
+			shellScript = "set -e\n\nFIREBASE_FLAVOR=production\ncase \"${PRODUCT_BUNDLE_IDENTIFIER:-}\" in\n  *.private) FIREBASE_FLAVOR=private ;;\nesac\n\nSOURCE_PLIST=\"${PROJECT_DIR}/Runner/Firebase/${FIREBASE_FLAVOR}/GoogleService-Info.plist\"\nDESTINATION_PLIST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"\n\nif [ -f \"$SOURCE_PLIST\" ]; then\n  mkdir -p \"$(dirname \"$DESTINATION_PLIST\")\"\n  if ! cmp -s \"$SOURCE_PLIST\" \"$DESTINATION_PLIST\"; then\n    cp \"$SOURCE_PLIST\" \"$DESTINATION_PLIST\"\n  fi\nelse\n  rm -f \"$DESTINATION_PLIST\"\n  echo \"Skipping Firebase config copy; $SOURCE_PLIST not present.\"\nfi\n";
 		};
 		9740EEB61CF901F6004384FC /* Run Script */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -502,7 +502,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n\nGOOGLE_SERVICE_INFO=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"\nif [ ! -f \"$GOOGLE_SERVICE_INFO\" ]; then\n  echo \"Skipping Crashlytics dSYM upload; Firebase config not present.\"\n  exit 0\nfi\n\n# Swift Package Manager checks the Firebase SDK out under the build root, which\n# is $BUILD_DIR for `flutter build` and the DerivedData root for Xcode builds.\nCRASHLYTICS_RUN=\"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run\"\nif [ ! -x \"$CRASHLYTICS_RUN\" ]; then\n  echo \"warning: Crashlytics run script not found at $CRASHLYTICS_RUN; dSYMs were not uploaded.\"\n  exit 0\nfi\n\n\"$CRASHLYTICS_RUN\"\n";
+			shellScript = "set -e\n\ncase \"${CONFIGURATION:-}\" in\n  Debug*)\n    echo \"Skipping Crashlytics dSYM upload for Debug configuration (${CONFIGURATION}).\"\n    exit 0\n    ;;\nesac\n\nGOOGLE_SERVICE_INFO=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"\nif [ ! -f \"$GOOGLE_SERVICE_INFO\" ]; then\n  echo \"Skipping Crashlytics dSYM upload; Firebase config not present.\"\n  exit 0\nfi\n\n# Swift Package Manager checks the Firebase SDK out under the build root, which\n# is $BUILD_DIR for `flutter build` and the DerivedData root for Xcode builds.\nCRASHLYTICS_RUN=\"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run\"\nif [ ! -x \"$CRASHLYTICS_RUN\" ]; then\n  echo \"warning: Crashlytics run script not found at $CRASHLYTICS_RUN; dSYMs were not uploaded.\"\n  exit 0\nfi\n\n\"$CRASHLYTICS_RUN\"\n";
 		};
 		C191836CA8AC2E39087621BD /* Stamp Extension Version */ = {
 			isa = PBXShellScriptBuildPhase;

@@ -1,1 +1,2 @@
 #include "ephemeral/Flutter-Generated.xcconfig"
+COMPILATION_CACHE_ENABLE_CACHING = YES

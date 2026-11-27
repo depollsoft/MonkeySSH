@@ -46,8 +46,6 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.write_manifest()
         self.payloads = {path.relative_to(self.assets): path.read_bytes()
                          for path in self.assets.glob('bin/*/monkeymux.gz')}
-        self.stamp = self.assets / '.build-inputs.sha256'
-        self.stamp.write_text(self.fingerprint() + '\n')
         # Any attempt to compile is observable, without requiring a Go install
         # or cross-compiling six binaries for every cache regression case.
         bindir = self.root / 'bin'
@@ -55,11 +53,20 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         go = bindir / 'go'
         go.write_text('#!/bin/sh\necho "compile requested" >&2\nexit 42\n')
         go.chmod(0o755)
-        self.env = {**os.environ, 'PATH': f'{bindir}{os.pathsep}{os.environ.get("PATH", os.defpath)}'}
+        self.local_cache = self.root / 'local-cache'
+        self.env = {
+            **os.environ,
+            'PATH': f'{bindir}{os.pathsep}{os.environ.get("PATH", os.defpath)}',
+            'MONKEYMUX_LOCAL_CACHE': '0',
+            'MONKEYMUX_LOCAL_CACHE_DIR': str(self.local_cache),
+        }
+        self.stamp = self.assets / '.build-inputs.sha256'
+        self.base_fingerprint = self.fingerprint()
+        self.stamp.write_text(self.base_fingerprint + '\n')
 
-    def builder(self, *args):
+    def builder(self, *args, env=None):
         return subprocess.run(['bash', str(self.root / 'scripts/build_monkeymux_assets.sh'), *args],
-                              capture_output=True, text=True, env=getattr(self, 'env', None))
+                              capture_output=True, text=True, env=env or self.env)
 
     def fingerprint(self):
         result = self.builder('--print-fingerprint')
@@ -76,6 +83,7 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.assertIn('assets are current', result.stdout)
 
     def test_all_build_inputs_invalidate_the_fingerprint(self):
+        before = self.base_fingerprint
         paths = ['remote/monkeymux/main.go', 'remote/monkeymux/go.sum',
                  'remote/monkeymux/go.mod', 'remote/monkeymux/conpty/payload.dll',
                  'remote/monkeymux/monkeymux-version.sh',
@@ -83,12 +91,13 @@ class MonkeyMuxCacheTest(unittest.TestCase):
                  'scripts/verify_monkeymux_assets.py']
         for path in paths:
             with self.subTest(path=path):
-                before = self.fingerprint()
                 target = self.root / path
                 original = target.read_bytes()
                 target.write_bytes(original + b'\n# modified input\n')
-                self.assertNotEqual(before, self.fingerprint())
-                target.write_bytes(original)
+                try:
+                    self.assertNotEqual(before, self.fingerprint())
+                finally:
+                    target.write_bytes(original)
 
     def test_unreadable_version_fails_instead_of_building_a_placeholder(self):
         (self.remote / 'monkeymux-version.sh').write_text('echo broken >&2\nexit 3\n')
@@ -100,7 +109,7 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.assertEqual((self.assets / 'manifest.json').read_text(), manifest)
 
     def test_go_test_edits_do_not_invalidate_the_fingerprint(self):
-        before = self.fingerprint()
+        before = self.base_fingerprint
         test = self.remote / 'main_test.go'
         for content in ['package main\n', 'package main\n// changed test\n']:
             test.write_text(content)
@@ -108,14 +117,18 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.assertEqual(self.builder().returncode, 0)
 
     def test_conpty_files_remain_packaged_even_with_test_or_documentation_names(self):
+        before = self.base_fingerprint
         for name in ['payload_test.go', 'README.md']:
             with self.subTest(name=name):
-                before = self.fingerprint()
-                (self.remote / 'conpty' / name).write_text('packaged input')
-                self.assertNotEqual(before, self.fingerprint())
+                extra = self.remote / 'conpty' / name
+                extra.write_text('packaged input')
+                try:
+                    self.assertNotEqual(before, self.fingerprint())
+                finally:
+                    extra.unlink()
 
     def test_app_only_edits_and_checkout_location_do_not_invalidate(self):
-        before = self.fingerprint()
+        before = self.base_fingerprint
         (self.root / 'lib').mkdir()
         (self.root / 'lib/main.dart').write_text('changed app')
         (self.remote / 'README.md').write_text('changed documentation')
@@ -131,7 +144,7 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         payload = self.assets / 'bin/linux-amd64/monkeymux.gz'
         for scenario in ['stamp', 'missing', 'corrupt']:
             with self.subTest(scenario=scenario):
-                self.stamp.write_text(self.fingerprint() + '\n')
+                self.stamp.write_text(self.base_fingerprint + '\n')
                 for relative, data in self.payloads.items():
                     dest = self.assets / relative
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +166,37 @@ class MonkeyMuxCacheTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('compile requested', result.stderr)
         self.assertFalse(self.stamp.exists())
+
+    def test_local_cross_worktree_cache_restores_valid_and_rejects_corrupt_or_ci(self):
+        # Seed a valid entry in the shared local cache directory.
+        cached = self.local_cache / self.base_fingerprint
+        shutil.copytree(self.assets, cached)
+
+        # Wipe checkout assets (simulating a brand-new git worktree).
+        shutil.rmtree(self.assets)
+        env_enabled = {**self.env, 'MONKEYMUX_LOCAL_CACHE': '1', 'CI': ''}
+        resumed = self.builder(env=env_enabled)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn('local cache', resumed.stdout)
+        verify(self.assets, '1.2.3')
+        self.assertEqual(self.stamp.read_text().strip(), self.base_fingerprint)
+
+        # --force must bypass the local cache and request compilation.
+        forced = self.builder('--force', env=env_enabled)
+        self.assertNotEqual(forced.returncode, 0)
+        self.assertIn('compile requested', forced.stderr)
+
+        # CI=true must ignore the local cache and request compilation.
+        shutil.rmtree(self.assets)
+        ci_res = self.builder(env={**env_enabled, 'CI': 'true'})
+        self.assertNotEqual(ci_res.returncode, 0)
+        self.assertIn('compile requested', ci_res.stderr)
+
+        # Corrupt local cache entry must be rejected and fall back to compile.
+        (cached / 'bin/linux-amd64/monkeymux.gz').write_bytes(b'corrupt')
+        corrupt_res = self.builder(env=env_enabled)
+        self.assertNotEqual(corrupt_res.returncode, 0)
+        self.assertIn('compile requested', corrupt_res.stderr)
 
     def test_manifest_version_hash_size_and_target_set_are_checked(self):
         for scenario in ['version', 'hash', 'size', 'duplicate', 'path']:
