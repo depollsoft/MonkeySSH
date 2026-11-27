@@ -696,7 +696,9 @@ def run_fallback_dart_analyze(
     cmd.append('--fatal-warnings' if fatal_warnings else '--no-fatal-warnings')
     if fatal_infos:
         cmd.append('--fatal-infos')
-    cmd.extend(raw_targets)
+    if raw_targets:
+        cmd.append('--')
+        cmd.extend(raw_targets)
     proc = subprocess.run(cmd, cwd=str(root))
     return proc.returncode
 

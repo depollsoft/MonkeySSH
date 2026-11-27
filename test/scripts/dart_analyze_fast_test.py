@@ -212,6 +212,24 @@ class DartAnalyzeFastIntegrationTest(unittest.TestCase):
         fixed = self._run_fast('--fatal-warnings', '--fatal-infos')
         self.assertEqual(fixed.returncode, 0, fixed.stdout + fixed.stderr)
 
+    def test_no_daemon_fallback_accepts_multiple_target_files(self):
+        lib_a = self.pkg / 'lib' / 'a.dart'
+        lib_b = self.pkg / 'lib' / 'b.dart'
+        lib_a.write_text('int first() => 1;\n', encoding='utf-8')
+        lib_b.write_text('int second() => 2;\n', encoding='utf-8')
+
+        ok = self._run_fast(
+            '--no-daemon', '--fatal-warnings', '--fatal-infos', '--', 'lib/a.dart', 'lib/b.dart'
+        )
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+        lib_b.write_text('int second() => missingName;\n', encoding='utf-8')
+        bad = self._run_fast(
+            '--no-daemon', '--fatal-warnings', '--fatal-infos', '--', 'lib/a.dart', 'lib/b.dart'
+        )
+        self.assertNotEqual(bad.returncode, 0, bad.stdout + bad.stderr)
+        self.assertIn('undefined_identifier', bad.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

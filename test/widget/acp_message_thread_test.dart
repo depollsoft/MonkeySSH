@@ -411,6 +411,20 @@ void main() {
     'sticky prompt finds its disposed message above a long response',
     (tester) async {
       final controller = ScrollController();
+      final longResponse = List.generate(
+        36,
+        (index) =>
+            'Response paragraph $index with enough words to wrap across '
+            'multiple lines and push this assistant response well past the '
+            'markdown virtualization threshold so the thread splits it into '
+            'several sliver children while keeping layout work fast. '
+            'Additional context for paragraph $index ensures each chunk '
+            'exercises multi-child scrolling and anchor recovery cleanly.',
+      ).join('\n\n');
+      expect(
+        splitAcpMarkdownForVirtualization(longResponse).length,
+        greaterThan(1),
+      );
       await tester.pumpWidget(
         wrap(
           SizedBox(
@@ -424,11 +438,7 @@ void main() {
                 ),
                 AcpAssistantMessageEntry(
                   id: 'very-long-response',
-                  markdown: List.generate(
-                    45,
-                    (index) =>
-                        'Response paragraph $index with enough words to wrap.',
-                  ).join('\n\n'),
+                  markdown: longResponse,
                 ),
               ],
             ),
