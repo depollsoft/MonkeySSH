@@ -610,7 +610,12 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertEqual(jobs['ci']['runs-on'], 'ubicloud-standard-4')
         gradle = next(s for s in jobs['build-android']['steps'] if s.get('id') == 'gradle-setup')
         self.assertIn("github.event_name == 'merge_group'", gradle['with']['cache-read-only'])
-        # Every platform build skips redundant implicit pub get after flutter-setup.
+        # Release platform builds must NOT pass --no-pub: Flutter skips
+        # regeneratePlatformSpecificTooling(releaseMode: true) when --no-pub is
+        # set, leaving dev-only plugins (e.g. integration_test) in generated
+        # registrants (breaking Android release compilation and polluting other
+        # release registrants). Flutter's cachePubGet already avoids redundant
+        # pub resolution when flutter-setup's package_config.json is up to date.
         for job_name, prefix in [
             ('build-android', 'flutter build apk'),
             ('build-ios', 'flutter build ios'),
@@ -618,9 +623,13 @@ class WorkflowContractsTest(unittest.TestCase):
             ('build-windows', 'flutter build windows'),
             ('build-linux', 'flutter build linux'),
         ]:
-            commands = '\n'.join(s.get('run', '') for s in jobs[job_name]['steps'])
-            self.assertIn(prefix, commands)
-            self.assertIn('--no-pub', commands)
+            build_steps = [
+                s.get('run', '')
+                for s in jobs[job_name]['steps']
+                if prefix in s.get('run', '')
+            ]
+            self.assertEqual(len(build_steps), 1, job_name)
+            self.assertNotIn('--no-pub', build_steps[0], job_name)
         # Nothing downstream consumes the compiled builds; only the diagnostics
         # logs are worth retaining.
         uploads = [step['with']['name'] for job in jobs.values()

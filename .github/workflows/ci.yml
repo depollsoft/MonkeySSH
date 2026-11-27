@@ -767,7 +767,6 @@ jobs:
       - name: Build release APK
         run: |
           flutter build apk \
-            --no-pub \
             --flavor production \
             --release \
             --no-tree-shake-icons \
@@ -872,7 +871,7 @@ jobs:
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_CAS_PATH="$HOME/Library/Caches/monkeyssh-xcode"
           export FLUTTER_XCODE_COMPILATION_CACHE_LIMIT_SIZE=2560
-          flutter build ios --no-pub --verbose \
+          flutter build ios --verbose \
             --flavor production \
             --release \
             --no-codesign \
@@ -977,7 +976,7 @@ jobs:
           export FLUTTER_XCODE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
           export FLUTTER_XCODE_COMPILATION_CACHE_CAS_PATH="$HOME/Library/Caches/monkeyssh-xcode"
           export FLUTTER_XCODE_COMPILATION_CACHE_LIMIT_SIZE=4096
-          flutter build macos --no-pub --release --no-tree-shake-icons --verbose \
+          flutter build macos --release --no-tree-shake-icons --verbose \
             2>&1 | tee "$RUNNER_TEMP/macos-build.log"
 
       - name: Save Apple build caches
@@ -1117,7 +1116,7 @@ jobs:
           --name "full Windows probe executes through cmd and PowerShell|Windows launcher command runs through cmd and prunes unused builds"
 
       - name: Build Windows
-        run: flutter build windows --no-pub --release --no-tree-shake-icons
+        run: flutter build windows --release --no-tree-shake-icons
 
   build-linux:
     name: Build Linux
@@ -1166,7 +1165,7 @@ jobs:
         wait: [apt-packages, monkeymux-download]
 
       - name: Build Linux
-        run: flutter build linux --no-pub --release --no-tree-shake-icons
+        run: flutter build linux --release --no-tree-shake-icons
 
   # ---------------------------------------------------------------------------
   # Gate job — the single required status check for branch protection.

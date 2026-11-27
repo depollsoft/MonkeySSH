@@ -593,7 +593,6 @@ jobs:
             ANDROID_FLAGS+=(--target-platform="$ANDROID_TARGET_PLATFORM")
           fi
           flutter build "${ANDROID_FLAGS[@]}" \
-            --no-pub \
             --flavor "$BUILD_FLAVOR" \
             --build-name="$BUILD_NAME" \
             --build-number="$BUILD_NUMBER" \
@@ -936,7 +935,6 @@ jobs:
             EXTRA_FLAGS+=(--config-only)
           fi
           flutter build ios \
-            --no-pub \
             --flavor "$BUILD_FLAVOR" \
             --release \
             --no-codesign \

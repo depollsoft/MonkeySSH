@@ -9,7 +9,7 @@ condition = 'AND'
 paths = [
   '''(?:^|/)(?:ios|macos)/Podfile\.lock$''',
   '''(?:^|/)lib/data/security/secret_encryption_service\.dart$''',
-  '''(?:^|/)test/unit/secret_encryption_service_test\.dart$''',
+  '''(?:^|/)test/unit/secret_encryption_service_(?:test|cases)\.dart$''',
   '''(?:^|/)test/data/repositories/ssh_key_repository_(?:test|cases)\.dart$''',
   '''(?:^|/)lib/domain/services/openssh_key_generator\.dart$''',
   '''(?:^|/)test/domain/services/openssh_key_generator_test\.dart$''',
