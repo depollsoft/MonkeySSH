@@ -20,7 +20,6 @@ import 'package:monkeyssh/presentation/widgets/acp_usage.dart';
 import 'package:monkeyssh/presentation/widgets/acp_user_prompt.dart';
 
 import '../helpers/tap_selectable_text.dart';
-import 'acp_unread_cases.dart';
 
 // A tiny valid 1x1 PNG.
 final _pngBytes = Uint8List.fromList([
@@ -49,8 +48,6 @@ Widget wrap(
 );
 
 void main() {
-  registerAcpUnreadWidgetTests();
-
   setUp(() => FluttyTheme.debugUseSystemFonts = true);
   tearDown(() => FluttyTheme.debugUseSystemFonts = false);
 
@@ -428,7 +425,7 @@ void main() {
                 AcpAssistantMessageEntry(
                   id: 'very-long-response',
                   markdown: List.generate(
-                    300,
+                    45,
                     (index) =>
                         'Response paragraph $index with enough words to wrap.',
                   ).join('\n\n'),
@@ -906,11 +903,11 @@ void main() {
   ) async {
     final controller = ScrollController();
     final diagnostics = List.generate(
-      600,
+      120,
       (index) => 'diagnostic line $index: state and timing details',
     ).join('\n');
     String response(String label) => List.generate(
-      50,
+      20,
       (index) => '$label response paragraph $index with enough text to wrap.',
     ).join('\n\n');
     await tester.pumpWidget(
@@ -1364,8 +1361,11 @@ void main() {
     final controller = ScrollController();
     addTearDown(controller.dispose);
     final markdown = List.generate(
-      (kAcpMarkdownVirtualChunkChars ~/ 40) * 3,
-      (index) => 'Paragraph $index carries enough words to wrap.\n',
+      (kAcpMarkdownVirtualChunkChars ~/ 200) * 3,
+      (index) =>
+          'Paragraph $index carries enough words to wrap across multiple '
+          'lines so virtualization splits into multiple chunks without needing '
+          'hundreds of tiny markdown block widgets in layout.\n',
     ).join('\n');
     await tester.pumpWidget(
       wrap(

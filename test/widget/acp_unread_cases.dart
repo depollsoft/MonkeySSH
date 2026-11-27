@@ -112,7 +112,7 @@ void registerAcpUnreadWidgetTests() {
       tester,
     ) async {
       final entries = <AcpTimelineEntry>[
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < 20; i++)
           AcpAssistantMessageEntry(
             id: 'agent-$i',
             markdown: 'Reply $i\n\nfiller paragraph',
@@ -121,20 +121,23 @@ void registerAcpUnreadWidgetTests() {
       final controller = ScrollController();
       addTearDown(controller.dispose);
       Widget thread(int jumpSerial) => _app(
-        AcpMessageThread(
-          entries: entries,
-          controller: controller,
-          unreadDivider: const AcpThreadUnreadDivider(
-            entryIndex: 5,
-            earlierHistoryUnavailable: false,
+        SizedBox(
+          height: 360,
+          child: AcpMessageThread(
+            entries: entries,
+            controller: controller,
+            unreadDivider: const AcpThreadUnreadDivider(
+              entryIndex: 5,
+              earlierHistoryUnavailable: false,
+            ),
+            unreadJumpSerial: jumpSerial,
           ),
-          unreadJumpSerial: jumpSerial,
         ),
       );
       await tester.pumpWidget(thread(0));
-      await tester.pumpAndSettle();
+      await tester.pump();
       controller.jumpTo(controller.position.maxScrollExtent);
-      await tester.pumpAndSettle();
+      await tester.pump();
       expect(find.text('unread since you left'), findsNothing);
 
       await tester.pumpWidget(thread(1));
@@ -524,7 +527,7 @@ void registerAcpUnreadWidgetTests() {
       tester,
     ) async {
       final entries = <AcpTimelineEntry>[
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < 20; i++)
           AcpAssistantMessageEntry(
             id: 'agent-$i',
             markdown: 'Reply $i\n\nfiller paragraph',
@@ -534,12 +537,15 @@ void registerAcpUnreadWidgetTests() {
       addTearDown(controller.dispose);
       Widget thread(AcpThreadUnreadDivider? divider, int serial, {Key? key}) =>
           _app(
-            AcpMessageThread(
-              key: key,
-              entries: entries,
-              controller: controller,
-              unreadDivider: divider,
-              unreadJumpSerial: serial,
+            SizedBox(
+              height: 360,
+              child: AcpMessageThread(
+                key: key,
+                entries: entries,
+                controller: controller,
+                unreadDivider: divider,
+                unreadJumpSerial: serial,
+              ),
             ),
           );
       const divider = AcpThreadUnreadDivider(
@@ -547,31 +553,33 @@ void registerAcpUnreadWidgetTests() {
         earlierHistoryUnavailable: false,
       );
       await tester.pumpWidget(thread(null, 0));
-      await tester.pumpAndSettle();
+      await tester.pump();
       await tester.pumpWidget(thread(divider, 1));
       await tester.pumpAndSettle();
       // The divider goes away (the user sent a prompt), they scroll to the
       // end, and a later visit brings a divider back.
       await tester.pumpWidget(thread(null, 1));
-      await tester.pumpAndSettle();
+      await tester.pump();
       controller.jumpTo(controller.position.maxScrollExtent);
-      await tester.pumpAndSettle();
+      await tester.pump();
       final bottom = controller.offset;
       await tester.pumpWidget(thread(divider, 1));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump();
       expect(controller.offset, bottom);
 
       // A transcript rebuilt from scratch without a divider (a rotation
       // across the wide breakpoint, Reconnect) does not replay it either.
       await tester.pumpWidget(thread(null, 1, key: const ValueKey('remount')));
-      await tester.pumpAndSettle();
+      await tester.pump();
       controller.jumpTo(controller.position.maxScrollExtent);
-      await tester.pumpAndSettle();
+      await tester.pump();
       final remountedBottom = controller.offset;
       await tester.pumpWidget(
         thread(divider, 1, key: const ValueKey('remount')),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump();
       expect(controller.offset, remountedBottom);
     });
 

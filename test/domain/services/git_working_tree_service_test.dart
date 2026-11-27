@@ -181,6 +181,21 @@ GitChangedFile _file(
   (file) => file.group == group && file.path == path,
 );
 
+void _copyDirectorySync(Directory source, Directory destination) {
+  destination.createSync(recursive: true);
+  for (final entity in source.listSync(followLinks: false)) {
+    final targetPath =
+        '${destination.path}${Platform.pathSeparator}${entity.uri.pathSegments.where((segment) => segment.isNotEmpty).last}';
+    if (entity is Directory) {
+      _copyDirectorySync(entity, Directory(targetPath));
+    } else if (entity is File) {
+      entity.copySync(targetPath);
+    } else if (entity is Link) {
+      Link(targetPath).createSync(entity.targetSync());
+    }
+  }
+}
+
 void main() {
   group('parseGitNumstatZ', () {
     test('reads text, binary, and rename entries', () {
@@ -727,38 +742,52 @@ void main() {
   });
 
   group('GitWorkingTreeService against real git', () {
+    late Directory templateTemp;
+    late Directory templateRepo;
     late Directory temp;
     late Directory repo;
     late GitWorkingTreeService service;
 
-    setUp(() async {
+    setUpAll(() async {
+      templateTemp = Directory.systemTemp.createTempSync(
+        'git_working_tree_template',
+      );
+      templateRepo = Directory('${templateTemp.path}/repo')..createSync();
+      await _git(templateRepo, ['init', '-q']);
+      _write(templateRepo, 'f1.txt', 'a\nb\nc\n');
+      _write(templateRepo, 'sp ace.txt', 'x\n');
+      _write(templateRepo, 'gone.txt', 'bye\n');
+      _write(templateRepo, '[a]*.txt', 'glob\n');
+      _write(templateRepo, 'a.txt', 'plain\n');
+      await _git(templateRepo, ['add', '.']);
+      await _git(templateRepo, ['commit', '-qm', 'init']);
+
+      _write(templateRepo, 'f1.txt', 'a\nB\nc\nd\n');
+      await _git(templateRepo, ['mv', 'sp ace.txt', 'renamed.txt']);
+      File('${templateRepo.path}/gone.txt').deleteSync();
+      _write(templateRepo, 'st.txt', 'staged\n');
+      await _git(templateRepo, ['add', 'st.txt']);
+      _write(templateRepo, 'st.txt', 'staged\nmore\n');
+      _write(templateRepo, '[a]*.txt', 'glob\nchanged\n');
+      _write(templateRepo, 'a.txt', 'plain\nalso changed\n');
+      _write(templateRepo, 'untracked.txt', 'u1\nu2');
+      _write(templateRepo, 'd/new.md', 'deep\n');
+      _write(templateRepo, 'ünï.txt', 'unicode\n');
+      File('${templateRepo.path}/bin.dat').writeAsBytesSync([0, 1, 2, 0, 3]);
+    });
+
+    tearDownAll(() {
+      templateTemp.deleteSync(recursive: true);
+    });
+
+    setUp(() {
       temp = Directory.systemTemp.createTempSync('git_working_tree_test');
-      repo = Directory('${temp.path}/repo')..createSync();
+      repo = Directory('${temp.path}/repo');
+      _copyDirectorySync(templateRepo, repo);
       service = GitWorkingTreeService(
         _localRunner(home: temp.path),
         markerFactory: () => _marker,
       );
-      await _git(repo, ['init', '-q']);
-      _write(repo, 'f1.txt', 'a\nb\nc\n');
-      _write(repo, 'sp ace.txt', 'x\n');
-      _write(repo, 'gone.txt', 'bye\n');
-      _write(repo, '[a]*.txt', 'glob\n');
-      _write(repo, 'a.txt', 'plain\n');
-      await _git(repo, ['add', '.']);
-      await _git(repo, ['commit', '-qm', 'init']);
-
-      _write(repo, 'f1.txt', 'a\nB\nc\nd\n');
-      await _git(repo, ['mv', 'sp ace.txt', 'renamed.txt']);
-      File('${repo.path}/gone.txt').deleteSync();
-      _write(repo, 'st.txt', 'staged\n');
-      await _git(repo, ['add', 'st.txt']);
-      _write(repo, 'st.txt', 'staged\nmore\n');
-      _write(repo, '[a]*.txt', 'glob\nchanged\n');
-      _write(repo, 'a.txt', 'plain\nalso changed\n');
-      _write(repo, 'untracked.txt', 'u1\nu2');
-      _write(repo, 'd/new.md', 'deep\n');
-      _write(repo, 'ünï.txt', 'unicode\n');
-      File('${repo.path}/bin.dat').writeAsBytesSync([0, 1, 2, 0, 3]);
     });
 
     tearDown(() {

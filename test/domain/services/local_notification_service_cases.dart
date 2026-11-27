@@ -1,0 +1,953 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
+import 'package:monkeyssh/domain/services/push/push_tap_payload.dart';
+import 'package:monkeyssh/domain/services/terminal_notification.dart';
+
+import 'acp_notification_location_cases.dart';
+import 'acp_notification_target_cases.dart';
+import 'app_permission_service_cases.dart' show answerPermissionChannel;
+
+/// Registers tests from local_notification_service_test.dart.
+void registerDomainServicesLocalNotificationServiceTests() {
+  group('local_notification_service', () {
+    group('local_notification_service', () {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      // Unit tests do not run the native plugin registrant.
+      AndroidFlutterLocalNotificationsPlugin.registerWith();
+
+      test(
+        'terminal dispatch preserves permission and missing-plugin results',
+        () async {
+          const channel = MethodChannel(
+            'dexterous.com/flutter/local_notifications',
+          );
+          const payload = TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+          );
+          final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+          FlutterLocalNotificationsPlatform.instance =
+              IOSFlutterLocalNotificationsPlugin();
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          final service = LocalNotificationService();
+          final calls = <MethodCall>[];
+          var permission = AppPermissionStatus.granted;
+          var missingPlugin = false;
+          final permissionCalls = answerPermissionChannel(
+            (_) async => permission.name,
+          );
+          final messenger =
+              TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+                ..setMockMethodCallHandler(channel, (call) async {
+                  calls.add(call);
+                  if (call.method == 'getNotificationAppLaunchDetails') {
+                    return null;
+                  }
+                  if (call.method == 'show') {
+                    if (missingPlugin) throw MissingPluginException();
+                    expect(
+                      call.arguments,
+                      containsPair('payload', payload.encode()),
+                    );
+                    expect(call.arguments, containsPair('id', 42));
+                  }
+                  return true;
+                });
+          addTearDown(() {
+            service.dispose();
+            messenger.setMockMethodCallHandler(channel, null);
+            FlutterLocalNotificationsPlatform.instance = previousPlatform;
+            debugDefaultTargetPlatformOverride = null;
+          });
+          for (final sound in TerminalNotificationSound.values) {
+            for (final scenario in [
+              (AppPermissionStatus.granted, false),
+              (AppPermissionStatus.denied, false),
+              (AppPermissionStatus.permanentlyDenied, false),
+              (AppPermissionStatus.granted, true),
+            ]) {
+              (permission, missingPlugin) = scenario;
+              calls.clear();
+              permissionCalls.clear();
+              expect(
+                await service.showTerminalNotification(
+                  notificationId: 42,
+                  title: 'Ready',
+                  body: 'Done',
+                  payload: payload,
+                  sound: sound,
+                ),
+                permission.isGranted && !missingPlugin,
+              );
+              // Permission comes from the app's channel, not the plugin.
+              expect(
+                permissionCalls.map((call) => (call.method, call.arguments)),
+                [('request', AppPermission.notifications.name)],
+              );
+              expect(
+                calls.where((call) => call.method == 'requestPermissions'),
+                isEmpty,
+              );
+              expect(
+                calls.where((call) => call.method == 'show'),
+                hasLength(permission.isGranted ? 1 : 0),
+              );
+            }
+          }
+          calls.clear();
+          await service.clearTerminalNotification(42);
+          await service.clearTerminalNotification(43);
+          expect(calls.map((call) => (call.method, call.arguments)), [
+            ('cancel', 42),
+            ('cancel', 43),
+          ]);
+        },
+      );
+
+      test('android asks the permissions channel, not the plugin', () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            AndroidFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        final service = LocalNotificationService();
+        final pluginCalls = <String>[];
+        var permission = AppPermissionStatus.granted;
+        final permissionCalls = answerPermissionChannel(
+          (_) async => permission.name,
+        );
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                pluginCalls.add(call.method);
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+
+        for (final status in AppPermissionStatus.values) {
+          permission = status;
+          pluginCalls.clear();
+          permissionCalls.clear();
+          expect(
+            await service.showTerminalNotification(
+              notificationId: 42,
+              title: 'Ready',
+              body: 'Done',
+              payload: const TerminalNotificationPayload(
+                hostId: 7,
+                connectionId: 21,
+              ),
+            ),
+            status.isGranted,
+            reason: status.name,
+          );
+          expect(permissionCalls, hasLength(1));
+          expect(
+            pluginCalls,
+            isNot(contains('requestNotificationsPermission')),
+          );
+          expect(pluginCalls.contains('show'), status.isGranted);
+        }
+      });
+
+      // A push for a window lands in the slot the app's own notifications for
+      // it use; the app clears what it showed there, never the push.
+      test('android leaves a push in a window slot', () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            AndroidFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        final service = LocalNotificationService();
+        final cancelled = <Object?>[];
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                switch (call.method) {
+                  case 'getNotificationAppLaunchDetails':
+                    return null;
+                  case 'getActiveNotifications':
+                    return [
+                      {'id': 7, 'channelId': 'agent-attention'},
+                      {'id': 8, 'channelId': 'agent-updates-v2'},
+                      {'id': 9, 'channelId': 'tmux-alerts'},
+                      // Android before 8: no channel, but a push's tap payload.
+                      {'id': 11, 'payload': pushTapPayload('sealed')},
+                    ];
+                  case 'cancel':
+                    cancelled.add((call.arguments as Map)['id']);
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+
+        for (final id in [7, 8, 9, 10, 11]) {
+          await service.clearWindowNotification(id);
+        }
+        expect(cancelled, [9, 10]);
+      });
+
+      test('a push clears only what the app raised in a slot', () {
+        final active = [
+          const ActiveNotification(id: 1, channelId: 'agent-updates-v2'),
+          const ActiveNotification(id: 2, channelId: 'tmux-alerts'),
+          ActiveNotification(id: 3, payload: pushTapPayload('sealed')),
+        ];
+        expect(localNotificationSlots(active, [1, 2, 3, 4]), [2]);
+      });
+
+      test('macOS still asks the plugin and passes the sound choice', () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            MacOSFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        final service = LocalNotificationService();
+        final requests = <Object?>[];
+        var permitted = true;
+        final permissionCalls = answerPermissionChannel((_) async => 'granted');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                if (call.method == 'requestPermissions') {
+                  requests.add((call.arguments as Map)['sound']);
+                  return permitted;
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+
+        for (final sound in TerminalNotificationSound.values) {
+          for (final allowed in [true, false]) {
+            permitted = allowed;
+            expect(
+              await service.showTerminalNotification(
+                notificationId: 42,
+                title: 'Ready',
+                body: 'Done',
+                payload: const TerminalNotificationPayload(
+                  hostId: 7,
+                  connectionId: 21,
+                ),
+                sound: sound,
+              ),
+              allowed,
+            );
+            expect(
+              requests.removeLast(),
+              sound == TerminalNotificationSound.system,
+            );
+          }
+        }
+        expect(permissionCalls, isEmpty);
+      });
+
+      test('a rejected permission request skips the notification', () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            IOSFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final service = LocalNotificationService();
+        var shown = 0;
+        answerPermissionChannel(
+          (_) async => throw PlatformException(code: 'invalid_args'),
+        );
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                if (call.method == 'show') shown++;
+                return null;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+
+        expect(
+          await service.showTerminalNotification(
+            notificationId: 42,
+            title: 'Ready',
+            body: 'Done',
+            payload: const TerminalNotificationPayload(
+              hostId: 7,
+              connectionId: 21,
+            ),
+          ),
+          isFalse,
+        );
+        expect(shown, 0);
+      });
+
+      for (final delayPermission in [true, false]) {
+        final delayedStep = delayPermission ? 'permission request' : 'show';
+        test(
+          'tmux cancellation waits for delayed $delayedStep and retires its queue',
+          () async {
+            const channel = MethodChannel(
+              'dexterous.com/flutter/local_notifications',
+            );
+            final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+            FlutterLocalNotificationsPlatform.instance =
+                IOSFlutterLocalNotificationsPlugin();
+            debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+            final service = LocalNotificationService();
+            final pending = Completer<void>();
+            final started = Completer<void>();
+            final delivered = <int>{};
+            final operations = <String>[];
+            answerPermissionChannel((_) async {
+              if (delayPermission && !started.isCompleted) {
+                started.complete();
+                await pending.future;
+              }
+              return 'granted';
+            });
+            final messenger =
+                TestDefaultBinaryMessengerBinding
+                    .instance
+                    .defaultBinaryMessenger
+                  ..setMockMethodCallHandler(channel, (call) async {
+                    if (call.method == 'getNotificationAppLaunchDetails') {
+                      return null;
+                    }
+                    if (!delayPermission &&
+                        call.method == 'show' &&
+                        !started.isCompleted) {
+                      started.complete();
+                      await pending.future;
+                    }
+                    if (call.method == 'show') {
+                      final id = (call.arguments as Map)['id'] as int;
+                      delivered.add(id);
+                      operations.add('show $id');
+                    } else if (call.method == 'cancel') {
+                      final id = call.arguments as int;
+                      delivered.remove(id);
+                      operations.add('cancel $id');
+                    }
+                    return true;
+                  });
+            addTearDown(() {
+              service.dispose();
+              messenger.setMockMethodCallHandler(channel, null);
+              FlutterLocalNotificationsPlatform.instance = previousPlatform;
+              debugDefaultTargetPlatformOverride = null;
+            });
+            Future<void> show(int id) => service.showTmuxAlert(
+              notificationId: id,
+              title: 'Ready',
+              body: 'Done',
+              payload: const TmuxAlertNotificationPayload(
+                hostId: 7,
+                connectionId: 21,
+                tmuxSessionName: 'main',
+                windowIndex: 1,
+              ),
+            );
+
+            final showing = show(42);
+            await started.future;
+            final clearing = service.clearTerminalNotification(42);
+            // A pending permission dialog or platform show must not block other IDs.
+            await show(43);
+            expect(delivered, {43});
+            expect(operations, ['show 43']);
+            pending.complete();
+            await Future.wait([showing, clearing]);
+            expect(operations, ['show 43', 'show 42', 'cancel 42']);
+            expect(delivered, {43});
+            expect(service.pendingNotificationOperationCount, 0);
+
+            // The same ID can be used again after its previous queue was removed.
+            await show(42);
+            expect(delivered, {42, 43});
+            await service.clearTerminalNotification(42);
+            expect(delivered, {43});
+            expect(service.pendingNotificationOperationCount, 0);
+          },
+        );
+      }
+
+      test('a failed tmux show does not prevent queued cancellation', () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            IOSFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final service = LocalNotificationService();
+        final cancelled = <int>[];
+        answerPermissionChannel((_) async => 'granted');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                if (call.method == 'show') {
+                  throw PlatformException(code: 'failed');
+                }
+                if (call.method == 'cancel') {
+                  cancelled.add(call.arguments as int);
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+        final showing = service.showTmuxAlert(
+          notificationId: 42,
+          title: 'Ready',
+          body: 'Done',
+          payload: const TmuxAlertNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+            tmuxSessionName: 'main',
+            windowIndex: 1,
+          ),
+        );
+        final expectedError = expectLater(
+          showing,
+          throwsA(isA<PlatformException>()),
+        );
+        final clearing = service.clearTerminalNotification(42);
+        await expectedError;
+        await clearing;
+        expect(cancelled, [42]);
+        expect(service.pendingNotificationOperationCount, 0);
+      });
+
+      group('TmuxAlertNotificationPayload', () {
+        test('round-trips tmux alert routing fields', () {
+          const payload = TmuxAlertNotificationPayload(
+            hostId: 12,
+            connectionId: 34,
+            tmuxSessionName: 'work',
+            windowIndex: 5,
+            windowId: '@9',
+          );
+
+          expect(
+            TmuxAlertNotificationPayload.decode(payload.encode()),
+            payload,
+          );
+        });
+
+        test('ignores malformed and unrelated payloads', () {
+          expect(TmuxAlertNotificationPayload.decode(null), isNull);
+          expect(TmuxAlertNotificationPayload.decode('not json'), isNull);
+          expect(
+            TmuxAlertNotificationPayload.decode('{"type":"other"}'),
+            isNull,
+          );
+          expect(
+            TmuxAlertNotificationPayload.decode(
+              '{"type":"tmux-alert","version":1,"hostId":12}',
+            ),
+            isNull,
+          );
+          expect(
+            TmuxAlertNotificationPayload.decode(
+              '{"type":"tmux-alert","version":1,"hostId":12,'
+              '"connectionId":34,"tmuxSessionName":"work","windowIndex":5,'
+              '"windowId":"not-a-window-id"}',
+            ),
+            isNull,
+          );
+        });
+      });
+
+      test(
+        'buildTmuxAlertTerminalLocation targets the source connection window',
+        () {
+          final location = buildTmuxAlertTerminalLocation(
+            const TmuxAlertNotificationPayload(
+              hostId: 12,
+              connectionId: 34,
+              tmuxSessionName: 'project main',
+              windowIndex: 5,
+              windowId: '@9',
+            ),
+          );
+
+          expect(
+            location,
+            '/terminal/12?connectionId=34&tmuxSession=project+main&tmuxWindow=5&tmuxWindowId=%409',
+          );
+        },
+      );
+
+      group('TerminalNotificationPayload', () {
+        test('round-trips terminal notification routing fields', () {
+          const payload = TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+            platformNotificationId: 4321,
+            notificationIdentifier: 'build',
+            reportsActivation: true,
+            focusOnActivation: false,
+          );
+
+          expect(TerminalNotificationPayload.decode(payload.encode()), payload);
+        });
+
+        test('round-trips mux window routing fields', () {
+          const payload = TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+            tmuxSessionName: 'work',
+            tmuxWindowIndex: 3,
+            tmuxWindowId: '@9',
+          );
+
+          expect(TerminalNotificationPayload.decode(payload.encode()), payload);
+        });
+
+        test('decodes legacy navigation-only payloads', () {
+          expect(
+            TerminalNotificationPayload.decode(
+              '{"type":"terminal-notification","version":1,'
+              '"hostId":7,"connectionId":21}',
+            ),
+            const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+          );
+        });
+
+        test('decodes version 3 payloads without window context', () {
+          expect(
+            TerminalNotificationPayload.decode(
+              '{"type":"terminal-notification","version":3,'
+              '"hostId":7,"connectionId":21,'
+              '"platformNotificationId":4321,'
+              '"reportsActivation":false,"focusOnActivation":true}',
+            ),
+            const TerminalNotificationPayload(
+              hostId: 7,
+              connectionId: 21,
+              platformNotificationId: 4321,
+            ),
+          );
+        });
+
+        test('rejects unknown payload versions', () {
+          expect(
+            TerminalNotificationPayload.decode(
+              '{"type":"terminal-notification","version":99,'
+              '"hostId":7,"connectionId":21}',
+            ),
+            isNull,
+          );
+        });
+
+        test('sanitizes malformed mux window fields to session routing', () {
+          expect(
+            TerminalNotificationPayload.decode(
+              jsonEncode({
+                'type': 'terminal-notification',
+                'version': 4,
+                'hostId': 7,
+                'connectionId': 21,
+                'tmuxSessionName': '  ',
+                'tmuxWindowIndex': -1,
+                'tmuxWindowId': 'not-a-window-id',
+              }),
+            ),
+            const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+          );
+        });
+
+        test(
+          'ignores wrong-typed mux window fields instead of dropping taps',
+          () {
+            expect(
+              TerminalNotificationPayload.decode(
+                jsonEncode({
+                  'type': 'terminal-notification',
+                  'version': 4,
+                  'hostId': 7,
+                  'connectionId': 21,
+                  'tmuxSessionName': 42,
+                  'tmuxWindowIndex': '3',
+                  'tmuxWindowId': true,
+                }),
+              ),
+              const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+            );
+          },
+        );
+
+        test('ignores malformed and unrelated payloads', () {
+          expect(TerminalNotificationPayload.decode(null), isNull);
+          expect(TerminalNotificationPayload.decode('not json'), isNull);
+          expect(
+            TerminalNotificationPayload.decode('{"type":"tmux-alert"}'),
+            isNull,
+          );
+          expect(
+            TerminalNotificationPayload.decode(
+              '{"type":"terminal-notification","version":1,"hostId":7}',
+            ),
+            isNull,
+          );
+        });
+
+        test('does not decode as a tmux alert and vice versa', () {
+          const terminal = TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+          );
+          expect(
+            TmuxAlertNotificationPayload.decode(terminal.encode()),
+            isNull,
+          );
+        });
+      });
+
+      group('buildNotificationSubtitle', () {
+        test('joins context, dropping blanks and repeats of the title', () {
+          expect(
+            buildNotificationSubtitle(<String?>[
+              ' devbox ',
+              'work',
+              null,
+              '',
+              'Fix  login',
+              'Claude Code',
+            ], title: 'fix login'),
+            'devbox · work · Claude Code',
+          );
+        });
+
+        test('drops parts that repeat an earlier part', () {
+          expect(
+            buildNotificationSubtitle(const <String?>[
+              'devbox',
+              'Devbox',
+              'work',
+            ]),
+            'devbox · work',
+          );
+        });
+
+        test('returns null when nothing is left', () {
+          expect(
+            buildNotificationSubtitle(const <String?>[
+              null,
+              ' ',
+              'Title',
+            ], title: 'title'),
+            isNull,
+          );
+          expect(buildNotificationSubtitle(const <String?>[]), isNull);
+        });
+      });
+
+      test('subtitle reaches the Darwin subtitle and Android sub-text', () {
+        final terminal = buildTerminalNotificationDetails(
+          urgency: TerminalNotificationUrgency.normal,
+          sound: TerminalNotificationSound.silent,
+          subtitle: 'devbox · work',
+        );
+        expect(terminal.android?.subText, 'devbox · work');
+        expect(terminal.iOS?.subtitle, 'devbox · work');
+        expect(terminal.macOS?.subtitle, 'devbox · work');
+
+        final bare = buildTerminalNotificationDetails(
+          urgency: TerminalNotificationUrgency.normal,
+          sound: TerminalNotificationSound.silent,
+        );
+        expect(bare.android?.subText, isNull);
+        expect(bare.iOS?.subtitle, isNull);
+      });
+
+      test('Kitty urgency and sound map to native notification details', () {
+        final quiet = buildTerminalNotificationDetails(
+          urgency: TerminalNotificationUrgency.low,
+          sound: TerminalNotificationSound.silent,
+          timeout: const Duration(milliseconds: 1250),
+        );
+        expect(
+          quiet.android?.channelId,
+          terminalNotificationLowSilentChannelId,
+        );
+        expect(quiet.android?.importance, Importance.low);
+        expect(quiet.android?.priority, Priority.low);
+        expect(quiet.android?.playSound, isFalse);
+        expect(quiet.android?.silent, isTrue);
+        expect(quiet.android?.timeoutAfter, 1250);
+        expect(quiet.iOS?.presentSound, isFalse);
+        expect(quiet.iOS?.interruptionLevel, InterruptionLevel.passive);
+
+        final critical = buildTerminalNotificationDetails(
+          urgency: TerminalNotificationUrgency.critical,
+          sound: TerminalNotificationSound.system,
+        );
+        expect(
+          critical.android?.channelId,
+          terminalNotificationCriticalChannelId,
+        );
+        expect(critical.android?.importance, Importance.max);
+        expect(critical.android?.priority, Priority.max);
+        expect(critical.android?.playSound, isTrue);
+        expect(critical.iOS?.presentSound, isTrue);
+        expect(critical.iOS?.interruptionLevel, InterruptionLevel.active);
+
+        final channels =
+            LocalNotificationService.debugTerminalNotificationChannels;
+        for (final channelId in <String>{
+          terminalNotificationLowSilentChannelId,
+          terminalNotificationSilentChannelId,
+          terminalNotificationCriticalSilentChannelId,
+        }) {
+          expect(
+            channels
+                .singleWhere((channel) => channel.id == channelId)
+                .playSound,
+            isFalse,
+          );
+        }
+      });
+
+      test(
+        'Kitty identifiers replace within a connection without collisions',
+        () {
+          expect(
+            buildTerminalNotificationId(21, identifier: 'build'),
+            buildTerminalNotificationId(21, identifier: 'build'),
+          );
+          expect(
+            buildTerminalNotificationId(21, identifier: 'build'),
+            isNot(buildTerminalNotificationId(21, identifier: 'deploy')),
+          );
+          expect(
+            buildTerminalNotificationId(21, identifier: 'build'),
+            isNot(buildTerminalNotificationId(22, identifier: 'build')),
+          );
+          expect(
+            buildTerminalNotificationId(21, identifier: 'build/a'),
+            isNot(buildTerminalNotificationId(21, identifier: 'build+a')),
+          );
+        },
+      );
+
+      test(
+        'buildTerminalNotificationLocation targets the source connection',
+        () {
+          final location = buildTerminalNotificationLocation(
+            const TerminalNotificationPayload(hostId: 7, connectionId: 21),
+          );
+
+          expect(location, '/terminal/7?connectionId=21');
+        },
+      );
+
+      test('buildTerminalNotificationLocation targets the emitting window', () {
+        final location = buildTerminalNotificationLocation(
+          const TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+            tmuxSessionName: 'work',
+            tmuxWindowIndex: 3,
+            tmuxWindowId: '@9',
+          ),
+        );
+
+        expect(
+          location,
+          '/terminal/7?connectionId=21&tmuxSession=work&tmuxWindow=3&tmuxWindowId=%409',
+        );
+      });
+
+      test(
+        'buildTerminalNotificationLocation omits partial window context',
+        () {
+          final location = buildTerminalNotificationLocation(
+            const TerminalNotificationPayload(
+              hostId: 7,
+              connectionId: 21,
+              tmuxWindowIndex: 3,
+              tmuxWindowId: '@9',
+            ),
+          );
+
+          expect(location, '/terminal/7?connectionId=21');
+        },
+      );
+
+      group('AcpNotificationPayload', () {
+        test('round-trips completion, permission, and write fields', () {
+          const completion = AcpNotificationPayload(
+            kind: AcpNotificationKind.completion,
+            hostId: 3,
+            providerId: 'builtin:copilot-cli',
+            bridgeId: 'bridge-1',
+            acpSessionId: 'session-1',
+          );
+          const permission = AcpNotificationPayload(
+            kind: AcpNotificationKind.permission,
+            hostId: 3,
+            providerId: 'builtin:opencode',
+            bridgeId: 'bridge-2',
+            acpSessionId: 'session-2',
+          );
+
+          const write = AcpNotificationPayload(
+            kind: AcpNotificationKind.writeApproval,
+            hostId: 3,
+            providerId: 'builtin:opencode',
+            bridgeId: 'bridge-2',
+            acpSessionId: 'session-2',
+          );
+
+          expect(
+            AcpNotificationPayload.decode(completion.encode()),
+            completion,
+          );
+          expect(
+            AcpNotificationPayload.decode(permission.encode()),
+            permission,
+          );
+          expect(AcpNotificationPayload.decode(write.encode()), write);
+          expect(
+            acpNotificationIdFor(permission),
+            acpNotificationIdFor(permission),
+          );
+          expect(
+            acpNotificationIdFor(write),
+            isNot(acpNotificationIdFor(permission)),
+          );
+          expect(
+            acpNotificationIdFor(write),
+            inInclusiveRange(0x40000000, 0x7fffffff),
+          );
+          expect(
+            buildTerminalNotificationId(3, identifier: 'session-2'),
+            inInclusiveRange(0, 0x3fffffff),
+          );
+        });
+
+        test('ignores malformed and unrelated payloads', () {
+          expect(AcpNotificationPayload.decode(null), isNull);
+          expect(AcpNotificationPayload.decode('not json'), isNull);
+          expect(
+            AcpNotificationPayload.decode('{"type":"tmux-alert"}'),
+            isNull,
+          );
+          expect(
+            AcpNotificationPayload.decode(
+              '{"type":"acp-notification","version":1,"kind":"completion"}',
+            ),
+            isNull,
+          );
+          expect(
+            AcpNotificationPayload.decode(
+              '{"type":"acp-notification","version":1,"kind":"unknown-kind",'
+              '"hostId":3,"providerId":"builtin:copilot-cli",'
+              '"bridgeId":"bridge-1","acpSessionId":"session-1"}',
+            ),
+            isNull,
+          );
+        });
+
+        test('does not decode as a tmux alert or terminal notification', () {
+          const payload = AcpNotificationPayload(
+            kind: AcpNotificationKind.completion,
+            hostId: 3,
+            providerId: 'builtin:copilot-cli',
+            bridgeId: 'bridge-1',
+            acpSessionId: 'session-1',
+          );
+          expect(TmuxAlertNotificationPayload.decode(payload.encode()), isNull);
+          expect(TerminalNotificationPayload.decode(payload.encode()), isNull);
+        });
+
+        test('encode never includes prompt/tool/path/content fields', () {
+          const payload = AcpNotificationPayload(
+            kind: AcpNotificationKind.permission,
+            hostId: 3,
+            providerId: 'builtin:copilot-cli',
+            bridgeId: 'bridge-1',
+            acpSessionId: 'session-1',
+          );
+          final encoded = payload.encode();
+          for (final forbidden in [
+            'prompt',
+            'tool',
+            'path',
+            'content',
+            'title',
+          ]) {
+            expect(encoded.toLowerCase(), isNot(contains(forbidden)));
+          }
+        });
+      });
+
+      test(
+        'buildAcpNotificationLocation deep-links to the native terminal',
+        () {
+          final location = buildAcpNotificationLocation(
+            const AcpNotificationPayload(
+              kind: AcpNotificationKind.completion,
+              hostId: 3,
+              providerId: 'builtin:copilot-cli',
+              bridgeId: 'bridge-1',
+              acpSessionId: 'session-1',
+            ),
+          );
+
+          final uri = Uri.parse(location);
+          expect(uri.path, '/terminal/3');
+          expect(uri.queryParameters[acpAgentChatSessionQueryKey], 'session-1');
+          // Must not target the nonexistent /home route.
+          expect(location.startsWith('/home'), isFalse);
+        },
+      );
+    });
+    registerAcpNotificationLocationTests();
+    registerAcpNotificationTargetTests();
+  });
+}

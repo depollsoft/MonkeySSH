@@ -1887,6 +1887,10 @@ esac
     File(
       '${bin.path}/curl',
     ).writeAsStringSync('#!/bin/sh\necho \'{"ok":true,"version":"9.8.7"}\'\n');
+    // Shadow host brew/bun so the login PATH prefix never invokes real host
+    // package managers during this offline fixture test.
+    File('${bin.path}/brew').writeAsStringSync('#!/bin/sh\nexit 1\n');
+    File('${bin.path}/bun').writeAsStringSync('#!/bin/sh\nexit 1\n');
     // The installer's layout: ~/.local/bin/pi -> ../../.pi/agent/bin/pi.
     final agent = Directory('${root.path}/.pi/agent');
     Directory('${agent.path}/bin').createSync(recursive: true);
@@ -1900,6 +1904,8 @@ esac
       '+x',
       '${bin.path}/npm',
       '${bin.path}/curl',
+      '${bin.path}/brew',
+      '${bin.path}/bun',
       '${agent.path}/bin/pi',
     ]);
     final script = File('${root.path}/metadata.sh')
@@ -3704,6 +3710,7 @@ exit "$result"
           timeouts: const AgentProbeTimeouts(
             metadataProbe: Duration(milliseconds: 50),
             metadataProbeBase: Duration(milliseconds: 50),
+            metadataProbePerBatch: Duration.zero,
           ),
         ).refreshAll(session);
         expect(runtimes.first.installedVersion, '2.0.0');
