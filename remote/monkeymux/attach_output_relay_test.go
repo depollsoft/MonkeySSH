@@ -74,6 +74,8 @@ func isTimeout(err error) bool {
 // while the relay holds them, and the terminal receives all of it, in order,
 // once it drains again.
 func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
+	t.Parallel()
+	const writeTimeout = 250 * time.Millisecond
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -81,11 +83,11 @@ func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
 	result := startAttachRelay(t, terminal, client, attachOutputBufferLimitBytes, nil)
 
 	output := attachRelayTestOutput(1024 * 1024)
-	stall := time.AfterFunc(attachWriteTimeout+500*time.Millisecond, func() {
+	stall := time.AfterFunc(writeTimeout+150*time.Millisecond, func() {
 		close(terminal.release)
 	})
 	defer stall.Stop()
-	if err := writeAttachConnection(server, output); err != nil {
+	if err := writeAttachConnectionWithTimeout(server, output, writeTimeout); err != nil {
 		t.Fatalf("server write while the terminal stalled: %v", err)
 	}
 	if err := server.Close(); err != nil {
@@ -103,13 +105,15 @@ func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
 // relay reads nothing ahead, so a stalled terminal still stalls the server's
 // writes as a plain copy would.
 func TestRelayAttachOutputWithoutReadAheadCopiesLikeIoCopy(t *testing.T) {
+	t.Parallel()
+	const writeTimeout = 150 * time.Millisecond
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
 	terminal := &stalledWriter{release: make(chan struct{})}
 	result := startAttachRelay(t, terminal, client, 1, nil)
 
-	err := writeAttachConnection(server, attachRelayTestOutput(4*attachWriteChunkBytes))
+	err := writeAttachConnectionWithTimeout(server, attachRelayTestOutput(4*attachWriteChunkBytes), writeTimeout)
 	if !isTimeout(err) {
 		t.Fatalf("server write to a stalled plain copy = %v, want a timeout", err)
 	}
@@ -126,6 +130,8 @@ func TestRelayAttachOutputWithoutReadAheadCopiesLikeIoCopy(t *testing.T) {
 // Past its limit the relay stops reading, so a terminal that never drains
 // still reaches the server's write timeout instead of growing the client.
 func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
+	t.Parallel()
+	const writeTimeout = 150 * time.Millisecond
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -133,7 +139,7 @@ func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
 	const limit = 64 * 1024
 	result := startAttachRelay(t, terminal, client, limit, nil)
 
-	err := writeAttachConnection(server, attachRelayTestOutput(4*limit))
+	err := writeAttachConnectionWithTimeout(server, attachRelayTestOutput(4*limit), writeTimeout)
 	if !isTimeout(err) {
 		t.Fatalf("server write past the relay limit = %v, want a timeout", err)
 	}
@@ -172,6 +178,7 @@ func (w *recordingWriter) delivered(offset uint64) {
 // so a query near the start of a long backlog is reported as soon as its own
 // piece is out.
 func TestRelayAttachOutputReportsDeliveryPerPiece(t *testing.T) {
+	t.Parallel()
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -214,6 +221,7 @@ func TestRelayAttachOutputReportsDeliveryPerPiece(t *testing.T) {
 }
 
 func TestRelayAttachOutputReturnsTheWriteError(t *testing.T) {
+	t.Parallel()
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
@@ -245,6 +253,7 @@ func (s *failingAttachSource) Read(p []byte) (int, error) {
 }
 
 func TestRelayAttachOutputWritesWhatItReadBeforeAReadError(t *testing.T) {
+	t.Parallel()
 	readErr := errors.New("connection reset")
 	var terminal bytes.Buffer
 	err := relayAttachOutput(
@@ -264,6 +273,7 @@ func TestRelayAttachOutputWritesWhatItReadBeforeAReadError(t *testing.T) {
 // A client that reads ahead of its terminal reports delivery, and the replies
 // a query is owed must not expire before the terminal has the query.
 func TestUndeliveredQueryKeepsItsRepliesExpected(t *testing.T) {
+	t.Parallel()
 	client := &attachClient{deliveryToken: "token"}
 	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
 	client.activityMu.Lock()
@@ -284,6 +294,7 @@ func TestUndeliveredQueryKeepsItsRepliesExpected(t *testing.T) {
 // Delivery starts the reply grace; once that has run out, input is the
 // user's again, as for a client that does not report.
 func TestDeliveredQueryRepliesExpireAfterTheirGrace(t *testing.T) {
+	t.Parallel()
 	client := &attachClient{deliveryToken: "token"}
 	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
 	client.expectTerminalResponsesUntilDelivered("@1", 1, 20)
@@ -314,6 +325,7 @@ func TestDeliveredQueryRepliesExpireAfterTheirGrace(t *testing.T) {
 }
 
 func TestClientWithoutDeliveryReportsExpiresAtTheUsualTime(t *testing.T) {
+	t.Parallel()
 	client := &attachClient{}
 	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
 	client.activityMu.Lock()
@@ -329,6 +341,7 @@ func TestClientWithoutDeliveryReportsExpiresAtTheUsualTime(t *testing.T) {
 // The writer records each query at the output offset just past it, counting
 // everything written to the client before it.
 func TestAttachWriterRecordsWhereEachQueryEnds(t *testing.T) {
+	t.Parallel()
 	server, peer := net.Pipe()
 	defer peer.Close()
 	client := newAttachClient(server, controlMessage{AttachToken: "token"})
@@ -373,6 +386,7 @@ func TestAttachWriterRecordsWhereEachQueryEnds(t *testing.T) {
 // that holds more than the outstanding limit of them, in batches whose grace
 // runs out in between, keeps the attach.
 func TestUndeliveredQueriesDoNotCountAsUnanswered(t *testing.T) {
+	t.Parallel()
 	client := newAttachClient(&recordingConn{}, controlMessage{AttachToken: "token"})
 	t.Cleanup(client.close)
 	end := uint64(0)
@@ -398,6 +412,7 @@ func TestUndeliveredQueriesDoNotCountAsUnanswered(t *testing.T) {
 }
 
 func TestUndeliveredQueriesHaveTheirOwnLimit(t *testing.T) {
+	t.Parallel()
 	client := newAttachClient(&recordingConn{}, controlMessage{AttachToken: "token"})
 	t.Cleanup(client.close)
 	for i := 1; i <= terminalResponseMaxUndelivered; i++ {

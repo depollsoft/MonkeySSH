@@ -79,6 +79,7 @@ func BenchmarkVTScreenClone(b *testing.B) {
 // TestVTScreenMemoryProbe reports the heap cost of a window with a full
 // scrollback; run with MONKEYMUX_VT_MEMPROBE=1 -v.
 func TestVTScreenMemoryProbe(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("MONKEYMUX_VT_MEMPROBE") == "" {
 		t.Skip("MONKEYMUX_VT_MEMPROBE not set")
 	}

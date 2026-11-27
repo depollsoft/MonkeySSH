@@ -23,6 +23,7 @@ func resetPiMetadataForTest(t *testing.T) {
 }
 
 func TestMonkeyMuxAgentLaunchCommandWrapsPiWithCurrentExecutable(t *testing.T) {
+	t.Parallel()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -251,6 +252,7 @@ func TestDiscoverPiSessionsMatchesTitleWithMoreThan32Candidates(t *testing.T) {
 }
 
 func TestPiSessionOriginResolvesChainAndFileNameTimestamp(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
 	worktree := filepath.Join(root, "worktree")
@@ -344,6 +346,7 @@ func TestReadBoundedLineIntoReusesScratch(t *testing.T) {
 
 // Every cwd bucket under one root shares a single latest-name scan.
 func TestPiRootSessionsLoadsLatestNamesOnce(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, piEncodedSessionDirName("/project"), "session.jsonl")
 	writePiTestSession(t, path, "session-id", "/project", time.Now())
@@ -432,6 +435,7 @@ func TestDiscoverPiSessionsDeclinesForkedChainBranches(t *testing.T) {
 }
 
 func TestPiEncodedSessionDirNameMatchesPiLayout(t *testing.T) {
+	t.Parallel()
 	if got, want := piEncodedSessionDirName("/Users/demo/Code/MonkeySSH"), "--Users-demo-Code-MonkeySSH--"; got != want {
 		t.Fatalf("piEncodedSessionDirName = %q, want %q", got, want)
 	}
@@ -441,6 +445,7 @@ func TestPiEncodedSessionDirNameMatchesPiLayout(t *testing.T) {
 }
 
 func TestPiAgentToolMappingAndResumeCommand(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"pi", "pi-agent", "/Users/demo/.local/bin/pi"} {
 		if got := agentToolFromCommandName(name); got != "pi" {
 			t.Fatalf("agentToolFromCommandName(%q) = %q, want pi", name, got)
@@ -486,6 +491,7 @@ func TestPiAgentToolMappingAndResumeCommand(t *testing.T) {
 }
 
 func TestNewWindowAgentToolDoesNotConfirmNameOnlyMatch(t *testing.T) {
+	t.Parallel()
 	if tool, confirmed := newWindowAgentTool(createWindowOptions{}, "Pi"); tool != "pi" || confirmed {
 		t.Fatalf("name-only classification = %q, %v; want pi, false", tool, confirmed)
 	}
@@ -504,6 +510,7 @@ func TestNewWindowAgentToolDoesNotConfirmNameOnlyMatch(t *testing.T) {
 }
 
 func TestPiResumeCommandRejectsShellMetacharacters(t *testing.T) {
+	t.Parallel()
 	for _, id := range []string{"session's-id", "session&id", "$(touch-pwned)", "session id"} {
 		if got := piResumeCommand(id, "", ""); got != "" {
 			t.Fatalf("piResumeCommand(%q) = %q, want refusal", id, got)
@@ -702,6 +709,7 @@ func TestDiscoverPiSessionsUsesProcessStartWhenPiClosesSessionFile(t *testing.T)
 }
 
 func TestPiSessionsCreatedForProcessStartDeclinesAmbiguousMatches(t *testing.T) {
+	t.Parallel()
 	started := time.Now().UTC()
 	entries := []piSessionEntry{
 		{sessionID: "one", createdAt: started, modTime: started},
@@ -915,6 +923,7 @@ func TestDiscoverPiSessionsAssignsTwoKnownNodeProcessesMutually(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsDeclinesOverlappingProcessStarts(t *testing.T) {
+	t.Parallel()
 	started := time.Now().UTC()
 	entries := []piSessionEntry{
 		{sessionID: "one", createdAt: started.Add(time.Second)},
@@ -929,6 +938,7 @@ func TestDiscoverPiSessionsDeclinesOverlappingProcessStarts(t *testing.T) {
 }
 
 func TestPiProcessesByPaneRejectsMinimumDepthTie(t *testing.T) {
+	t.Parallel()
 	processes := map[int]processInfo{
 		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
 		200: {pid: 200, ppid: 100, comm: "pi", args: "pi --session first"},
@@ -1020,6 +1030,7 @@ func TestDiscoverPiSessionsHonorsProcessSessionDir(t *testing.T) {
 }
 
 func TestDiscoverPiSessionsReservesExplicitProcessSession(t *testing.T) {
+	t.Parallel()
 	project := t.TempDir()
 	sessionPath := filepath.Join(project, "sessions", "exact.jsonl")
 	writePiTestSession(t, sessionPath, "exact-session", project, time.Now())
@@ -1072,6 +1083,7 @@ func TestPiSessionRootUsesProjectThenGlobalSettings(t *testing.T) {
 }
 
 func TestReadPiSessionEntrySkipsLeadingNonHeaderLines(t *testing.T) {
+	t.Parallel()
 	project := t.TempDir()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	content := "\nnot-json\n" + fmt.Sprintf("{\"type\":\"session\",\"id\":%q,\"cwd\":%q}\n", "session-id", project)
@@ -1085,6 +1097,7 @@ func TestReadPiSessionEntrySkipsLeadingNonHeaderLines(t *testing.T) {
 }
 
 func TestPiLatestSessionNameUsesLateMetadataAndSkipsOversizedRecords(t *testing.T) {
+	t.Parallel()
 	project := t.TempDir()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	writePiTestSession(t, path, "session-id", project, time.Now())
@@ -1287,6 +1300,7 @@ func TestDiscoverPiSessionsUsesWindowActivityForUnnamedSameCwdSessions(t *testin
 }
 
 func TestPiWindowActivityCorrelationRejectsAmbiguity(t *testing.T) {
+	t.Parallel()
 	activity := time.Now().UTC().Truncate(time.Second)
 	restore := &serverRestore{Windows: []restoreWindowState{
 		{LastActivityEpochSeconds: activity.Unix()},
@@ -1355,6 +1369,7 @@ func TestDiscoverPiSessionsActivityDeclinesLaterUnownedSession(t *testing.T) {
 }
 
 func TestPiActivityAssignmentsRejectPartialOverlap(t *testing.T) {
+	t.Parallel()
 	activity := time.Now().UTC().Truncate(time.Second)
 	restore := &serverRestore{Windows: []restoreWindowState{
 		{LastActivityEpochSeconds: activity.Unix()},
@@ -1431,6 +1446,7 @@ func TestDiscoverPiSessionsIgnoresUnconfirmedShellPane(t *testing.T) {
 }
 
 func TestEnrichRestoreWithWindowActivityUsesStableWindowIdentity(t *testing.T) {
+	t.Parallel()
 	restore := &serverRestore{Windows: []restoreWindowState{
 		{ID: "@2", Index: 0, AgentTool: "pi"},
 		{Index: 0, AgentTool: "pi"},

@@ -68,6 +68,9 @@ func TestRestoredCodexResumePressesRWhenTheLockFrees(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("argv is not read on " + runtime.GOOS)
 	}
+	previousPolicy := defaultCodexLockedResumePolicy
+	defaultCodexLockedResumePolicy.poll = 40 * time.Millisecond
+	t.Cleanup(func() { defaultCodexLockedResumePolicy = previousPolicy })
 	isolateTestRuntime(t)
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)

@@ -9,6 +9,7 @@ import (
 )
 
 func TestRestoredProcessesDoNotInheritTerminalProgress(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"pi", "codex", "claude", ""} {
 		for state := 1; state <= 4; state++ {
 			t.Run(fmt.Sprintf("%s/state-%d", tool, state), func(t *testing.T) {
@@ -46,6 +47,7 @@ func TestRestoredProcessesDoNotInheritTerminalProgress(t *testing.T) {
 }
 
 func TestNativeAcpHandoffRetainsLiveTerminalProgress(t *testing.T) {
+	t.Parallel()
 	const bridgeID = "0123456789abcdef0123456789abcdef"
 	percentage := 61
 	progress := &terminalProgressSnapshot{State: 1, Percentage: &percentage}
@@ -66,6 +68,7 @@ func TestNativeAcpHandoffRetainsLiveTerminalProgress(t *testing.T) {
 }
 
 func TestRestoredShellHistoryDropsProgressOnly(t *testing.T) {
+	t.Parallel()
 	for _, framing := range []struct{ name, open, close string }{
 		{"esc-bel", "\x1b]", "\x07"},
 		{"esc-st", "\x1b]", "\x1b\\"},
@@ -97,6 +100,7 @@ func TestRestoredShellHistoryDropsProgressOnly(t *testing.T) {
 }
 
 func TestRestoredShellHistoryPreservesProgressLikeTextAndControlPayloads(t *testing.T) {
+	t.Parallel()
 	// UTF-8 continuation 0x9d must not be treated as a C1 OSC introducer, and
 	// OSC-like bytes inside a DCS payload belong to that outer sequence.
 	history := []byte("literal ]9;4;3 \xc4\x9d9;4;3\x07\x1bPinside\x1b]9;4;3\x07\x1b\\end")

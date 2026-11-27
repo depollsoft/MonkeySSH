@@ -15,6 +15,7 @@ const (
 )
 
 func TestWheelGovernorSlowReports(t *testing.T) {
+	t.Parallel()
 	for _, gap := range []time.Duration{150 * time.Millisecond, time.Second} {
 		g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 		now := time.Unix(100, 0)
@@ -35,6 +36,7 @@ func TestWheelGovernorSlowReports(t *testing.T) {
 }
 
 func TestWheelGovernorSixReportBurst(t *testing.T) {
+	t.Parallel()
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	if got := string(g.process([]byte(strings.Repeat(wheelUp, 6)), now)); got != strings.Repeat(wheelUp, 3) {
@@ -95,6 +97,7 @@ func (tui *wheelTestTUI) receive(t *testing.T, data []byte, now time.Time) {
 }
 
 func TestWheelGovernorRowConservation(t *testing.T) {
+	t.Parallel()
 	// 0 is a pane height the governor has not learned; 60 leaves agy's cap
 	// above its top speed; the short panes cap a fast fling below it.
 	for _, paneRows := range []int{0, 60, 24, 13, 5, 1} {
@@ -132,6 +135,7 @@ func testWheelGovernorRowConservation(t *testing.T, paneRows, reports int, inter
 }
 
 func TestWheelGovernorDirectionCancellation(t *testing.T) {
+	t.Parallel()
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	g.process([]byte(wheelUp+wheelUp), now)
@@ -147,6 +151,7 @@ func TestWheelGovernorDirectionCancellation(t *testing.T) {
 }
 
 func TestWheelGovernorPassthroughOrder(t *testing.T) {
+	t.Parallel()
 	const other = "keys\x1b[A\x1b[<66;1;2M\x1b[<67;1;2M\x1b[<0;1;2M\x1b[<32;1;2M\x1b[<64;1;2m\x1b[<96;1;2M"
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
@@ -164,6 +169,7 @@ func TestWheelGovernorPassthroughOrder(t *testing.T) {
 }
 
 func TestWheelGovernorEncodingsAndModifiers(t *testing.T) {
+	t.Parallel()
 	for _, x10 := range []bool{false, true} {
 		for modifiers := 0; modifiers < 32; modifiers += 4 {
 			t.Run(fmt.Sprintf("X10=%v/modifiers=%d", x10, modifiers), func(t *testing.T) {
@@ -200,6 +206,7 @@ func TestWheelGovernorEncodingsAndModifiers(t *testing.T) {
 }
 
 func TestWheelGovernorUnrecognizedReports(t *testing.T) {
+	t.Parallel()
 	// Complete reports that are not a governed wheel event, plus malformed SGR
 	// that will never complete into one. All pass through byte for byte and
 	// leave the governor untouched, including its carry buffer.
@@ -222,6 +229,7 @@ func TestWheelGovernorUnrecognizedReports(t *testing.T) {
 }
 
 func TestWheelGovernorCarriesIncompletePrefix(t *testing.T) {
+	t.Parallel()
 	// A trailing run that could still become a wheel report is withheld, not
 	// emitted, so the event is not lost when its tail arrives next chunk.
 	for _, prefix := range []string{
@@ -242,6 +250,7 @@ func TestWheelGovernorCarriesIncompletePrefix(t *testing.T) {
 }
 
 func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(100, 0)
 	// One wheel-up split into two reads is reassembled and governed, not lost.
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
@@ -266,6 +275,7 @@ func TestWheelGovernorSplitReportAcrossChunks(t *testing.T) {
 }
 
 func TestWheelGovernorDropsReorderedDebt(t *testing.T) {
+	t.Parallel()
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	// A fast pair leaves one row owed for the flush.
@@ -287,6 +297,7 @@ func TestWheelGovernorDropsReorderedDebt(t *testing.T) {
 }
 
 func TestWheelGovernorTakeOpaque(t *testing.T) {
+	t.Parallel()
 	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
 	now := time.Unix(100, 0)
 	g.process([]byte(wheelUp+wheelUp+"\x1b[<64;1"), now)
@@ -303,6 +314,7 @@ func TestWheelGovernorTakeOpaque(t *testing.T) {
 }
 
 func TestWheelReportPrefixLen(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		data string
 		want int
@@ -687,6 +699,7 @@ func TestWheelGovernorsArePerWindow(t *testing.T) {
 }
 
 func TestCopilotTouchWheelModifier(t *testing.T) {
+	t.Parallel()
 	profile := agentRegistry["copilot"].wheelProfile
 	if profile == nil {
 		t.Fatal("copilot wheelProfile is nil")

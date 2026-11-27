@@ -47,6 +47,7 @@ func windowReplies(t *testing.T, server *muxServer, index int, pty *recordingPty
 }
 
 func TestVisibilityReportsAreAnsweredByMonkeyMux(t *testing.T) {
+	t.Parallel()
 	server, ptys, _, attach := newVisibilityTestServer(t)
 
 	server.handleWindowOutput("@1", []byte("a\x1b[?2033$p\x1b[?2033hb\x1b[?2033$p\x1b[?998nc"))
@@ -73,6 +74,7 @@ func TestVisibilityReportsAreAnsweredByMonkeyMux(t *testing.T) {
 }
 
 func TestVisibilityReportsFollowTheActiveWindowAndClients(t *testing.T) {
+	t.Parallel()
 	server, ptys, client, _ := newVisibilityTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b[?2033h"))
 	server.handleWindowOutput("@2", []byte("\x1b[?2033h"))
@@ -133,6 +135,7 @@ func TestVisibilityReportsFollowTheActiveWindowAndClients(t *testing.T) {
 // The app sends its visibility once per control connection, so an attach that
 // reconnects under the same id while that connection lives keeps it hidden.
 func TestHiddenFlagOutlivesAnAttachWhileItsControlConnectionLives(t *testing.T) {
+	t.Parallel()
 	server, _, client, _ := newVisibilityTestServer(t)
 	control := newControlClient(nil)
 	server.mu.Lock()
@@ -162,6 +165,7 @@ func TestHiddenFlagOutlivesAnAttachWhileItsControlConnectionLives(t *testing.T) 
 }
 
 func TestVisibilityModeIsStrippedFromForwardedOutput(t *testing.T) {
+	t.Parallel()
 	server, ptys, _, attach := newVisibilityTestServer(t)
 
 	// One sequence that also names another mode keeps that mode, and a
@@ -183,6 +187,7 @@ func TestVisibilityModeIsStrippedFromForwardedOutput(t *testing.T) {
 // 7-bit form does, and is stripped the same way, including when it is split
 // across reads. A 0x9b that continues a character is text.
 func TestC1VisibilitySequencesAreAnsweredAndStripped(t *testing.T) {
+	t.Parallel()
 	server, ptys, _, attach := newVisibilityTestServer(t)
 
 	server.handleWindowOutput("@1", []byte("a\x9b?2033h\x1b[?2033$p\x9b?2033$pb"))
@@ -234,6 +239,7 @@ func TestC1VisibilitySequencesAreAnsweredAndStripped(t *testing.T) {
 }
 
 func TestTrailingUtf8ContinuationCount(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		data string
 		want int
@@ -257,6 +263,7 @@ func TestTrailingUtf8ContinuationCount(t *testing.T) {
 // The 8-bit CSI changes the visibility mode, which MonkeyMux owns, and no
 // mode of the attached terminal, which does not read it as CSI.
 func TestC1CsiChangesOnlyTheVisibilityMode(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", lastActivity: time.Now()}
 	window.observeTerminalModesLocked([]byte("\x9b?5;20"))
 	window.observeTerminalModesLocked([]byte("33h\x9b4h"))
@@ -282,6 +289,7 @@ func TestC1CsiChangesOnlyTheVisibilityMode(t *testing.T) {
 }
 
 func TestVisibilityModeIsStrippedFromReplays(t *testing.T) {
+	t.Parallel()
 	history := []byte("a\x1b[?2033hb\x1b[?1049;2033hc\x9b?998nd\x1b[?2033$pe\x1b[?2031h")
 	got := string(stripTerminalQueriesFromReplay(history))
 	if want := "ab\x1b[?1049hcde\x1b[?2031h"; got != want {
@@ -290,6 +298,7 @@ func TestVisibilityModeIsStrippedFromReplays(t *testing.T) {
 }
 
 func TestVisibilityModeResetsOnFullReset(t *testing.T) {
+	t.Parallel()
 	server, ptys, _, _ := newVisibilityTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b[?2033h\x1bc"))
 	_ = windowReplies(t, server, 0, ptys[0])
@@ -300,6 +309,7 @@ func TestVisibilityModeResetsOnFullReset(t *testing.T) {
 }
 
 func TestClientVisibilityIsACapability(t *testing.T) {
+	t.Parallel()
 	if !containsString(capabilities, "client-visibility") {
 		t.Fatal("capabilities do not advertise client-visibility")
 	}
@@ -308,6 +318,7 @@ func TestClientVisibilityIsACapability(t *testing.T) {
 // A window's display modes are replayed for it and reset for the next one,
 // so they do not leak into another window and its DECRQM answers.
 func TestReverseVideoAndCursorBlinkAreTrackedPerWindow(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", lastActivity: time.Now()}
 	window.observeTerminalModesLocked([]byte("\x1b[?5h\x1b[?12h"))
 	if got := string(terminalModePostReplaySequence(window)); !strings.Contains(got, "\x1b[?5h") ||
@@ -326,6 +337,7 @@ func TestReverseVideoAndCursorBlinkAreTrackedPerWindow(t *testing.T) {
 }
 
 func TestBackarrowKeyModeIsTrackedAndReplayed(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", lastActivity: time.Now()}
 	window.observeTerminalModesLocked([]byte("\x1b[?67h"))
 	if !window.privateModes["67"] {

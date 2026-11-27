@@ -8,6 +8,7 @@ import (
 )
 
 func TestUnixProcessWaitOnlyReapsAfterObservedExit(t *testing.T) {
+	t.Parallel()
 	for _, observed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "observer failed", true: "exit observed"}[observed], func(t *testing.T) {
 			cmd := exec.Command("sh", "-c", "exit 0")

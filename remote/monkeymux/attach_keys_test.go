@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseAttachKeyEventLegacyBytes(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		input  string
@@ -42,6 +43,7 @@ func TestParseAttachKeyEventLegacyBytes(t *testing.T) {
 }
 
 func TestParseAttachKeyEventRejectsOtherSequences(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{
 		"\x1b[A",       // arrow key
 		"\x1b[1;5A",    // modified arrow key
@@ -63,6 +65,7 @@ func TestParseAttachKeyEventRejectsOtherSequences(t *testing.T) {
 }
 
 func TestAttachKeyEventLegacyByteRejectsUnmappedKeys(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{
 		"\x1b[98;3u",    // alt-b
 		"\x1b[98;7u",    // ctrl-alt-b
@@ -83,6 +86,7 @@ func TestAttachKeyEventLegacyByteRejectsUnmappedKeys(t *testing.T) {
 }
 
 func TestAttachModeTrackerResetsModesPanesLeftOn(t *testing.T) {
+	t.Parallel()
 	var output strings.Builder
 	tracker := newAttachModeTracker(&output)
 	stream := "plain\x1b[>5u\x1b[>4;2m\x1b[?1000;1006h\x1b[?2004h\x1b[?1h" +
@@ -103,6 +107,7 @@ func TestAttachModeTrackerResetsModesPanesLeftOn(t *testing.T) {
 }
 
 func TestAttachModeTrackerLeavesUntouchedTerminalAlone(t *testing.T) {
+	t.Parallel()
 	var output strings.Builder
 	tracker := newAttachModeTracker(&output)
 	for _, chunk := range []string{
@@ -121,6 +126,7 @@ func TestAttachModeTrackerLeavesUntouchedTerminalAlone(t *testing.T) {
 }
 
 func TestAttachModeTrackerResetsBothKittyScreens(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		stream string

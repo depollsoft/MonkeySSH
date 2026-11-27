@@ -12,6 +12,7 @@ import (
 )
 
 func TestSendServerShutdownWaitsForAcknowledgement(t *testing.T) {
+	t.Parallel()
 	for _, result := range []string{"ok", "rejected", "disconnected", "unexpected"} {
 		t.Run(result, func(t *testing.T) {
 			client, server := net.Pipe()

@@ -13,6 +13,7 @@ import (
 // Runs on Windows too: bridges hosted in the MonkeyMux server are probed from
 // that same process, so a second handle there must see the lock as held.
 func TestAcpBridgeLifetimeLockLifecycle(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "monkeymux-acp-0123456789abcdef0123456789abcdef.sock")
 	if got := probeAcpBridgeLifetime(socket); got != acpBridgeLifetimeAbsent {
@@ -76,6 +77,7 @@ func TestAcpBridgeLifetimeSurvivesGCDeletingItsStagingFile(t *testing.T) {
 // file nobody can see. A probe racing the hold must only ever find the file
 // absent or held.
 func TestAcpBridgeLifetimeIsNeverVisibleUnlockedWhileHeld(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rounds = 300
 	var phase atomic.Int32 // 0 idle, 1 holding, 2 releasing

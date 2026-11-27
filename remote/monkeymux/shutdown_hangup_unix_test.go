@@ -20,6 +20,7 @@ import (
 // no helper update can ever replace the server (seen live during a forced
 // reload). Shutdown must kill the foreground group too.
 func TestCloseKillsForegroundGroupThatIgnoresHangup(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("/bin/sh", "-c", `set -m; trap "" HUP; sleep 30`)
 	windowPty, proc, err := startWindow(cmd, 80, 24)
 	if err != nil {
@@ -81,6 +82,7 @@ func TestCloseKillsForegroundGroupThatIgnoresHangup(t *testing.T) {
 }
 
 func TestKillSurvivingWindowProcessesSkipsExitedChildren(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	windowPty, proc, err := startWindow(cmd, 80, 24)
 	if err != nil {
@@ -98,6 +100,7 @@ func TestKillSurvivingWindowProcessesSkipsExitedChildren(t *testing.T) {
 }
 
 func TestKillSurvivingWindowProcessesAfterGroupLeaderExits(t *testing.T) {
+	t.Parallel()
 	for _, ownGroup := range []bool{false, true} {
 		t.Run(fmt.Sprint("own-group-", ownGroup), func(t *testing.T) {
 			ready := filepath.Join(t.TempDir(), "ready")

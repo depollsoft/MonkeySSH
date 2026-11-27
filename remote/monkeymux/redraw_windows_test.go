@@ -49,6 +49,7 @@ func (p *resizeRecordingPty) snapshot() []recordedTerminalSize {
 }
 
 func TestForegroundRedrawTemporarySizePrefersHeightOnWindows(t *testing.T) {
+	t.Parallel()
 	width, height, ok := foregroundRedrawTemporarySize(120, 40)
 
 	if width != 120 || height != 39 || !ok {
@@ -62,6 +63,7 @@ func TestForegroundRedrawTemporarySizePrefersHeightOnWindows(t *testing.T) {
 }
 
 func TestSingleCellRedrawUsesTemporaryWindowsExpansion(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 1, 1)
 	pty := &resizeRecordingPty{}
 	window := &muxWindow{
@@ -91,6 +93,7 @@ func TestSingleCellRedrawUsesTemporaryWindowsExpansion(t *testing.T) {
 }
 
 func TestSelectWindowDeliversTargetGeometryWithoutIntermediateSize(t *testing.T) {
+	t.Parallel()
 	// Manufacturing a temporary size on top of a real geometry change makes the
 	// foreground app lay out and emit an entire frame for a geometry that never
 	// existed. The client paints that frame before the real one replaces it,
@@ -137,6 +140,7 @@ func TestSelectWindowDeliversTargetGeometryWithoutIntermediateSize(t *testing.T)
 }
 
 func TestForegroundRedrawKeepsSyntheticSizeWhenGeometryIsUnchanged(t *testing.T) {
+	t.Parallel()
 	// With no real size change to deliver there is nothing for the app to
 	// notice, so the temporary size is the only way to ask for a repaint.
 	pty := &resizeRecordingPty{}
@@ -204,6 +208,7 @@ func TestRedrawWindowsFallback(t *testing.T) {
 }
 
 func TestConPtyNormalScreenReturnsWithoutSyntheticResize(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"codex", "copilot", "powershell"} {
 		t.Run(command, func(t *testing.T) {
 			server := newMuxServerWithSize("test", 80, 24)
@@ -258,6 +263,7 @@ func TestConPtyNormalScreenReturnsWithoutSyntheticResize(t *testing.T) {
 }
 
 func TestConPtyAlternateScreenStillUsesForegroundRedraw(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{win32InputMode: true, privateModes: map[string]bool{"1049": true}}
 	if !window.usesForegroundRedrawReplayLocked() {
 		t.Fatal("alternate screen lost its foreground redraw")

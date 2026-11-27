@@ -14,6 +14,7 @@ import (
 )
 
 func TestReapReplacementPaneGroupsKillsWrapperBeforeFallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ready := filepath.Join(dir, "ready")
 	fallback := filepath.Join(dir, "fallback")

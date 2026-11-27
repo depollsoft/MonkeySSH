@@ -12,6 +12,7 @@ import (
 const nativeTitleTestSessionID = "5f0c7d1e-2b3a-4c8d-9e6f-0a1b2c3d4e5f"
 
 func TestClaudeSessionTitleScanFollowsClaudesTitlePrecedence(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	project := filepath.Join(home, ".claude", "projects", "-work-repo")
 	if err := os.MkdirAll(project, 0o700); err != nil {
@@ -67,6 +68,7 @@ func TestClaudeSessionTitleScanFollowsClaudesTitlePrecedence(t *testing.T) {
 }
 
 func TestCodexSessionTitleScanPrefersTheThreadName(t *testing.T) {
+	t.Parallel()
 	codexHome := t.TempDir()
 	day := filepath.Join(codexHome, "sessions", "2026", "10", "01")
 	older := filepath.Join(codexHome, "sessions", "2026", "09", "30")
@@ -111,6 +113,7 @@ func TestCodexSessionTitleScanPrefersTheThreadName(t *testing.T) {
 }
 
 func TestCodexSessionTitleScanSkipsInjectedContext(t *testing.T) {
+	t.Parallel()
 	codexHome := t.TempDir()
 	day := filepath.Join(codexHome, "sessions", "2026", "10", "01")
 	if err := os.MkdirAll(day, 0o700); err != nil {
@@ -150,6 +153,7 @@ func TestCodexHomeDirectoryHonorsCodexHome(t *testing.T) {
 }
 
 func TestCopilotWorkspaceTitleReadsTheSessionName(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	directory := filepath.Join(home, ".copilot", "session-state", nativeTitleTestSessionID)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -183,6 +187,7 @@ func TestCopilotWorkspaceTitleReadsTheSessionName(t *testing.T) {
 }
 
 func TestNativeAgentToolForProviderMapsBuiltinIDs(t *testing.T) {
+	t.Parallel()
 	for providerID, want := range map[string]string{
 		"builtin:claude-agent-acp": "claude",
 		"builtin:codex-acp":        "codex",

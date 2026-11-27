@@ -212,6 +212,7 @@ func TestWindowsKeepReachingTheAgentAcrossReconnects(t *testing.T) {
 }
 
 func TestOnlyConnectionClientsRepointTheAgent(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"attach", "a", "at", "attach-session", "new", "new-session", "control", "acp"} {
 		if !commandRepointsForwardedAgent(command) {
 			t.Fatalf("%s should repoint the agent link", command)

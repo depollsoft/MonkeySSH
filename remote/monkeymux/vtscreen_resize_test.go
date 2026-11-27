@@ -26,6 +26,7 @@ func inlineAgentScreen(width, height int) *terminalScreen {
 // its bottom through every resize step, so the model must too, or the next
 // frame painted from it moves the rows the client already shows.
 func TestVTScreenKeyboardCycleKeepsInlineAgentAnchored(t *testing.T) {
+	t.Parallel()
 	s := inlineAgentScreen(30, 10)
 	before := s.TextRows()
 	beforeRow, beforeCol := s.CursorPosition()
@@ -70,6 +71,7 @@ func TestVTScreenKeyboardCycleKeepsInlineAgentAnchored(t *testing.T) {
 // blank rows below instead of bringing the old screen back above the prompt,
 // as the client does (Buffer.resize).
 func TestVTScreenGrowKeepsClearedScreenClear(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 10)
 	for line := 1; line <= 30; line++ {
 		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))
@@ -101,6 +103,7 @@ func TestVTScreenGrowKeepsClearedScreenClear(t *testing.T) {
 }
 
 func TestVTScreenShrinkGivesUpEmptyRowsBelowCursorFirst(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 8)
 	s.Write([]byte("one\r\ntwo\r\nthree"))
 	s.Resize(20, 4)
@@ -125,6 +128,7 @@ func TestVTScreenShrinkGivesUpEmptyRowsBelowCursorFirst(t *testing.T) {
 }
 
 func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(12, 2)
 	s.Write([]byte("\x1b[31mred 界\x1b[0m\r\nplain\r\nlast"))
 	if s.scrollback.len() != 1 {
@@ -157,6 +161,7 @@ func TestVTScreenGrowRestoresScrollbackRendition(t *testing.T) {
 // rendered row, so it must keep which cells were written: a resize reclaims
 // only rows nothing was written to, in the model and in the client.
 func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(12, 2)
 	s.Write([]byte("ab   \r\n\x1b[44m\x1b[K\x1b[0m\r\nx\r\ny"))
 	if s.scrollback.len() != 2 {
@@ -189,6 +194,7 @@ func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
 // screen moves like a saved one; xterm's AdjustSavedCursor and the client's
 // Buffer.resize do not ask whether it was ever saved.
 func TestVTScreenUnsavedCursorFollowsResizes(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(30, 12)
 	for line := 1; line <= 11; line++ {
 		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))
@@ -214,6 +220,7 @@ func TestVTScreenUnsavedCursorFollowsResizes(t *testing.T) {
 }
 
 func TestVTScreenSavedCursorFollowsMainScreenUnderAltScreen(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(30, 12)
 	for line := 1; line <= 11; line++ {
 		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))

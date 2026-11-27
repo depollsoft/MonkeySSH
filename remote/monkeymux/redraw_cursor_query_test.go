@@ -7,6 +7,7 @@ import (
 )
 
 func TestVTScreenCursorPositionReport(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(80, 24)
 	report := func() string {
 		t.Helper()
@@ -243,6 +244,7 @@ func newRedrawCursorQueryTestServer(
 // round trip later by the real frame. MonkeyMux answers it from the screen
 // model instead, at the position the query was sent from.
 func TestRedrawPauseAnswersCursorPositionQueryFromScreenModel(t *testing.T) {
+	t.Parallel()
 	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
 
 	server.handleWindowOutput(
@@ -273,6 +275,7 @@ func TestRedrawPauseAnswersCursorPositionQueryFromScreenModel(t *testing.T) {
 // A query the model cannot answer as the client would goes to the terminal,
 // and so does every later one, which would otherwise be answered first.
 func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		chunks []string
@@ -362,6 +365,7 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 // Codex asks again after drawing each size, in separate reads; every answer
 // reflects the frame drawn before it.
 func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
+	t.Parallel()
 	server, window, pty, _ := newRedrawCursorQueryTestServer(t)
 
 	for _, chunk := range []string{
@@ -380,6 +384,7 @@ func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
 
 // DECXCPR (CSI ? 6 n) is answered the way the app's terminal answers it.
 func TestRedrawPauseAnswersExtendedCursorPositionQuery(t *testing.T) {
+	t.Parallel()
 	server, window, pty, _ := newRedrawCursorQueryTestServer(t)
 
 	server.handleWindowOutput("@1", []byte("\x1b[3;7H"+extendedCursorPositionQuery+cursorPositionQuery))
@@ -394,6 +399,7 @@ func TestRedrawPauseAnswersExtendedCursorPositionQuery(t *testing.T) {
 // from before the pause, but the program has been told the moved position, so
 // the client must end up there too.
 func TestRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		before   string
@@ -456,6 +462,7 @@ func TestRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
 // before it, so a cursor query behind another query still goes to the
 // terminal.
 func TestRedrawPauseLeavesCursorQueryBehindAnotherQueryToTerminal(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		earlier func(*muxWindow)
@@ -505,6 +512,7 @@ func TestRedrawPauseLeavesCursorQueryBehindAnotherQueryToTerminal(t *testing.T) 
 // Outside a redraw pause the terminal sees the output as it is sent, so it
 // answers the query itself.
 func TestCursorPositionQueryOutsideRedrawPauseReachesTerminal(t *testing.T) {
+	t.Parallel()
 	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
 	window.redrawForwardingPaused = false
 
@@ -525,6 +533,7 @@ func TestCursorPositionQueryOutsideRedrawPauseReachesTerminal(t *testing.T) {
 // pair each position with the wrong query, so the local answer waits until the
 // terminal's reply has reached the window.
 func TestRedrawPauseWaitsForTerminalReplyOwedFromBeforeIt(t *testing.T) {
+	t.Parallel()
 	for _, replied := range []bool{false, true} {
 		name := "reply outstanding"
 		if replied {
@@ -565,6 +574,7 @@ func TestRedrawPauseWaitsForTerminalReplyOwedFromBeforeIt(t *testing.T) {
 // A client owes a window a reply from the moment a query is queued to it
 // until the reply has been written to the window, or the wait for it expires.
 func TestAttachClientOwesReplyUntilItReachesTheWindow(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("owed-replies")
 	pty := &recordingPty{}
 	window := &muxWindow{id: "@1", pty: pty, lastActivity: time.Now()}
@@ -614,6 +624,7 @@ func TestAttachClientOwesReplyUntilItReachesTheWindow(t *testing.T) {
 // so the reply stays owed until it is written, and the client is forgotten
 // once it owes nothing.
 func TestRemovedClientOwesRepliesItIsStillDelivering(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("removed-client-replies")
 	pty := &recordingPty{}
 	window := &muxWindow{id: "@1", pty: pty, lastActivity: time.Now()}
@@ -671,6 +682,7 @@ func TestRemovedClientOwesRepliesItIsStillDelivering(t *testing.T) {
 // Replies received just as the client closes cannot be queued for its worker,
 // so they stop counting as owed.
 func TestRepliesThatCannotBeQueuedAreReleased(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("unqueued-replies")
 	conn := &recordingConn{}
 	client := registerTestAttachClient(t, server, conn, "closing", 80, 24)
@@ -691,6 +703,7 @@ func TestRepliesThatCannotBeQueuedAreReleased(t *testing.T) {
 // The client keeps waiting for a reply while a bracketed paste is in
 // progress, however long it takes, so the reply stays owed.
 func TestReplyStaysOwedThroughABracketedPaste(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("paste-held-replies")
 	conn := &recordingConn{}
 	client := registerTestAttachClient(t, server, conn, "primary", 80, 24)
@@ -712,6 +725,7 @@ func TestReplyStaysOwedThroughABracketedPaste(t *testing.T) {
 // A pause restarted after a local answer drops held bytes the answer
 // depended on, so the client must still end up at the reported cursor.
 func TestRestartedRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
+	t.Parallel()
 	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
 	window.redrawForwardingPaused = false
 	server.handleWindowOutput("@1", []byte("\x1b[1;1Hbase"))
@@ -756,6 +770,7 @@ func waitForTerminalRepliesSettled(t *testing.T, client *attachClient, windowID 
 }
 
 func TestCsiQueryParametersAreReadAsNumbers(t *testing.T) {
+	t.Parallel()
 	for params, want := range map[string]string{
 		"06": "6", "?006": "?6", "00": "0", "0": "0", "100": "100", "05;007": "5;7", ">0": ">0",
 	} {

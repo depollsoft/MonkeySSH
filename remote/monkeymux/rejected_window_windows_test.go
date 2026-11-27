@@ -14,6 +14,7 @@ import (
 )
 
 func TestRejectedWindowCleanupDrainsConPtyAndClosesHandles(t *testing.T) {
+	t.Parallel()
 	output, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestRejectedWindowCleanupDrainsConPtyAndClosesHandles(t *testing.T) {
 }
 
 func TestRejectedWindowCleanupStopsConPtyProcess(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"exit 0", "for /L %i in (1,0,2) do @echo rejected-output"} {
 		t.Run(command, func(t *testing.T) {
 			windowPty, process, err := startWindow(exec.Command("cmd.exe", "/c", command), 80, 24)

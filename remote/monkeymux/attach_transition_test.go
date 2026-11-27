@@ -132,6 +132,7 @@ func TestAttachWaitsForForwardingBeforePublishingRequestedViewport(
 }
 
 func TestAttachBarrierLetsIncompleteOutputReachGroundBeforeReplay(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 59, 47)
 	window := &muxWindow{
 		id:                  "@1",
@@ -175,6 +176,7 @@ func TestAttachBarrierLetsIncompleteOutputReachGroundBeforeReplay(t *testing.T) 
 }
 
 func TestAttachBarrierDoesNotHoldResizeLockWhileWaiting(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 59, 47)
 	window := &muxWindow{
 		id:                       "@1",
@@ -219,6 +221,7 @@ func TestAttachBarrierDoesNotHoldResizeLockWhileWaiting(t *testing.T) {
 }
 
 func TestResizeRepublishesGridForUnchangedRequest(t *testing.T) {
+	t.Parallel()
 	// A client whose grid drifted can only ask for a correction by re-sending
 	// its viewport. If the server suppresses an unchanged size, that request is
 	// silently dropped and the client stays corrupted until the user resizes.
@@ -258,6 +261,7 @@ func TestResizeRepublishesGridForUnchangedRequest(t *testing.T) {
 }
 
 func TestAttachBarrierAbortsWhenServerCloses(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 59, 47)
 	window := &muxWindow{
 		id:                       "@1",
@@ -300,6 +304,7 @@ func TestAttachBarrierAbortsWhenServerCloses(t *testing.T) {
 }
 
 func TestAttachTransitionLockReleasesWhileClientRemainsConnected(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 69, 55)
 	server.windows = []*muxWindow{
 		{id: "@1", index: 0, lastActivity: time.Now()},
@@ -399,7 +404,10 @@ func TestRedrawFallbackRejectsFrameWithoutVisibleContent(t *testing.T) {
 }
 
 func TestAttachBarrierDeadlineReleasesDisconnectedAndQueuedAttaches(t *testing.T) {
+	t.Parallel()
+	const transitionTimeout = 100 * time.Millisecond
 	server := newMuxServerWithSize("test", 59, 47)
+	server.attachTransitionTimeout = transitionTimeout
 	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
 	window.observeTerminalOutputStateLocked([]byte("\x1b]0;unfinished"))
 	server.windows = []*muxWindow{window}
@@ -436,7 +444,7 @@ func TestAttachBarrierDeadlineReleasesDisconnectedAndQueuedAttaches(t *testing.T
 	for _, done := range []chan struct{}{firstDone, secondDone} {
 		select {
 		case <-done:
-		case <-time.After(time.Until(started.Add(attachTransitionTimeout + time.Second))):
+		case <-time.After(time.Until(started.Add(transitionTimeout + time.Second))):
 			t.Fatal("incomplete OSC retained an attach beyond its absolute deadline")
 		}
 	}

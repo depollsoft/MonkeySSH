@@ -638,6 +638,7 @@ func TestPushStoreReloadsChangesFromOtherServers(t *testing.T) {
 }
 
 func TestPushAlertOutputDetection(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		bell bool
@@ -867,6 +868,7 @@ func TestPushOldBridgeCounterRestartsTheHold(t *testing.T) {
 }
 
 func TestAcpBridgeCountsPushSignals(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	prompt := parseAcpEnvelope(json.RawMessage(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{}}`))
 	if _, ok := bridge.trackClientRequest(prompt); !ok {

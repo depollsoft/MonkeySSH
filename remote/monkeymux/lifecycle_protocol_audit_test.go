@@ -34,6 +34,7 @@ func auditMuxConnection(t *testing.T, server *muxServer) (net.Conn, *deadlineRec
 }
 
 func TestControlHelloAfterShutdownIsRejected(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("late-control")
 	peer, _ := auditMuxConnection(t, server)
 	server.close()
@@ -53,6 +54,7 @@ func TestControlHelloAfterShutdownIsRejected(t *testing.T) {
 }
 
 func TestMuxHelloRejectsOversizeWithoutWaitingForNewline(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("oversized-hello")
 	defer server.close()
 	peer, _ := auditMuxConnection(t, server)
@@ -68,6 +70,7 @@ func TestMuxHelloRejectsOversizeWithoutWaitingForNewline(t *testing.T) {
 }
 
 func TestMuxIncompleteHelloExpiresAfterShutdown(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("incomplete-hello")
 	peer, conn := auditMuxConnection(t, server)
 	if _, err := io.WriteString(peer, "{\"role\":"); err != nil {
@@ -84,6 +87,7 @@ func TestMuxIncompleteHelloExpiresAfterShutdown(t *testing.T) {
 }
 
 func TestMuxHelloPreservesBufferedControlRequest(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("buffered-control")
 	defer server.close()
 	peer, conn := auditMuxConnection(t, server)
@@ -120,6 +124,7 @@ func TestMuxHelloPreservesBufferedControlRequest(t *testing.T) {
 }
 
 func TestStartWindowPreservesCommandError(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command(filepath.Join(t.TempDir(), "missing-executable"))
 	cmd.Err = exec.ErrDot
 	pty, process, err := startWindow(cmd, 80, 24)

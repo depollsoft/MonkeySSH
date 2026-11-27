@@ -208,6 +208,8 @@ type kittyClipboardInputState struct {
 	// marker split across reads still opens or closes the paste.
 	pasteActive      bool
 	pasteMarkerCarry []byte
+	// ambiguousCarryTimeout overrides kittyClipboardAmbiguousCarryTimeout when positive (used by tests).
+	ambiguousCarryTimeout time.Duration
 }
 
 // kittyClipboardAnsweredRequest is a request MonkeyMux answered in a
@@ -1224,7 +1226,11 @@ func (state *kittyClipboardInputState) pastedRangesLocked(
 
 func (c *attachClient) scheduleKittyClipboardCarryFlushLocked() {
 	generation := c.kittyClipboardInput.generation
-	time.AfterFunc(kittyClipboardAmbiguousCarryTimeout, func() {
+	timeout := c.kittyClipboardInput.ambiguousCarryTimeout
+	if timeout <= 0 {
+		timeout = kittyClipboardAmbiguousCarryTimeout
+	}
+	time.AfterFunc(timeout, func() {
 		c.flushKittyClipboardCarry(generation)
 	})
 }

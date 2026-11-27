@@ -90,6 +90,7 @@ func newCellSizeTestServer(t *testing.T) (*muxServer, *muxWindow, muxPty) {
 }
 
 func TestPtyWinsizeOmitsPixelsThatDoNotFit(t *testing.T) {
+	t.Parallel()
 	size := ptyWinsize(80, 24, 800, 480)
 	if size.Cols != 80 || size.Rows != 24 || size.X != 800 || size.Y != 480 {
 		t.Fatalf("winsize = %+v, want 80x24 at 800x480", size)
@@ -101,6 +102,7 @@ func TestPtyWinsizeOmitsPixelsThatDoNotFit(t *testing.T) {
 }
 
 func TestCellPixelSizeOfDividesPixelsByGrid(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name          string
 		size          *pty.Winsize
@@ -120,6 +122,7 @@ func TestCellPixelSizeOfDividesPixelsByGrid(t *testing.T) {
 }
 
 func TestResizeReportsPrimaryClientCellPixelSize(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
 
@@ -129,6 +132,7 @@ func TestResizeReportsPrimaryClientCellPixelSize(t *testing.T) {
 }
 
 func TestResizeRequestRecordsCellPixelSize(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClient(t, server, &recordingConn{}, "cli", 80, 24)
 
@@ -145,6 +149,7 @@ func TestResizeRequestRecordsCellPixelSize(t *testing.T) {
 }
 
 func TestCellSizeRequestReportsPixelsAtCurrentGrid(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClient(t, server, &recordingConn{}, "app", 80, 24)
 
@@ -159,6 +164,7 @@ func TestCellSizeRequestReportsPixelsAtCurrentGrid(t *testing.T) {
 }
 
 func TestCellSizeRequestRejectsInvalidSize(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClient(t, server, &recordingConn{}, "app", 80, 24)
 
@@ -173,6 +179,7 @@ func TestCellSizeRequestRejectsInvalidSize(t *testing.T) {
 }
 
 func TestBackgroundClientCellPixelSizeAppliesWhenFocused(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClientWithCellSize(t, server, "tablet", 80, 24, 12, 24)
 	registerTestAttachClientWithCellSize(t, server, "phone", 80, 24, 10, 20)
@@ -193,6 +200,7 @@ func TestBackgroundClientCellPixelSizeAppliesWhenFocused(t *testing.T) {
 }
 
 func TestCellPixelSizeOutlivesPrimaryClient(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	client := registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
 	server.resizeForClient("app", 80, 24, false)
@@ -204,6 +212,7 @@ func TestCellPixelSizeOutlivesPrimaryClient(t *testing.T) {
 }
 
 func TestBackgroundWindowReportsCellPixelSizeAtNextResize(t *testing.T) {
+	t.Parallel()
 	server, _, _ := newCellSizeTestServer(t)
 	backgroundPty := openTestPty(t)
 	setPtySize(t, backgroundPty, 80, 24)
@@ -229,6 +238,7 @@ func TestBackgroundWindowReportsCellPixelSizeAtNextResize(t *testing.T) {
 }
 
 func TestForegroundRedrawKeepsCellPixelSize(t *testing.T) {
+	t.Parallel()
 	server, window, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
 	server.resizeForClient("app", 80, 24, false)
@@ -241,6 +251,7 @@ func TestForegroundRedrawKeepsCellPixelSize(t *testing.T) {
 }
 
 func TestStartWindowSizedReportsPixelSize(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 120")
 	windowPty, _, err := startWindowSized(cmd, 80, 24, 800, 480)
 	if err != nil {
@@ -258,6 +269,7 @@ func TestStartWindowSizedReportsPixelSize(t *testing.T) {
 }
 
 func TestServerStartsWindowWithCellPixelSize(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	server.mu.Lock()
 	server.cellWidthPx, server.cellHeightPx = 10, 20
@@ -294,6 +306,7 @@ func (w *flushCountingWriter) Flush() error {
 }
 
 func TestNotifyFirstWriteClosesOnFirstOutputAndKeepsFlush(t *testing.T) {
+	t.Parallel()
 	inner := &flushCountingWriter{}
 	first := make(chan struct{})
 	writer := notifyFirstWrite(inner, first)
@@ -322,6 +335,7 @@ func TestNotifyFirstWriteClosesOnFirstOutputAndKeepsFlush(t *testing.T) {
 }
 
 func TestCellSizeRequestTargetsTheAttachItsTokenNames(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	// A reconnect reuses the client id while the old attach is still registered.
 	old := registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
@@ -353,6 +367,7 @@ func TestCellSizeRequestTargetsTheAttachItsTokenNames(t *testing.T) {
 }
 
 func TestFocusClientRequestAppliesCellPixelSizeOnRedrawHandoff(t *testing.T) {
+	t.Parallel()
 	server, _, windowPty := newCellSizeTestServer(t)
 	registerTestAttachClientWithCellSize(t, server, "tablet", 80, 24, 10, 20)
 	registerTestAttachClientWithCellSize(t, server, "phone", 80, 24, 10, 20)
