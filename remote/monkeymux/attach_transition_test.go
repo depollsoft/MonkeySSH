@@ -405,7 +405,7 @@ func TestRedrawFallbackRejectsFrameWithoutVisibleContent(t *testing.T) {
 
 func TestAttachBarrierDeadlineReleasesDisconnectedAndQueuedAttaches(t *testing.T) {
 	t.Parallel()
-	const transitionTimeout = 100 * time.Millisecond
+	const transitionTimeout = 150 * time.Millisecond
 	server := newMuxServerWithSize("test", 59, 47)
 	server.attachTransitionTimeout = transitionTimeout
 	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}

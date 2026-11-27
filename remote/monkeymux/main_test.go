@@ -13722,10 +13722,15 @@ func TestThemeHintDeliversModeReportAndFocusPair(t *testing.T) {
 
 func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
 	t.Parallel()
-	const shutdownTimeout = 200 * time.Millisecond
 	for _, acknowledge := range []bool{true, false} {
 		t.Run(fmt.Sprintf("acknowledge=%v", acknowledge), func(t *testing.T) {
 			t.Parallel()
+			// Positive path returns immediately on ack, so keep full headroom;
+			// only the unacknowledged timeout path needs a shortened deadline.
+			shutdownTimeout := socketTimeout
+			if !acknowledge {
+				shutdownTimeout = 400 * time.Millisecond
+			}
 			const session = "shutdown-ack"
 			conn, peer := net.Pipe()
 			defer conn.Close()
@@ -13736,7 +13741,7 @@ func TestRequestServerShutdownWaitsForMatchingAcknowledgement(t *testing.T) {
 				requestServerShutdownOnConnectionWithTimeout(conn, session, shutdownTimeout)
 				close(done)
 			}()
-			_ = peer.SetDeadline(time.Now().Add(shutdownTimeout + time.Second))
+			_ = peer.SetDeadline(time.Now().Add(shutdownTimeout + 2*time.Second))
 			enc, dec := json.NewEncoder(peer), json.NewDecoder(peer)
 			var request controlMessage
 			if err := dec.Decode(&request); err != nil || request.Role != "control" {

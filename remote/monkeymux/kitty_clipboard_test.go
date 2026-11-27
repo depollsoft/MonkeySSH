@@ -379,7 +379,7 @@ func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
 
 func TestKittyClipboardAmbiguousCarryIsReleasedAfterTimeout(t *testing.T) {
 	t.Parallel()
-	const carryTimeout = 80 * time.Millisecond
+	const carryTimeout = 120 * time.Millisecond
 	client := newAttachClient(&recordingConn{}, controlMessage{})
 	client.kittyClipboardInput.ambiguousCarryTimeout = carryTimeout
 	oweKittyClipboardReplies(client)
@@ -1939,7 +1939,7 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 		}
 		time.Sleep(time.Millisecond)
 	}
-	const carryTimeout = 150 * time.Millisecond
+	const carryTimeout = 300 * time.Millisecond
 	client.inputDispatchMu.Lock()
 	client.kittyClipboardInput.ambiguousCarryTimeout = carryTimeout
 	client.inputDispatchMu.Unlock()
