@@ -53,6 +53,7 @@ func TestProgramResumeSurvivesARestore(t *testing.T) {
 			t.Setenv("ENV", "")
 			t.Setenv("BASH_ENV", "")
 			t.Setenv(programResumeTokenEnv, "outer-terminal-token-000000")
+			t.Setenv("XDG_RUNTIME_DIR", shortUnixSocketDir(t))
 			scratch, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -160,40 +161,78 @@ func TestProgramResumeNeverRunsAShellBuiltin(t *testing.T) {
 			t.Setenv("SHELL", shell)
 			t.Setenv("ENV", "")
 			t.Setenv("BASH_ENV", "")
-			scratch := t.TempDir()
-			pwned := filepath.Join(scratch, "pwned")
-			done := filepath.Join(scratch, "done")
+			t.Setenv("XDG_RUNTIME_DIR", shortUnixSocketDir(t))
+			pwned := filepath.Join(t.TempDir(), "pwned")
 			server := newMuxServerWithSize("resume-builtin", 80, 24)
 			t.Cleanup(server.close)
 
-			_, err := server.createWindow(createWindowOptions{programResume: &programResumeState{
+			window, err := server.createWindow(createWindowOptions{programResume: &programResumeState{
 				Argv: []string{"eval", "touch " + shellQuote(pwned)},
 			}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A second window started afterwards marks a point by which the
-			// first has run.
-			_, err = server.createWindow(createWindowOptions{programResume: &programResumeState{
-				Argv: []string{"/bin/sh", "-c", "sleep 0.5; echo ok > " + shellQuote(done)},
-			}})
-			if err != nil {
-				t.Fatal(err)
+			// The window closes once the shell has run the helper, which
+			// finds no program of that name.
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				server.mu.Lock()
+				closed := window.closed
+				server.mu.Unlock()
+				if closed {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the window never finished running the command")
+				}
+				time.Sleep(20 * time.Millisecond)
 			}
-			// The resumed program owns its command until it reports, so a
-			// second upgrade before then still brings it back.
-			restore := server.restoreSnapshot()
-			if len(restore.Windows) == 0 {
-				t.Fatal("no window to restore")
-			}
-			last := restore.Windows[len(restore.Windows)-1].ProgramResume
-			if last == nil || len(last.Argv) != 3 || last.Argv[0] != "/bin/sh" {
-				t.Fatalf("the resumed program's command was not carried over: %+v", last)
-			}
-			waitForFile(t, done)
 			if _, err := os.Stat(pwned); err == nil {
 				t.Fatal("the shell's eval builtin ran in place of a program")
 			}
 		})
+	}
+}
+
+// The resumed program owns its command until it reports, so a second upgrade
+// before then still brings it back.
+func TestResumedProgramKeepsItsCommand(t *testing.T) {
+	for _, shellWindow := range []bool{false, true} {
+		setTestHomeDir(t, t.TempDir())
+		t.Setenv("SHELL", "/bin/sh")
+		t.Setenv("ENV", "")
+		t.Setenv("XDG_RUNTIME_DIR", shortUnixSocketDir(t))
+		directory, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := newMuxServerWithSize("resume-again", 80, 24)
+		resume := &programResumeState{
+			Argv:        []string{"sleep", "30"},
+			Cwd:         directory,
+			ShellWindow: shellWindow,
+		}
+		if _, err := server.createWindow(createWindowOptions{cwd: directory, programResume: resume}); err != nil {
+			server.close()
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			restore := server.restoreSnapshot()
+			if len(restore.Windows) == 1 && restore.Windows[0].ProgramResume != nil {
+				got := restore.Windows[0].ProgramResume
+				if strings.Join(got.Argv, " ") != "sleep 30" || got.Cwd != directory || got.ShellWindow != shellWindow {
+					server.close()
+					t.Fatalf("shell window %v: carried %+v, want %+v", shellWindow, got, resume)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				server.close()
+				t.Fatalf("shell window %v: the resumed program's command was not carried over", shellWindow)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		server.close()
 	}
 }

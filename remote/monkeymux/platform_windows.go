@@ -992,9 +992,28 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 // programResumeRunnable reports whether a reported OSC 7577 command can be
 // run here: its program must be found now, because a window whose process
 // cannot start is not restored at all.
+//
+// It must also be an executable image. A batch file (the .cmd shim npm
+// installs for a CLI) runs through cmd.exe, which reads the arguments again
+// as its own syntax, so an argument holding & or | would not arrive as one
+// argument and could run something else.
 func programResumeRunnable(resume programResumeState) bool {
-	_, err := exec.LookPath(resume.Argv[0])
-	return err == nil
+	path, err := exec.LookPath(resume.Argv[0])
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".exe", ".com":
+		return true
+	}
+	return false
+}
+
+// programResumeOwnerInWindow always holds here: Windows has no terminal
+// sessions to compare, and no pid namespaces to confuse a pid.
+func programResumeOwnerInWindow(windowPid int, pid int) bool {
+	_, _ = windowPid, pid
+	return true
 }
 
 // programResumeCommand starts a reported OSC 7577 command as the window's own
@@ -1005,11 +1024,11 @@ func programResumeCommand(
 	shell string,
 	resume programResumeState,
 	directory string,
-) (cmd *exec.Cmd, direct bool) {
+) (cmd *exec.Cmd, direct bool, input []byte, err error) {
 	// The caller sets the process's directory; nothing runs before the program.
 	_, _ = shell, directory
 	// The command is one the user's own program reported under the window's token.
-	return exec.Command(resume.Argv[0], resume.Argv[1:]...), true // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	return exec.Command(resume.Argv[0], resume.Argv[1:]...), true, nil, nil // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 }
 
 func isCmdShell(shell string) bool {

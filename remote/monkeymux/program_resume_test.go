@@ -174,11 +174,6 @@ func TestParseProgramResumeBody(t *testing.T) {
 			verdict: programResumeRejected,
 		},
 		{
-			name:    "program that env would read as an assignment",
-			body:    signedProgramResume(base+":"+programResumeArgv("PATH=/tmp", "id"), programResumeTestToken),
-			verdict: programResumeRejected,
-		},
-		{
 			name:    "empty argv",
 			body:    signedProgramResume(base+":argv=", programResumeTestToken),
 			verdict: programResumeRejected,
@@ -310,11 +305,18 @@ func reportProgramResume(window *muxWindow, body string) {
 }
 
 func programResumeBodyNow(pid int, offset int, rest string) string {
-	return fmt.Sprintf("pid=%d:time=%d:%s", pid, time.Now().Unix()+int64(offset), rest)
+	return programResumeBodyAt(time.Now().Unix(), pid, offset, rest)
+}
+
+// programResumeBodyAt times a report from one reading of the clock, for tests
+// that depend on the order of several reports.
+func programResumeBodyAt(base int64, pid int, offset int, rest string) string {
+	return fmt.Sprintf("pid=%d:time=%d:%s", pid, base+int64(offset), rest)
 }
 
 func TestWindowKeepsProgramResumeRecords(t *testing.T) {
 	self := os.Getpid()
+	base := time.Now().Unix()
 	window := &muxWindow{programResumeToken: programResumeTestToken}
 	command := func() []string {
 		candidates := window.programResumeCandidatesLocked()
@@ -324,20 +326,20 @@ func TestWindowKeepsProgramResumeRecords(t *testing.T) {
 		return candidates[0].state.Argv
 	}
 
-	reportProgramResume(window, programResumeBodyNow(self, 0, programResumeArgv("nvim", "-S", "one")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 0, programResumeArgv("nvim", "-S", "one")))
 	if got := command(); !reflect.DeepEqual(got, []string{"nvim", "-S", "one"}) {
 		t.Fatalf("command = %q after the first report", got)
 	}
 
 	// A later report replaces the command; an older one cannot come back.
-	reportProgramResume(window, programResumeBodyNow(self, 5, programResumeArgv("nvim", "-S", "two")))
-	reportProgramResume(window, programResumeBodyNow(self, 1, programResumeArgv("nvim", "-S", "one")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 5, programResumeArgv("nvim", "-S", "two")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 1, programResumeArgv("nvim", "-S", "one")))
 	if got := command(); !reflect.DeepEqual(got, []string{"nvim", "-S", "two"}) {
 		t.Fatalf("command = %q, want the newer report's", got)
 	}
 
 	// Output that does not hold the token changes nothing.
-	forged := programResumeBodyNow(self, 9, programResumeArgv("sh", "-c", "id"))
+	forged := programResumeBodyAt(base, self, 9, programResumeArgv("sh", "-c", "id"))
 	window.observeTerminalMetadataLocked([]byte(programResumeOsc(signedProgramResume(forged, "guess"))))
 	if got := command(); !reflect.DeepEqual(got, []string{"nvim", "-S", "two"}) {
 		t.Fatalf("command = %q after a forged report", got)
@@ -345,19 +347,29 @@ func TestWindowKeepsProgramResumeRecords(t *testing.T) {
 
 	// A rejected report removes the owner's command rather than keeping the
 	// old one, and the old report still cannot be replayed.
-	reportProgramResume(window, programResumeBodyNow(self, 6, programResumeArgv("./relative")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 6, programResumeArgv("./relative")))
 	if got := command(); got != nil {
 		t.Fatalf("command = %q after a rejected report", got)
 	}
-	reportProgramResume(window, programResumeBodyNow(self, 5, programResumeArgv("nvim", "-S", "two")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 5, programResumeArgv("nvim", "-S", "two")))
 	if got := command(); got != nil {
 		t.Fatalf("command = %q: an older report was replayed", got)
 	}
 
-	reportProgramResume(window, programResumeBodyNow(self, 7, programResumeArgv("nvim")))
-	reportProgramResume(window, programResumeBodyNow(self, 8, "clear=1"))
+	reportProgramResume(window, programResumeBodyAt(base, self, 7, programResumeArgv("nvim")))
+	reportProgramResume(window, programResumeBodyAt(base, self, 8, "clear=1"))
 	if got := command(); got != nil {
 		t.Fatalf("command = %q after clear", got)
+	}
+	// The clear's own second is not enough to bring a command back: output
+	// that is shown again must not undo it.
+	reportProgramResume(window, programResumeBodyAt(base, self, 8, programResumeArgv("nvim")))
+	if got := command(); got != nil {
+		t.Fatalf("command = %q: a report from the clear's second undid it", got)
+	}
+	reportProgramResume(window, programResumeBodyAt(base, self, 9, programResumeArgv("nvim")))
+	if got := command(); got == nil {
+		t.Fatal("a later report did not set a command after clear")
 	}
 }
 
@@ -383,14 +395,108 @@ func TestProgramResumeRecordEndsWithItsOwner(t *testing.T) {
 
 func TestWindowKeepsABoundedNumberOfProgramResumeOwners(t *testing.T) {
 	window := &muxWindow{programResumeToken: programResumeTestToken}
-	for pid := 1; pid <= programResumeMaxRecords+4; pid++ {
-		reportProgramResume(window, programResumeBodyNow(1000000+pid, 0, "clear=1"))
+	self := os.Getpid()
+	reportProgramResume(window, programResumeBodyNow(self, 0, programResumeArgv("nvim")))
+	// Short-lived children that reported and ended must not push out the
+	// owner that still runs.
+	for index := 1; index <= programResumeMaxRecords*2; index++ {
+		window.programResumeClock++
+		window.programResume[2000000000+index] = programResumeRecord{
+			argv: []string{"gone"}, accepted: window.programResumeClock,
+		}
 	}
-	if len(window.programResume) != programResumeMaxRecords {
-		t.Fatalf("window keeps %d owners, want %d", len(window.programResume), programResumeMaxRecords)
+	reportProgramResume(window, programResumeBodyNow(os.Getppid(), 0, programResumeArgv("parent")))
+	if len(window.programResume) != 2 {
+		t.Fatalf("window keeps %d owners, want the two that run", len(window.programResume))
 	}
-	if _, kept := window.programResume[1000001]; kept {
-		t.Fatal("the least recent owner was not the one evicted")
+	if _, kept := window.programResume[self]; !kept {
+		t.Fatal("the running owner's command was evicted in favour of exited ones")
+	}
+}
+
+// Evicting or clearing a command must not let an older report of the same
+// owner back in.
+func TestProgramResumeReplayProtectionOutlivesTheRecord(t *testing.T) {
+	window := &muxWindow{programResumeToken: programResumeTestToken}
+	self, base := os.Getpid(), time.Now().Unix()
+	original := programResumeBodyAt(base, self, 0, programResumeArgv("nvim"))
+	reportProgramResume(window, original)
+	reportProgramResume(window, programResumeBodyAt(base, self, 1, "clear=1"))
+	for index := 1; index <= programResumeMaxRecords*2; index++ {
+		reportProgramResume(window, programResumeBodyAt(base, 2000000000+index, 2, "clear=1"))
+	}
+	reportProgramResume(window, original)
+	if got := window.programResumeCandidatesLocked(); len(got) != 0 {
+		t.Fatalf("a cleared command came back from a replayed report: %+v", got)
+	}
+
+	// Past the cap on remembered times, the oldest becomes a floor for all.
+	window = &muxWindow{programResumeToken: programResumeTestToken}
+	reportProgramResume(window, original)
+	reportProgramResume(window, programResumeBodyAt(base, self, 1, "clear=1"))
+	for index := 1; index <= programResumeMaxTimes; index++ {
+		window.noteProgramResumeTimeLocked(2000000000+index, programResumeTime{time: base + 2}, time.Unix(base, 0))
+	}
+	if _, remembered := window.programResumeTimes[self]; remembered {
+		t.Fatal("the oldest time was not the one forgotten")
+	}
+	reportProgramResume(window, original)
+	if got := window.programResumeCandidatesLocked(); len(got) != 0 {
+		t.Fatalf("a forgotten time let a replayed report in: %+v", got)
+	}
+	reportProgramResume(window, programResumeBodyAt(base, self, 3, programResumeArgv("nvim")))
+	if got := window.programResumeCandidatesLocked(); len(got) != 1 {
+		t.Fatal("a later report was refused")
+	}
+}
+
+// A command that named no directory runs where its owner was, read from the
+// system, never where an unsigned OSC 7 says the window is.
+func TestProgramResumeDirectoryIgnoresOsc7(t *testing.T) {
+	previousInspect, previousDirectory := inspectProgramResumeOwner, inspectProgramResumeOwnerDirectory
+	t.Cleanup(func() {
+		inspectProgramResumeOwner, inspectProgramResumeOwnerDirectory = previousInspect, previousDirectory
+	})
+	ownerDirectory, elsewhere := t.TempDir(), t.TempDir()
+	started := time.Unix(1795543200, 0)
+	inspectProgramResumeOwner = func(int) processSnapshot {
+		return processSnapshot{known: true, running: true, started: started}
+	}
+	inspectProgramResumeOwnerDirectory = func(int) string { return ownerDirectory }
+
+	window := &muxWindow{id: "@1", programResumeToken: programResumeTestToken}
+	server := &muxServer{windows: []*muxWindow{window}}
+	reportProgramResume(window, programResumeBodyNow(os.Getpid(), 0, programResumeArgv("make")))
+	window.observeTerminalMetadataLocked([]byte("\x1b]7;file://localhost" + filepath.ToSlash(elsewhere) + "\x1b\\"))
+	server.identifyProgramResumeOwners()
+
+	chosen := chooseProgramResume(window.programResumeCandidatesLocked())
+	if chosen == nil || chosen.Cwd != ownerDirectory {
+		t.Fatalf("chose %+v, want the owner's directory %q", chosen, ownerDirectory)
+	}
+
+	// With no directory known at all, the command starts where a new shell
+	// would, and the old process's terminal modes are not carried over.
+	home := t.TempDir()
+	setTestHomeDir(t, home)
+	program, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !programResumeRunnable(programResumeState{Argv: []string{program}}) {
+		t.Skip("the default shell cannot run a reported command")
+	}
+	options := createWindowOptionsForRestore(restoreWindowState{
+		Cwd:                   elsewhere,
+		CursorVisibilityKnown: true,
+		PrivateModes:          map[string]bool{"1049": true, "7": false},
+		ProgramResume:         &programResumeState{Argv: []string{program}},
+	}, false)
+	if options.programResume == nil || options.cwd != home {
+		t.Fatalf("directory = %q, want the home directory %q", options.cwd, home)
+	}
+	if options.cursorVisibilityKnown || len(options.privateModes) != 0 {
+		t.Fatalf("the old process's modes were carried over: %+v", options.privateModes)
 	}
 }
 

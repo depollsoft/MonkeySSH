@@ -689,45 +689,68 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 
 // programResumeRunnable reports whether a reported OSC 7577 command can be
 // run here. It needs a POSIX shell: other shells restore the usual way. A
-// program that is missing shows the shell's error in the restored window.
+// program named by a path must still be an executable file. A bare name is
+// looked up on the restored shell's PATH, which is not known here; when it
+// is missing, the window shows the helper's error.
 func programResumeRunnable(resume programResumeState) bool {
-	_ = resume
-	return isPosixShell(defaultShellPath())
+	if !isPosixShell(defaultShellPath()) {
+		return false
+	}
+	if program := resume.Argv[0]; filepath.IsAbs(program) {
+		info, err := os.Stat(program)
+		return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	}
+	return true
 }
 
-// programResumeLauncher is run by /bin/sh with the directory and then the
-// command as its parameters. A separate, non-interactive sh has read no
-// startup file, so its cd and exec are the real ones, and it changes to the
-// directory after the user's shell has finished initialising, which may have
-// moved elsewhere. env starts the program because it only ever runs a file
-// found on PATH: a shell's own lookup would let a function, an alias or a
-// builtin named like the program, such as eval, run in its place (zsh's exec
-// runs builtins too). env reads a leading NAME=value as an assignment, which
-// is why isProgramResumeProgram refuses a program with `=` in its name.
-const programResumeLauncher = `[ -z "$1" ] || cd -- "$1" || exit 1; shift; exec /usr/bin/env "$@"`
+// programResumeOwnerInWindow reports whether pid belongs to the terminal
+// session the window's process leads. A window without a process has no
+// session to compare.
+func programResumeOwnerInWindow(windowPid int, pid int) bool {
+	if windowPid <= 0 {
+		return true
+	}
+	windowSession, err := unix.Getsid(windowPid)
+	if err != nil {
+		return false
+	}
+	session, err := unix.Getsid(pid)
+	return err == nil && session == windowSession
+}
 
-// programResumeCommand runs a reported OSC 7577 command in the user's shell
-// environment: a login, interactive shell that has read its startup files and
-// then hands over to programResumeLauncher. The directory and the elements
-// are positional parameters, never shell source, so each reaches the program
-// as one argument whatever it contains. The command is not run when the
-// directory cannot be entered. A shell window's program runs in a subshell
-// and the shell takes over when it ends, as it did before.
+// programResumeCommand runs a reported OSC 7577 command through `monkeymux
+// program-resume-exec` (see programResumeExecCommand) in the user's shell
+// environment. The command and its directory travel in a private file, so no
+// part of the report is ever shell source: the only text a shell reads is
+// this executable's path and that file's, both MonkeyMux's own.
+//
+// A shell window starts its interactive login shell as usual and types the
+// helper's command line as its first input, so the program is an ordinary job
+// of the shell that stays: Ctrl-Z, fg and the prompt afterwards work as they
+// did. Any other window runs the helper from a login, interactive shell that
+// has read its startup files, and closes with the program.
 func programResumeCommand(
 	shell string,
 	resume programResumeState,
 	directory string,
-) (cmd *exec.Cmd, direct bool) {
-	script := `\exec /bin/sh -c '` + programResumeLauncher + `' sh "$@"`
-	if resume.ShellWindow {
-		script = `(` + script + `); \exec "$0" -i`
+) (cmd *exec.Cmd, direct bool, input []byte, err error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, false, nil, err
 	}
-	arguments := append([]string{"-i", "-c", script, shell, directory}, resume.Argv...)
-	cmd = exec.Command(shell, arguments...)
+	launch, err := writeProgramResumeLaunch(programResumeLaunch{Argv: resume.Argv, Cwd: directory})
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if resume.ShellWindow {
+		line := " " + shellQuote(self) + " program-resume-exec " + shellQuote(launch) + "\n"
+		return shellCommand(shell), false, []byte(line), nil
+	}
+	cmd = exec.Command(shell, "-i", "-c", `\exec "$0" program-resume-exec "$1"`, self, launch)
 	if base := filepath.Base(shell); base != "" {
 		cmd.Args[0] = "-" + base
 	}
-	return cmd, false
+	return cmd, false, nil, nil
 }
 
 // agentWindowHoldThresholdSeconds bounds how soon after launch an abnormal agent

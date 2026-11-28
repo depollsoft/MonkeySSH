@@ -319,30 +319,46 @@ Parsing is strict: a report that passes those checks but breaks a rule (a
 relative program or directory, both `argv` and `clear`, a `need` key MonkeyMux
 lacks, a value with a character the protocol does not send, bad base64 or
 control characters, more than 256 arguments) removes the
-owner's command instead of leaving an older one in place. A command ends when
-its owning process exits or sends `clear=1`; RIS, prompt marks and screen
-switches leave it alone. MonkeyMux records when each owner started, so a
-zombie or a later process that was given the owner's pid does not keep the
-command alive.
+owner's command instead of leaving an older one in place. RIS, prompt marks
+and screen switches leave a command alone. MonkeyMux records when each owner
+started, so a zombie or a later process that was given the owner's pid does
+not keep the command alive.
+
+A command ends when its owning process exits or sends `clear=1`; a report for
+a process outside the window's terminal session is refused (a program in a
+pid namespace reports a number that names some other process here). The time
+of each owner's last report is remembered apart from the commands, so an
+evicted or cleared command cannot be brought back by showing an old report
+again.
 
 The upgrade restore snapshot carries one command per window, never the token.
 When several processes of a window reported, an ancestor wins over what it
-started, then the most recent report. The restored window runs the command in
-the reported directory (or the window's own when none was reported) from a
-login, interactive shell that has read its startup files, with a new token.
-That shell hands the directory and the arguments, as arguments and never as
-shell text, to a plain `/bin/sh` that changes to the directory (so a startup
-file that moved elsewhere does not matter) and lets `env` start the program,
-so that no shell function, alias or builtin can stand in for it; a program
-name containing `=` is refused for that reason. The resumed program owns the
-command until it reports, clears or exits, so a second upgrade still brings
-it back (a shell window's program has to report first). A window that was a
-shell returns to a shell when the program ends. The command is not run when
-its directory is gone, when the default shell is not a POSIX shell, or when
-MonkeyMux already knows the agent session to resume, which also restores the
-agent's launch flags. On Windows the command starts directly as the window's
-process, and only when its program is found. Set `MONKEYMUX_PROGRAM_RESUME=0` in the server's environment to turn
-the protocol off; windows then get no token.
+started, then the most recent report. The command runs in the directory it
+reported, or else the directory its owner was in (read from the system, not
+from OSC 7, which any output can send), or else the home directory.
+
+The restored window gets a new token and starts the program through
+`monkeymux program-resume-exec <file>`. The command and directory travel in a
+private file, so no part of the report is ever shell text. The helper changes
+to the directory after the shell's startup files have run, finds the program
+on the shell's `PATH` itself (so no shell function, alias or builtin can stand
+in for it), reports the command under the new token so a second upgrade still
+brings it back, and becomes the program. A window that was a shell starts its
+login shell as usual and types the helper's command line as its first input,
+so the program is an ordinary job of that shell: Ctrl-Z, `fg` and the prompt
+afterwards work as before. Any other window runs the helper from a login,
+interactive shell and closes with the program. The resumed program starts
+with default terminal modes.
+
+The command is not run when its directory is gone, when a program named by a
+path is no longer an executable file, when the default shell is not a POSIX
+shell, or when MonkeyMux already knows the agent session to resume, which
+also restores the agent's launch flags. On Windows the command starts directly
+as the window's process, and only when its program is found and is an `.exe`
+or `.com` (a batch file would hand its arguments to `cmd.exe` to read again).
+A window whose reported command cannot start is restored the usual way. Set
+`MONKEYMUX_PROGRAM_RESUME=0` in the server's environment to turn the protocol
+off; windows then get no token.
 
 MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
 (OSC 7501, revision 0.4) as each window's terminal. It answers the `OSC 7501 ; ?`

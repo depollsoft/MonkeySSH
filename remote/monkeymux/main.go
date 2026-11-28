@@ -1080,13 +1080,14 @@ type muxWindow struct {
 	programStatusStepping bool
 	// programResumeToken signs the window's OSC 7577 reports; it is empty
 	// when the protocol is off. programResume holds what each owning process
-	// last reported, and programResumeClock orders the reports.
-	// programResumeShellWindow marks a window restored from a shell window's
-	// report, which goes back to a shell when the program ends.
-	programResumeToken       string
-	programResume            map[int]programResumeRecord
-	programResumeClock       uint64
-	programResumeShellWindow bool
+	// last reported as its command, and programResumeClock orders the
+	// reports. programResumeTimes and programResumeTimeFloor keep older
+	// reports from being replayed; see noteProgramResumeTimeLocked.
+	programResumeToken     string
+	programResume          map[int]programResumeRecord
+	programResumeClock     uint64
+	programResumeTimes     map[int]programResumeTime
+	programResumeTimeFloor int64
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -1466,6 +1467,8 @@ func main() {
 		piAgentCommand(os.Args[2:])
 	case "agent-launch":
 		runAgentLaunchWrapper(os.Args[2:])
+	case "program-resume-exec":
+		programResumeExecCommand(os.Args[2:])
 	case "agent-identity-hook":
 		agentIdentityHookCommand(os.Args[2:])
 	case "wait-codex-session":
@@ -6682,6 +6685,13 @@ func (s *muxServer) restoreOrCreateInitialWindow(
 	for _, state := range restore.Windows {
 		options := createWindowOptionsForRestore(state, restore.StartInYoloMode)
 		window, err := s.createWindow(options)
+		if err != nil && options.programResume != nil {
+			// The reported command could not start; restore the usual way
+			// instead of losing the window.
+			state.ProgramResume = nil
+			options = createWindowOptionsForRestore(state, restore.StartInYoloMode)
+			window, err = s.createWindow(options)
+		}
 		if err != nil {
 			continue
 		}
@@ -6899,9 +6909,14 @@ func createWindowOptionsForRestore(
 	resume := programResumeForRestore(state, agentTool)
 	if resume != nil {
 		command = ""
-		if resume.Cwd != "" {
-			state.Cwd = resume.Cwd
+		state.Cwd = resume.Cwd
+		if state.Cwd == "" {
+			state.Cwd, _ = os.UserHomeDir()
 		}
+		// The resumed program starts with the terminal in its default modes,
+		// not the ones the old process left.
+		state.CursorVisibilityKnown = false
+		state.PrivateModes = nil
 	}
 	return createWindowOptions{
 		name:                      firstNonEmptyString(state.Name, state.PaneTitle, state.CurrentCommand, "shell"),
@@ -7034,6 +7049,7 @@ func (s *muxServer) createWindowWithStarter(
 	cmd := shellCommand(shell)
 	name := filepath.Base(shell)
 	resumedDirectly := false
+	var resumeInput []byte
 	if len(options.args) > 0 {
 		cmd = exec.Command(options.args[0], options.args[1:]...)
 		name = filepath.Base(options.args[0])
@@ -7048,7 +7064,15 @@ func (s *muxServer) createWindowWithStarter(
 				cwd = reported
 			}
 		}
-		cmd, resumedDirectly = programResumeCommand(shell, *options.programResume, resumeDirectory)
+		var err error
+		cmd, resumedDirectly, resumeInput, err = programResumeCommand(
+			shell,
+			*options.programResume,
+			resumeDirectory,
+		)
+		if err != nil {
+			return nil, err
+		}
 		name = filepath.Base(options.programResume.Argv[0])
 	} else if strings.TrimSpace(options.command) != "" {
 		cmd = shellCommandForScript(shell, strings.TrimSpace(options.command))
@@ -7160,12 +7184,12 @@ func (s *muxServer) createWindowWithStarter(
 		foregroundPid:             proc.Pid(),
 		foregroundCommand:         filepath.Base(cmd.Path),
 		foregroundCommandPid:      proc.Pid(),
-		interactiveShell: len(options.args) == 0 && options.programResume == nil &&
-			strings.TrimSpace(options.command) == "",
-		directProcess:      len(options.args) > 0 || resumedDirectly,
-		programResumeToken: resumeToken,
-		programResumeShellWindow: options.programResume != nil &&
-			options.programResume.ShellWindow,
+		// A shell window's resume starts the shell itself, with the program
+		// as its first job (resumeInput).
+		interactiveShell: len(options.args) == 0 && strings.TrimSpace(options.command) == "" &&
+			(options.programResume == nil || len(resumeInput) > 0),
+		directProcess:             len(options.args) > 0 || resumedDirectly,
+		programResumeToken:        resumeToken,
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,
@@ -7181,12 +7205,14 @@ func (s *muxServer) createWindowWithStarter(
 		privateModes:              copyPrivateModes(options.privateModes),
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
 	}
-	if resume := options.programResume; resume != nil && (resumedDirectly || !resume.ShellWindow) {
-		// The window's process becomes the resumed program, which owns the
-		// command until it reports, clears or exits, so a second upgrade
-		// before its first report still brings it back. A shell window's
-		// program is a child whose pid is not known here; it reports when it
-		// starts.
+	if len(resumeInput) > 0 {
+		_, _ = windowPty.Write(resumeInput)
+	}
+	if resume := options.programResume; resume != nil && resumedDirectly {
+		// The window's process is the resumed program, which owns the command
+		// until it reports, clears or exits, so a second upgrade before its
+		// first report still brings it back. Where a helper starts the
+		// program instead, the helper reports for it.
 		window.programResumeClock = 1
 		window.programResume = map[int]programResumeRecord{proc.Pid(): {
 			argv:     append([]string(nil), resume.Argv...),
