@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
@@ -146,57 +145,16 @@ Future<RemoteCommandResult> collectRemoteCommandOutput(
   required Duration timeout,
   required int maxOutputBytes,
 }) async {
-  final bytes = BytesBuilder(copy: false);
-  var truncated = false;
-  var finished = false;
-  final capReached = Completer<void>();
-  final stdoutDone = Completer<void>();
-  final stdout = exec.stdout.listen(null, cancelOnError: true)
-    ..onData((chunk) {
-      if (truncated) return;
-      final remaining = maxOutputBytes - bytes.length;
-      if (chunk.length <= remaining) {
-        bytes.add(chunk);
-        return;
-      }
-      if (remaining > 0) {
-        bytes.add(Uint8List.sublistView(chunk, 0, remaining));
-      }
-      truncated = true;
-      if (!capReached.isCompleted) capReached.complete();
-    })
-    ..onDone(() {
-      if (!stdoutDone.isCompleted) stdoutDone.complete();
-    })
-    ..onError((Object error, StackTrace stackTrace) {
-      if (!stdoutDone.isCompleted) stdoutDone.completeError(error, stackTrace);
-    });
-  final stderr = exec.stderr.listen(
-    (_) {},
-    onError: (Object _) {},
-    cancelOnError: true,
+  final result = await readCappedSshExecOutput(
+    exec,
+    stdin: utf8.encode(script),
+    timeout: timeout,
+    maxBytes: maxOutputBytes,
   );
-  exec.stdin.add(Uint8List.fromList(utf8.encode(script)));
-  unawaited(exec.stdin.close().then<void>((_) {}, onError: (Object _) {}));
-  try {
-    await Future.any<void>([
-      Future.wait<void>([stdoutDone.future, exec.done]),
-      capReached.future,
-    ]).timeout(timeout);
-    finished = !truncated;
-  } finally {
-    await stdout.cancel();
-    await stderr.cancel();
-    if (finished) {
-      exec.close();
-    } else {
-      await closeAbandonedSshExec(exec, grace: Duration.zero);
-    }
-  }
   return RemoteCommandResult(
-    exitCode: finished ? exec.exitCode : null,
-    stdout: const Utf8Decoder(allowMalformed: true).convert(bytes.takeBytes()),
-    truncated: truncated,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    truncated: result.truncated,
   );
 }
 
@@ -583,23 +541,16 @@ class RemoteArchiveExtractor {
     final extension = hasExtension ? name.substring(dot) : '';
     for (var attempt = 1; attempt <= _maxNameAttempts; attempt++) {
       final candidate = attempt == 1 ? name : '$stem ($attempt)$extension';
-      if (!await _exists(sftp, joinRemotePath(directory, candidate))) {
+      if (!await RemoteFileService.exists(
+        sftp,
+        joinRemotePath(directory, candidate),
+      )) {
         return candidate;
       }
     }
     throw const RemoteArchiveException(
       'There is no free name for the extracted files.',
     );
-  }
-
-  Future<bool> _exists(SftpClient sftp, String path) async {
-    try {
-      await sftp.stat(path, followLink: false);
-      return true;
-    } on SftpStatusError catch (error) {
-      if (error.code == SftpStatusCode.noSuchFile) return false;
-      rethrow;
-    }
   }
 }
 

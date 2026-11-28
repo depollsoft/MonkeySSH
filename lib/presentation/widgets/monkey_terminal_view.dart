@@ -4334,6 +4334,24 @@ class MonkeyRenderTerminal extends RenderBox
     return updateEnd ? offsets.end : offsets.start;
   }
 
+  SelectionResult _applySelectableExtensionResult({
+    required bool isEnd,
+    required int currentStart,
+    required int currentEnd,
+    required int nextOffset,
+  }) {
+    if (isEnd) {
+      _applySelectableTextSelection(currentStart, nextOffset);
+    } else {
+      _applySelectableTextSelection(nextOffset, currentEnd);
+    }
+    return nextOffset == 0
+        ? SelectionResult.previous
+        : nextOffset == _terminalSelectionContentLength
+        ? SelectionResult.next
+        : SelectionResult.end;
+  }
+
   SelectionResult _handleSelectableGranularExtension(
     GranularlyExtendSelectionEvent event,
   ) {
@@ -4345,16 +4363,12 @@ class MonkeyRenderTerminal extends RenderBox
     final nextOffset = event.forward
         ? (movingOffset + 1).clamp(0, _terminalSelectionContentLength)
         : (movingOffset - 1).clamp(0, _terminalSelectionContentLength);
-    if (event.isEnd) {
-      _applySelectableTextSelection(currentStart, nextOffset);
-    } else {
-      _applySelectableTextSelection(nextOffset, currentEnd);
-    }
-    return nextOffset == 0
-        ? SelectionResult.previous
-        : nextOffset == _terminalSelectionContentLength
-        ? SelectionResult.next
-        : SelectionResult.end;
+    return _applySelectableExtensionResult(
+      isEnd: event.isEnd,
+      currentStart: currentStart,
+      currentEnd: currentEnd,
+      nextOffset: nextOffset,
+    );
   }
 
   SelectionResult _handleSelectableDirectionalExtension(
@@ -4393,16 +4407,12 @@ class MonkeyRenderTerminal extends RenderBox
       ),
     };
     final nextOffset = _textOffsetForCell(nextCell);
-    if (event.isEnd) {
-      _applySelectableTextSelection(currentStart, nextOffset);
-    } else {
-      _applySelectableTextSelection(nextOffset, currentEnd);
-    }
-    return nextOffset == 0
-        ? SelectionResult.previous
-        : nextOffset == _terminalSelectionContentLength
-        ? SelectionResult.next
-        : SelectionResult.end;
+    return _applySelectableExtensionResult(
+      isEnd: event.isEnd,
+      currentStart: currentStart,
+      currentEnd: currentEnd,
+      nextOffset: nextOffset,
+    );
   }
 
   @override

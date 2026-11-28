@@ -1,64 +1,26 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/services/acp_telemetry_adapter.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
 
-class _FakeAnalyticsClient implements TelemetryAnalyticsClient {
-  final events = <MapEntry<String, Map<String, Object>>>[];
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {}
-
-  @override
-  Future<void> resetAnalyticsData() async {}
-
-  @override
-  Future<void> logEvent({
-    required String name,
-    required Map<String, Object> parameters,
-  }) async {
-    events.add(MapEntry(name, parameters));
-  }
-}
-
-class _FakeCrashReporter implements TelemetryCrashReporter {
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {}
-
-  @override
-  Future<void> deleteUnsentReports() async {}
-
-  @override
-  Future<void> recordFlutterError(FlutterErrorDetails details) async {}
-
-  @override
-  Future<void> recordError(
-    Object error,
-    StackTrace stackTrace, {
-    required bool fatal,
-  }) async {}
-
-  @override
-  Future<void> setCustomKey(String key, Object value) async {}
-}
+import '../../helpers/telemetry_test_fakes.dart';
 
 /// Registers tests from acp_telemetry_adapter_test.dart.
 void registerDomainServicesAcpTelemetryAdapterTests() {
   group('acp_telemetry_adapter', () {
     group('AcpTelemetryAdapter', () {
-      late _FakeAnalyticsClient analytics;
+      late FakeTelemetryAnalyticsClient analytics;
       late AcpTelemetryAdapter adapter;
 
       setUp(() {
-        analytics = _FakeAnalyticsClient();
+        analytics = FakeTelemetryAnalyticsClient();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
           analyticsClient: analytics,
-          crashReporter: _FakeCrashReporter(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
         adapter = AcpTelemetryAdapter(service);
       });
@@ -80,7 +42,9 @@ void registerDomainServicesAcpTelemetryAdapterTests() {
         }
 
         expect(
-          analytics.events.map((event) => event.value['provider_category']),
+          analytics.events.map(
+            (event) => event.parameters['provider_category'],
+          ),
           expected.values,
         );
       });
@@ -98,7 +62,9 @@ void registerDomainServicesAcpTelemetryAdapterTests() {
           );
 
         expect(
-          analytics.events.map((event) => event.value['provider_category']),
+          analytics.events.map(
+            (event) => event.parameters['provider_category'],
+          ),
           ['unknown', 'unknown'],
         );
       });
@@ -113,7 +79,7 @@ void registerDomainServicesAcpTelemetryAdapterTests() {
           ..failure(category: 'transport');
 
         expect(
-          analytics.events.map((e) => e.key),
+          analytics.events.map((e) => e.name),
           containsAll(<String>[
             'acp_session_ended',
             'acp_reconnect_outcome',

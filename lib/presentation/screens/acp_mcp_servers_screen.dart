@@ -12,7 +12,9 @@ import '../../app/theme.dart';
 import '../../domain/models/acp_mcp_server.dart';
 import '../../domain/services/acp_mcp_server_service.dart';
 import '../widgets/brand_empty_state.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/system_vertical_bar.dart';
+import '../widgets/unsaved_changes_guard.dart';
 
 /// Opens the MCP server list on the nearest navigator.
 Future<void> openAcpMcpServersScreen(BuildContext context) =>
@@ -332,55 +334,16 @@ class _AcpMcpServerEditScreenState
   Future<void> _delete() async {
     final server = widget.server;
     if (server == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete MCP server?'),
-        content: const Text(
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete MCP server?',
+      message:
           'New sessions will no longer use it. Sessions already running keep '
           'it until they reconnect.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
-    if (!(confirmed ?? false) || !mounted) return;
+    if (!confirmed || !mounted) return;
     await ref.read(acpMcpServerServiceProvider).deleteServer(server.id);
     if (!mounted) return;
-    setState(() => _allowPop = true);
-    Navigator.of(context).pop();
-  }
-
-  Future<void> _confirmDiscard() async {
-    final discard = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Discard changes?'),
-        content: const Text('Your edits to this MCP server will be lost.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Keep editing'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Discard'),
-          ),
-        ],
-      ),
-    );
-    if (!(discard ?? false) || !mounted) return;
     setState(() => _allowPop = true);
     Navigator.of(context).pop();
   }
@@ -392,11 +355,9 @@ class _AcpMcpServerEditScreenState
       color: theme.colorScheme.onSurfaceVariant,
     );
     final isEditing = widget.server != null;
-    return PopScope<Object?>(
-      canPop: _allowPop || !_dirty,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) unawaited(_confirmDiscard());
-      },
+    return UnsavedChangesGuard(
+      hasUnsavedChanges: !_allowPop && _dirty,
+      message: 'Your edits to this MCP server will be lost.',
       child: Scaffold(
         appBar: VerticalBarAppBar(
           AppBar(

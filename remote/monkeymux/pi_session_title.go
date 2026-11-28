@@ -1,24 +1,17 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const (
-	// piSessionTitleMaxRunes matches the label length MonkeySSH's session
-	// picker shows for a Pi session.
-	piSessionTitleMaxRunes = 80
-	// nativePiSessionLookupInterval bounds how often a native Pi window asks
-	// its ACP bridge which session it hosts.
-	nativePiSessionLookupInterval = 5 * time.Second
-)
+// piSessionTitleMaxRunes matches the label length MonkeySSH's session
+// picker shows for a Pi session.
+const piSessionTitleMaxRunes = 80
 
 // acpBridgeStatusForMetadata is replaced in tests.
 var acpBridgeStatusForMetadata = acpBridgeStatus
@@ -32,8 +25,7 @@ var acpBridgeStatusForMetadata = acpBridgeStatus
 // Pi only appends records, so each call reads just the bytes written since the
 // previous one. A shorter file or a different path starts over.
 type piSessionTitleScan struct {
-	path        string
-	offset      int64
+	tail        jsonlTail
 	sawHeader   bool
 	valid       bool
 	name        string
@@ -41,56 +33,13 @@ type piSessionTitleScan struct {
 }
 
 func (scan *piSessionTitleScan) title(path string) string {
-	if path == "" {
-		*scan = piSessionTitleScan{}
-		return ""
-	}
-	if path != scan.path {
-		*scan = piSessionTitleScan{path: path}
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		*scan = piSessionTitleScan{path: path}
-		return ""
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return scan.label()
-	}
-	if info.Size() < scan.offset {
-		*scan = piSessionTitleScan{path: path}
-	}
-	if info.Size() == scan.offset {
-		return scan.label()
-	}
-	if _, err := file.Seek(scan.offset, io.SeekStart); err != nil {
-		return scan.label()
-	}
-	reader := bufio.NewReaderSize(io.LimitReader(file, info.Size()-scan.offset), 64*1024)
-	for {
-		line, truncated, bytesRead, readErr := readBoundedLine(
-			reader,
-			piSessionMetadataRecordLimitBytes,
-		)
-		if readErr != nil {
-			break
-		}
-		if !truncated && bytesRead == len(line) {
-			// Pi is still writing this record; read it once its newline lands.
-			break
-		}
-		scan.offset += int64(bytesRead)
-		scan.observe(line, truncated)
-	}
+	scan.tail.readLimit(path, piSessionMetadataRecordLimitBytes, true, func() {
+		scan.sawHeader, scan.valid, scan.name, scan.firstPrompt = false, false, "", ""
+	}, scan.observe)
 	return scan.label()
 }
 
 func (scan *piSessionTitleScan) observe(line []byte, truncated bool) {
-	line = bytes.TrimSpace(line)
-	if len(line) == 0 {
-		return
-	}
 	if !scan.sawHeader {
 		scan.sawHeader = true
 		var header struct {
@@ -252,7 +201,7 @@ func (w *muxWindow) piSessionTitle(sessionPath string, bridgeID string, now time
 		// Pi writes a new session's file only after its first prompt, and a
 		// bridge can move to another session, so the lookup is retried.
 		if w.piNativeSessionBridgeID != bridgeID ||
-			now.Sub(w.piNativeSessionCheckedAt) >= nativePiSessionLookupInterval {
+			now.Sub(w.piNativeSessionCheckedAt) >= nativeAgentSessionLookupInterval {
 			w.piNativeSessionBridgeID = bridgeID
 			w.piNativeSessionPath = nativePiSessionPath(bridgeID)
 			w.piNativeSessionCheckedAt = now

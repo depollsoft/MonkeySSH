@@ -1,8 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
@@ -10,169 +7,47 @@ import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
-import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_client.dart';
-import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_lifecycle_service.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_telemetry.dart';
-import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
-/// Minimal ACP agent that answers setup requests and records their params.
-class _Agent implements AcpTransport {
-  final _incoming = StreamController<List<int>>(sync: true);
-  final Map<String, List<Map<String, Object?>>> params = {};
-  var _closed = false;
+import '../../helpers/acp_test_fakes.dart';
 
-  @override
-  Stream<List<int>> get incoming => _incoming.stream;
-
-  @override
-  Future<void> write(List<int> bytes) async {
-    final message = (jsonDecode(utf8.decode(bytes).trim())! as Map)
-        .cast<String, Object?>();
-    final method = message['method'];
-    final id = message['id'];
-    if (method is! String || id == null) return;
-    params
-        .putIfAbsent(method, () => [])
-        .add((message['params'] as Map?)?.cast<String, Object?>() ?? {});
-    _reply(id, switch (method) {
-      'initialize' => {
-        'protocolVersion': 1,
-        'agentCapabilities': {'loadSession': true},
-      },
-      'session/new' => {'sessionId': 'custom-session'},
-      _ => <String, Object?>{},
-    });
-  }
-
-  void _reply(Object id, Object? result) {
-    if (_closed) return;
-    _incoming.add(
-      utf8.encode(
-        '${jsonEncode({'jsonrpc': '2.0', 'id': id, 'result': result})}\n',
-      ),
-    );
-  }
-
-  @override
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    await _incoming.close();
-  }
-}
-
-typedef _StartedBridge = ({
-  String providerId,
-  String providerLabel,
-  List<String> launchArgv,
-  String cwd,
-});
-
-class _Connector implements AcpBridgeConnector {
-  final List<_StartedBridge> started = [];
-  final Map<String, _Agent> agents = {};
-  final Map<String, String> runningLabels = {};
-  final List<String> stopped = [];
-  var _counter = 0;
-
-  @override
-  Future<MonkeyMuxAcpBridgeStartResult> startBridge({
-    required int hostId,
-    required String providerId,
-    required String providerLabel,
-    required List<String> launchArgv,
-    required String cwd,
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async {
-    started.add((
-      providerId: providerId,
-      providerLabel: providerLabel,
-      launchArgv: launchArgv,
-      cwd: cwd,
-    ));
-    final bridgeId = 'bridge-${++_counter}';
-    runningLabels[bridgeId] = providerLabel;
-    return MonkeyMuxAcpBridgeStartResult(bridgeId: bridgeId);
-  }
-
-  MonkeyMuxAcpBridgeMetadata _metadata(String bridgeId) =>
-      MonkeyMuxAcpBridgeMetadata(
-        id: bridgeId,
-        provider: runningLabels[bridgeId] ?? 'Goose',
-        commandHash: 'hash',
-        state: MonkeyMuxAcpProviderState.running,
-        clientCount: 0,
-        pendingRequestCount: 0,
-        inFlightTurnCount: 0,
-        lastActivity: DateTime.now(),
-        startedAt: DateTime.now(),
-        nextSequence: 1,
+class _Connector extends FakeAcpBridgeConnector {
+  _Connector()
+    : super(
+        defaultProviderLabel: 'Goose',
+        transportFactory: (_, _, _, {required takeOver}) => FakeAcpTransport(
+          onRequest: (transport, id, method, _) {
+            if (method == 'session/new') {
+              transport.reply(id, const {'sessionId': 'custom-session'});
+              return true;
+            }
+            return false;
+          },
+        ),
+        workingDirectoryResolver: (_, cwd, {required trustAbsolute}) async {
+          if (cwd == '~') return '/home/test';
+          return cwd.startsWith('/') ? cwd : '/home/test/$cwd';
+        },
       );
+
+  Map<String, FakeAcpTransport> get agents => transports;
+  List<String> get stopped => stoppedBridges;
 
   @override
   Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
     int hostId, {
     MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => [for (final id in runningLabels.keys) _metadata(id)];
-
-  @override
-  Future<String> resolveWorkingDirectory(
-    int hostId,
-    String cwd, {
-    bool trustAbsolute = false,
-  }) async {
-    if (cwd == '~') return '/home/test';
-    return cwd.startsWith('/') ? cwd : '/home/test/$cwd';
-  }
-
-  @override
-  Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
-    int hostId,
-    String bridgeId,
-  ) async => _metadata(bridgeId);
-
-  @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {
-    stopped.add(bridgeId);
-    runningLabels.remove(bridgeId);
-  }
-
-  @override
-  AcpBridgeSession connect({
-    required int hostId,
-    required String bridgeId,
-    required String providerId,
-    int lastAcknowledgedSequence = 0,
-    bool takeOver = false,
-  }) {
-    final agent = agents[bridgeId] = _Agent();
-    final client = AcpClient(AcpJsonRpcConnection(transport: agent));
-    final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();
-    final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
-    return AcpBridgeSession(
-      client: client,
-      transportStates: states.stream,
-      transportErrors: errors.stream,
-      onClose: () async {
-        await client.close();
-        await states.close();
-        await errors.close();
-      },
-    );
-  }
-
-  @override
-  Future<AcpHostCapabilityBinding?> resolveCapabilityBinding(
-    int hostId,
-  ) async => null;
+  }) async => [
+    for (final id in runningLabels.keys)
+      fakeAcpBridgeMetadata(id, provider: runningLabels[id] ?? 'Goose'),
+  ];
 }
 
 class _Lookup implements AcpCustomProviderLookup {

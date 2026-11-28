@@ -20,13 +20,13 @@ var agentSessionStoreClock = time.Now
 // All binding state is owned by muxServer.mu. Store reads and process probes
 // happen outside that lock; their results are checked against the live watch.
 type agentSessionWatch struct {
-	tool, cwd                           string
-	pid, registryPID                    int
-	started, pidStarted, lastPoll       time.Time
-	baseline                            map[string]bool
-	firstSeen                           map[string]time.Time
-	processPIDs, claudePIDs, windowPIDs map[int]bool
-	done, exited                        bool
+	tool, cwd                     string
+	pid, registryPID              int
+	started, pidStarted, lastPoll time.Time
+	baseline                      map[string]bool
+	firstSeen                     map[string]time.Time
+	processPIDs, claudePIDs       map[int]bool
+	done, exited                  bool
 }
 
 type agentSessionCandidate struct {
@@ -206,13 +206,15 @@ func (s *foreignOwnershipSnapshot) sessionIDForPath(path string) string {
 	case "antigravity":
 		root := filepath.Join(s.home, ".gemini", "antigravity-cli")
 		dir, name := filepath.Dir(path), filepath.Base(path)
-		if dir == normalizedMetadataPath(filepath.Join(root, "presence")) && strings.HasSuffix(name, ".lock") {
-			return strings.TrimSuffix(name, ".lock")
+		if dir == normalizedMetadataPath(filepath.Join(root, "presence")) {
+			if id, ok := strings.CutSuffix(name, ".lock"); ok {
+				return id
+			}
 		}
 		if dir == normalizedMetadataPath(filepath.Join(root, "conversations")) {
 			for _, suffix := range []string{".db", ".db-wal", ".db-shm"} {
-				if strings.HasSuffix(name, suffix) {
-					return strings.TrimSuffix(name, suffix)
+				if id, ok := strings.CutSuffix(name, suffix); ok {
+					return id
 				}
 			}
 		}
@@ -781,13 +783,12 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 		matchCwd = fallbackWatch.cwd
 	}
 	candidates = agentSessionCandidatesForDirectory(tool, matchCwd, candidates)
-	processPIDs, claudePIDs, windowPIDs := map[int]bool{}, map[int]bool{}, map[int]bool{}
+	processPIDs, claudePIDs := map[int]bool{}, map[int]bool{}
 	var openPaths []string
 	for pid, child := range processes {
 		if ancestorPanePID(processes, pid, panePIDs) != panePID {
 			continue
 		}
-		windowPIDs[pid] = true
 		if processDepthFromAncestor(processes, pid, process.pid) < 0 {
 			continue
 		}
@@ -824,7 +825,7 @@ func (s *muxServer) refreshAgentSessionBinding(windowID string) {
 		}
 	}
 	watch.pid, watch.pidStarted, watch.lastPoll = process.pid, started, now
-	watch.processPIDs, watch.claudePIDs, watch.windowPIDs = processPIDs, claudePIDs, windowPIDs
+	watch.processPIDs, watch.claudePIDs = processPIDs, claudePIDs
 	s.bindAgentSessionCandidatesLocked(w, watch, candidates, argsID, openPaths, now)
 }
 

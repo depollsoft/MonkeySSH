@@ -234,9 +234,6 @@ class SshConfigBlock {
   /// Understood directives in file order.
   final List<SshConfigDirective> directives;
 
-  /// Whether the block applies to every host.
-  bool get matchesEverything => patterns.isEmpty;
-
   /// Whether this block applies to [host], using OpenSSH rules: at least one
   /// positive pattern matches and no negated pattern matches.
   bool matches(String host) => matchesLowerCase(host.toLowerCase());

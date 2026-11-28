@@ -12,7 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_attachment.dart';
 import '../models/acp_composer_draft.dart';
 import 'diagnostics_log_service.dart';
-import 'settings_json_list.dart';
+import 'serial_task_queue.dart';
 import 'settings_service.dart';
 
 /// Returns the size and modification time of the local file at a path, or
@@ -95,7 +95,7 @@ class AcpComposerDraftStore {
   /// Combined length of pasted-text chips kept per draft, in UTF-16 units.
   final int pastedTextBudget;
 
-  final _mutations = SerializedMutations();
+  final _mutations = SerialTaskQueue();
   final LinkedHashMap<String, AcpComposerDraftSnapshot> _remembered =
       LinkedHashMap<String, AcpComposerDraftSnapshot>();
   final Set<String> _seen = <String>{};

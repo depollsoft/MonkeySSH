@@ -8,9 +8,6 @@ import 'dart:typed_data';
 /// https://sw.kovidgoyal.net/kitty/clipboard/
 const kittyClipboardOscCode = '5522';
 
-/// The DEC private mode a program sets to receive paste events.
-const kittyPasteEventsPrivateMode = 5522;
-
 /// The MIME type a read request uses to ask for the available types.
 const kittyClipboardTargetsMime = '.';
 

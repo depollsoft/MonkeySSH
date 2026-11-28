@@ -1,3 +1,4 @@
+import '../services/shell_quoting.dart';
 import '../services/windows_remote_powershell.dart';
 import 'agent_worktree.dart';
 import 'command_names.dart';
@@ -569,11 +570,6 @@ final _yoloSwitches =
       ),
     };
 
-/// Whether [arguments], read as shell words, switch [tool] into YOLO mode on
-/// their own, whatever the host's YOLO preference says.
-bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) =>
-    agentYoloSwitchesInArguments(tool, arguments).isNotEmpty;
-
 /// The switches in [arguments], read as shell words, that put [tool] in
 /// YOLO mode, written as they appear (`--sandbox danger-full-access`).
 List<String> agentYoloSwitchesInArguments(
@@ -1047,8 +1043,7 @@ String _quoteShellPath(String value) {
   return _quoteShellArgument(value);
 }
 
-String _quoteShellArgument(String value) =>
-    '\'${value.replaceAll('\'', '\'"\'"\'')}\'';
+String _quoteShellArgument(String value) => shellEscapePosixArg(value);
 
 String _quoteWindowsShellArgument(String value) {
   if (value.contains(_unsafeWindowsShellArgumentPattern)) {

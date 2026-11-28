@@ -31,21 +31,9 @@ import 'package:monkeyssh/presentation/widgets/acp_custom_agent_launch.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
 import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 import '../support/fake_acp_session_manager.dart';
 import '../support/fake_agent_worktree.dart';
-
-class _MockSshService extends Mock implements SshService {}
-
-class _MockAgentLaunchPresetService extends Mock
-    implements AgentLaunchPresetService {}
-
-class _MockHostCliLaunchPreferencesService extends Mock
-    implements HostCliLaunchPreferencesService {}
-
-class _FakeActiveSessions extends ActiveSessionsNotifier {
-  @override
-  Map<int, SshConnectionState> build() => <int, SshConnectionState>{};
-}
 
 class _FakeHostService extends AcpCustomProviderHostService {
   _FakeHostService({this.unset = const <String>[], this.listing});
@@ -134,41 +122,7 @@ class _PromptingManager extends _ResumingManager {
   }
 }
 
-Host _host() => Host(
-  id: 1,
-  label: 'Alpha',
-  hostname: 'alpha.example.com',
-  port: 22,
-  username: 'root',
-  password: null,
-  keyId: null,
-  groupId: null,
-  jumpHostId: null,
-  isFavorite: false,
-  color: null,
-  notes: null,
-  tags: null,
-  createdAt: DateTime(2026),
-  updatedAt: DateTime(2026),
-  lastConnectedAt: null,
-  terminalThemeLightId: null,
-  terminalThemeDarkId: null,
-  terminalFontFamily: null,
-  autoConnectCommand: null,
-  autoConnectSnippetId: null,
-  autoConnectRequiresConfirmation: false,
-  tmuxSessionName: null,
-  tmuxWorkingDirectory: null,
-  tmuxExtraFlags: null,
-  remoteMuxBackend: null,
-  autoForwardPorts: false,
-  sortOrder: 0,
-  notifyAgentAttention: true,
-  notifyAgentFinished: true,
-  notifyWindowAlerts: true,
-  notifyShellNotifications: true,
-  pushWhenClosed: true,
-);
+Host _host() => testHost();
 
 AcpCustomProviderDefinition _goose({
   AcpCustomProviderCwdPolicy cwdPolicy =
@@ -198,7 +152,7 @@ Future<void> _pumpSheet(
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  final ssh = _MockSshService();
+  final ssh = MockSshService();
   final session = SshSession(
     connectionId: 7,
     hostId: 1,
@@ -212,16 +166,16 @@ Future<void> _pumpSheet(
   when(() => ssh.allSessions).thenReturn(<SshSession>[session]);
   when(() => ssh.getSessionsForHost(any())).thenReturn(<SshSession>[session]);
   when(() => ssh.getSession(any())).thenReturn(session);
-  final presets = _MockAgentLaunchPresetService();
+  final presets = MockAgentLaunchPresetService();
   when(presets.getAllPresets).thenAnswer((_) async => {1: ?preset});
-  final launchPreferences = _MockHostCliLaunchPreferencesService();
+  final launchPreferences = MockHostCliLaunchPreferencesService();
   when(() => launchPreferences.getPreferencesForHost(any()))
       .thenAnswer((_) async => const HostCliLaunchPreferences());
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         acpSessionManagerProvider.overrideWithValue(manager),
-        activeSessionsProvider.overrideWith(_FakeActiveSessions.new),
+        activeSessionsProvider.overrideWith(TestActiveSessionsNotifier.new),
         sshServiceProvider.overrideWithValue(ssh),
         agentLaunchPresetServiceProvider.overrideWithValue(presets),
         hostCliLaunchPreferencesServiceProvider.overrideWithValue(

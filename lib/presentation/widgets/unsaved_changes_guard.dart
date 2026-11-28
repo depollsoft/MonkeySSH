@@ -107,3 +107,16 @@ class _UnsavedChangesGuardState extends State<UnsavedChangesGuard> {
     await navigator.maybePop();
   }
 }
+
+/// Pops the current route on the next frame (after any pending dirty-state
+/// reset clears [UnsavedChangesGuard]) and displays [snackBar].
+void schedulePopWithSnackBar(BuildContext context, SnackBar snackBar) {
+  final messenger = ScaffoldMessenger.of(context);
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!context.mounted) {
+      return;
+    }
+    context.pop();
+    messenger.showSnackBar(snackBar);
+  });
+}

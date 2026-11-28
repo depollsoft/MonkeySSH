@@ -714,6 +714,81 @@ Future<TmuxNewWindowAction?> showTmuxNewWindowContextMenu({
   return selection;
 }
 
+/// Loads the host's configured preferred agent launch tool, if any.
+Future<AgentLaunchTool?> loadPreferredAgentLaunchTool(
+  WidgetRef ref,
+  int hostId,
+) async {
+  final preset = await ref
+      .read(agentLaunchPresetServiceProvider)
+      .getPresetForHost(hostId);
+  return preset?.tool;
+}
+
+/// Shows the appropriate new-window picker (context menu or bottom sheet) for
+/// [session] and [remoteMuxBackend], detecting installed agent tools in the
+/// background.
+Future<TmuxNavigatorAction?> pickTmuxNewWindowAction({
+  required BuildContext context,
+  required WidgetRef ref,
+  required SshSession session,
+  required RemoteMuxBackend remoteMuxBackend,
+  required bool isProUser,
+  required bool startClisInYoloMode,
+  required AgentWindowModePreference agentWindowModePreference,
+  AgentLaunchTool? preferredTool,
+  BuildContext? anchorContext,
+  bool useTerminalOnlyContextMenu = false,
+  bool logTelemetry = false,
+}) {
+  final installedToolsFuture = ref
+      .read(tmuxServiceProvider)
+      .detectInstalledAgentTools(session);
+  if (logTelemetry) {
+    unawaited(
+      installedToolsFuture
+          .then((tools) {
+            for (final tool in tools) {
+              unawaited(
+                ref
+                    .read(telemetryServiceProvider)
+                    .logAgentToolDetected(tool: tool.name),
+              );
+            }
+          })
+          .catchError((Object _) {}),
+    );
+    unawaited(
+      ref
+          .read(telemetryServiceProvider)
+          .logMuxNewWindowDialogOpened(
+            backend: _telemetryMuxBackendName(remoteMuxBackend),
+          ),
+    );
+  }
+  final nativeAcpProviderIds = remoteMuxBackend == RemoteMuxBackend.monkeyMux
+      ? builtinNativeAcpProvidersByTool()
+      : const <AgentLaunchTool, String>{};
+  if (useTerminalOnlyContextMenu && anchorContext != null) {
+    return showTmuxNewWindowContextMenu(
+      context: context,
+      anchorContext: anchorContext,
+      startClisInYoloMode: startClisInYoloMode,
+      installedToolsFuture: installedToolsFuture,
+      preferredTool: preferredTool,
+    );
+  }
+  return showTmuxNewWindowPicker(
+    context: context,
+    isProUser: isProUser,
+    startClisInYoloMode: startClisInYoloMode,
+    agentWindowModePreference: agentWindowModePreference,
+    installedToolsFuture: installedToolsFuture,
+    preferredTool: preferredTool,
+    nativeAcpProviderIds: nativeAcpProviderIds,
+  );
+}
+
 /// An action selected from the tmux navigator.
 sealed class TmuxNavigatorAction {
   /// Creates a new [TmuxNavigatorAction].
@@ -994,12 +1069,8 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
 
   Future<void> _loadPreferredLaunchTool() async {
     final hostId = widget.session.hostId;
-    final preset = await ref
-        .read(agentLaunchPresetServiceProvider)
-        .getPresetForHost(hostId);
+    final preferredLaunchTool = await loadPreferredAgentLaunchTool(ref, hostId);
     if (!mounted || widget.session.hostId != hostId) return;
-
-    final preferredLaunchTool = preset?.tool;
     if (_preferredLaunchTool == preferredLaunchTool) return;
     setState(() => _preferredLaunchTool = preferredLaunchTool);
   }
@@ -1131,42 +1202,16 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
   }
 
   Future<void> _showNewWindowPicker() async {
-    final installedToolsFuture = ref
-        .read(tmuxServiceProvider)
-        .detectInstalledAgentTools(widget.session);
-    unawaited(
-      installedToolsFuture
-          .then((tools) {
-            for (final tool in tools) {
-              unawaited(
-                ref
-                    .read(telemetryServiceProvider)
-                    .logAgentToolDetected(tool: tool.name),
-              );
-            }
-          })
-          .catchError((Object _) {}),
-    );
-    unawaited(
-      ref
-          .read(telemetryServiceProvider)
-          .logMuxNewWindowDialogOpened(
-            backend: _telemetryMuxBackendName(widget.remoteMuxBackend),
-          ),
-    );
-    final nativeAcpAvailable =
-        widget.remoteMuxBackend == RemoteMuxBackend.monkeyMux;
-    final nativeAcpProviderIds = nativeAcpAvailable
-        ? builtinNativeAcpProvidersByTool()
-        : const <AgentLaunchTool, String>{};
-    final action = await showTmuxNewWindowPicker(
+    final action = await pickTmuxNewWindowAction(
       context: context,
+      ref: ref,
+      session: widget.session,
+      remoteMuxBackend: widget.remoteMuxBackend,
       isProUser: widget.isProUser,
       startClisInYoloMode: widget.startClisInYoloMode,
       agentWindowModePreference: widget.agentWindowModePreference,
-      installedToolsFuture: installedToolsFuture,
       preferredTool: _preferredLaunchTool,
-      nativeAcpProviderIds: nativeAcpProviderIds,
+      logTelemetry: true,
     );
     if (!mounted || action == null) {
       return;

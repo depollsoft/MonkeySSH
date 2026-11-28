@@ -1,7 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,9 +12,6 @@ import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/acp_writer_lease.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
-import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_client.dart';
-import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/acp_transport.dart';
@@ -23,96 +19,48 @@ import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
+import '../../helpers/acp_test_fakes.dart';
+
 /// In-memory agent standing in for the provider behind one bridge attachment.
-class _Agent implements AcpTransport {
-  _Agent({required this.onFirstRequest});
+class _Agent extends FakeAcpTransport {
+  _Agent({this.onFirstRequest})
+    : super(
+        throwWhenClosed: true,
+        onRequest: (transport, id, method, _) async {
+          final agent = transport as _Agent;
+          if (method == 'session/prompt' && agent.stallPromptWrites) {
+            await agent.closedSignal.future;
+            throw const AcpTransportClosedException();
+          }
+          if (!agent._sawRequest) {
+            agent._sawRequest = true;
+            agent.onFirstRequest?.call(agent);
+            if (agent.closed) return true;
+          }
+          if (method == 'session/prompt') {
+            agent.heldPromptIds.add(id);
+            return true;
+          }
+          return false;
+        },
+      );
 
   /// Runs when the first request is written, standing in for the bridge's
   /// reply to the attach hello.
   final void Function(_Agent agent)? onFirstRequest;
-  final _incoming = StreamController<List<int>>(sync: true);
-  final methods = <String>[];
   final heldPromptIds = <Object>[];
-  var _sessions = 0;
   var _sawRequest = false;
-  bool closed = false;
 
   /// When set, a prompt's write waits until the agent closes and then fails
   /// as a closed transport, so the prompt never leaves this device.
   bool stallPromptWrites = false;
-  final _closedSignal = Completer<void>();
-
-  @override
-  Stream<List<int>> get incoming => _incoming.stream;
-
-  @override
-  Future<void> write(List<int> bytes) async {
-    if (closed) throw StateError('agent closed');
-    final message = (jsonDecode(utf8.decode(bytes).trim()) as Map)
-        .cast<String, Object?>();
-    final id = message['id'];
-    final method = message['method'];
-    if (method is String) methods.add(method);
-    if (method == 'session/prompt' && stallPromptWrites) {
-      await _closedSignal.future;
-      throw const AcpTransportClosedException();
-    }
-    if (!_sawRequest && id != null && method != null) {
-      _sawRequest = true;
-      onFirstRequest?.call(this);
-      if (closed) return;
-    }
-    if (id == null || method == null) return;
-    switch (method) {
-      case 'initialize':
-        _reply(id, {
-          'protocolVersion': 1,
-          'agentCapabilities': {'loadSession': true},
-        });
-      case 'session/new':
-        _reply(id, {'sessionId': 'session-${++_sessions}'});
-      case 'session/prompt':
-        heldPromptIds.add(id);
-      default:
-        _reply(id, <String, Object?>{});
-    }
-  }
-
-  void requestPermission(String id, String sessionId) => _push({
-    'jsonrpc': '2.0',
-    'id': id,
-    'method': 'session/request_permission',
-    'params': {
-      'sessionId': sessionId,
-      'toolCall': {'toolCallId': 'tool-1', 'title': 'Write file'},
-      'options': [
-        {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
-      ],
-    },
-  });
-
-  void _reply(Object id, Object? result) =>
-      _push({'jsonrpc': '2.0', 'id': id, 'result': result});
-
-  void _push(Map<String, Object?> message) {
-    if (closed) return;
-    _incoming.add(utf8.encode('${jsonEncode(message)}\n'));
-  }
-
-  @override
-  Future<void> close() async {
-    if (closed) return;
-    closed = true;
-    if (!_closedSignal.isCompleted) _closedSignal.complete();
-    await _incoming.close();
-  }
 }
 
 /// Connector whose attaches can find the input lease held by another device.
-class _Connector implements AcpBridgeConnector {
+class _Connector extends FakeAcpBridgeConnector {
+  _Connector() : super(syncTransportStates: true);
+
   final agents = <_Agent>[];
-  final states = <StreamController<MonkeyMuxAcpTransportState>>[];
-  final takeOvers = <bool>[];
 
   /// When set, an attach that does not take over finds this writer.
   MonkeyMuxAcpRemoteWriter? heldBy;
@@ -126,17 +74,9 @@ class _Connector implements AcpBridgeConnector {
 
   /// What each attach reports about prompts once the input moved.
   final promptDeliveries = <String, AcpInputDelivery>{};
-  var _bridges = 0;
 
-  @override
-  Future<MonkeyMuxAcpBridgeStartResult> startBridge({
-    required int hostId,
-    required String providerId,
-    required String providerLabel,
-    required List<String> launchArgv,
-    required String cwd,
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => MonkeyMuxAcpBridgeStartResult(bridgeId: 'bridge-${++_bridges}');
+  List<StreamController<MonkeyMuxAcpTransportState>> get states =>
+      stateControllers;
 
   @override
   Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
@@ -144,20 +84,11 @@ class _Connector implements AcpBridgeConnector {
     MonkeyMuxInstallConfirmation? confirmInstall,
   }) async => [_metadata('bridge-1')];
 
-  int statusCount = 0;
-
   MonkeyMuxAcpBridgeMetadata _metadata(String bridgeId) {
     final writer = heldBy;
-    return MonkeyMuxAcpBridgeMetadata(
-      id: bridgeId,
-      provider: 'Copilot CLI',
-      commandHash: 'hash',
-      state: MonkeyMuxAcpProviderState.running,
+    return fakeAcpBridgeMetadata(
+      bridgeId,
       clientCount: 1,
-      pendingRequestCount: 0,
-      inFlightTurnCount: 0,
-      lastActivity: DateTime.now(),
-      startedAt: DateTime.now(),
       nextSequence: 4,
       writer: writer == null
           ? null
@@ -170,35 +101,21 @@ class _Connector implements AcpBridgeConnector {
   }
 
   @override
-  Future<String> resolveWorkingDirectory(
-    int hostId,
-    String cwd, {
-    bool trustAbsolute = false,
-  }) async => cwd;
+  MonkeyMuxAcpBridgeMetadata Function(String bridgeId) get metadataBuilder =>
+      _metadata;
 
   @override
-  Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
+  AcpInputDelivery Function(String sessionId) get promptDelivery =>
+      (sessionId) => promptDeliveries[sessionId] ?? AcpInputDelivery.notSent;
+
+  @override
+  FakeAcpTransport Function(
     int hostId,
     String bridgeId,
-  ) async {
-    statusCount += 1;
-    return _metadata(bridgeId);
-  }
-
-  @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {}
-
-  @override
-  AcpBridgeSession connect({
-    required int hostId,
-    required String bridgeId,
-    required String providerId,
-    int lastAcknowledgedSequence = 0,
-    bool takeOver = false,
-  }) {
-    takeOvers.add(takeOver);
-    final stateController =
-        StreamController<MonkeyMuxAcpTransportState>.broadcast(sync: true);
+    StreamController<MonkeyMuxAcpTransportState> states, {
+    required bool takeOver,
+  })
+  get transportFactory => (_, bridgeId, stateController, {required takeOver}) {
     final writer = takeOver ? heldDespiteTakeOver : heldBy;
     final fail = failNextAttach;
     failNextAttach = false;
@@ -222,30 +139,11 @@ class _Connector implements AcpBridgeConnector {
             },
     );
     agents.add(agent);
-    states.add(stateController);
-    final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
-    final client = AcpClient(AcpJsonRpcConnection(transport: agent));
-    return AcpBridgeSession(
-      client: client,
-      transportStates: stateController.stream,
-      transportErrors: errors.stream,
-      promptDelivery: (sessionId) =>
-          promptDeliveries[sessionId] ?? AcpInputDelivery.notSent,
-      onClose: () async {
-        await client.close();
-        await stateController.close();
-        await errors.close();
-      },
-    );
-  }
-
-  @override
-  Future<AcpHostCapabilityBinding?> resolveCapabilityBinding(
-    int hostId,
-  ) async => null;
+    return agent;
+  };
 }
 
-Future<void> _pump() => Future<void>.delayed(const Duration(milliseconds: 20));
+Future<void> _pump() => pumpAcpEventLoop();
 
 List<String> _timelineTexts(AcpSessionState state) => [
   for (final entry in state.timeline.entries)
@@ -707,7 +605,11 @@ void registerDomainServicesAcpSessionManagerWriterLeaseTests() {
         );
         await _pump();
         expect(agent.heldPromptIds, hasLength(1));
-        agent.requestPermission('permission-1', key.acpSessionId);
+        agent.requestPermission(
+          key.acpSessionId,
+          id: 'permission-1',
+          toolCallId: 'tool-1',
+        );
         await _pump();
         expect(stateOf(key).pendingPermissions, hasLength(1));
         final methodsBefore = List<String>.of(agent.methods);

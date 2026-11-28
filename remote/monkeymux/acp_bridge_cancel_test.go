@@ -92,33 +92,6 @@ func assertCancelResponse(t *testing.T, line string, wantID string) {
 	}
 }
 
-// attachTestClient attaches a writer client with hello and returns its
-// connection and a reader positioned at the first primed frame.
-func attachTestClient(
-	t *testing.T,
-	bridge *acpBridge,
-	hello acpWireMessage,
-) (net.Conn, *bufio.Reader) {
-	t.Helper()
-	server, peer := net.Pipe()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		hello.Version = acpBridgeProtocolVersion
-		hello.Type = "hello"
-		bridge.handleAttach(server, bufio.NewReader(server), hello)
-	}()
-	t.Cleanup(func() {
-		_ = peer.Close()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Error("attach did not stop")
-		}
-	})
-	return peer, bufio.NewReader(peer)
-}
-
 func sendTestClientInput(t *testing.T, conn net.Conn, data string) {
 	t.Helper()
 	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))

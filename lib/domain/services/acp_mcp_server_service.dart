@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/security/secret_encryption_service.dart';
 import '../models/acp_json.dart';
 import '../models/acp_mcp_server.dart';
+import 'serial_task_queue.dart';
 import 'settings_json_list.dart';
 import 'settings_service.dart';
 
@@ -38,7 +39,7 @@ class AcpMcpServerService {
   final SecretEncryptionService _encryption;
   final Random _random;
 
-  final _mutations = SerializedMutations();
+  final _mutations = SerialTaskQueue();
 
   /// Loads every configured server, in stored order, with secrets decrypted.
   ///

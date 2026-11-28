@@ -2,7 +2,6 @@
 
 import 'dart:async';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,15 +17,13 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/connection_attention_provider.dart';
 import 'package:monkeyssh/presentation/widgets/connections_waiting_section.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
+import '../helpers/mocks.dart';
 
 final _workspaceSession =
     SshSession(
         connectionId: 20,
         hostId: 2,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'beta.example.com',
           port: 22,
@@ -250,14 +247,14 @@ void registerWidgetConnectionsWaitingSectionTests() {
     });
 
     group('opening an untracked session', () {
-      late _MockMonkeyMuxService monkeyMux;
+      late MockMonkeyMuxService monkeyMux;
       late Completer<List<TmuxWindow>> windows;
       final item = _item(tracked: false, reason: AttentionReason.hostRequest);
 
       // Created inside each test body so the completion runs in the test's
       // fake-async zone.
       void stubWindows() {
-        monkeyMux = _MockMonkeyMuxService();
+        monkeyMux = MockMonkeyMuxService();
         windows = Completer<List<TmuxWindow>>();
         when(
           () => monkeyMux.listWindows(

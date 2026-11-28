@@ -2,7 +2,6 @@
 
 import 'dart:async';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,41 +26,9 @@ import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
 
+import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 import '../support/fake_acp_session_manager.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockTmuxService extends Mock implements TmuxService {}
-
-class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
-
-class _TestTransferIntentService extends TransferIntentService {
-  @override
-  Stream<String> get incomingPayloads => const Stream<String>.empty();
-
-  @override
-  Future<String?> consumeIncomingTransferPayload() async => null;
-
-  @override
-  Future<void> dispose() async {}
-}
-
-class _TestHomeScreenShortcutService extends HomeScreenShortcutService {
-  @override
-  Stream<int> get hostLaunches => const Stream<int>.empty();
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<void> updateShortcuts({
-    required List<Host> hosts,
-    required Set<int> pinnedHostIds,
-  }) async {}
-
-  @override
-  Future<void> dispose() async {}
-}
 
 const _workspace = 'mmux';
 
@@ -120,7 +87,7 @@ SshSession _session(
     SshSession(
         connectionId: connectionId,
         hostId: hostId,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: SshConnectionConfig(
           hostname: 'host$hostId.example.com',
           port: 22,
@@ -182,7 +149,7 @@ MonkeyMuxAcpBridgeMetadata _bridge({required int pending}) =>
 void registerWidgetHomeScreenAttentionTests() {
   group('home_screen_attention', () {
     late AppDatabase db;
-    late _MockMonkeyMuxService monkeyMux;
+    late MockMonkeyMuxService monkeyMux;
     late FakeAcpSessionManager manager;
     late List<String> opened;
     late GoRouter router;
@@ -199,7 +166,7 @@ void registerWidgetHomeScreenAttentionTests() {
 
     setUp(() {
       db = AppDatabase.forTesting(NativeDatabase.memory());
-      monkeyMux = _MockMonkeyMuxService();
+      monkeyMux = MockMonkeyMuxService();
       manager = FakeAcpSessionManager();
       opened = [];
       hostBPending = 0;
@@ -294,10 +261,10 @@ void registerWidgetHomeScreenAttentionTests() {
               (ref) => Stream.value(const <String, AgentLaunchPreset>{}),
             ),
             transferIntentServiceProvider.overrideWith(
-              (ref) => _TestTransferIntentService(),
+              (ref) => NoopTransferIntentService(),
             ),
             homeScreenShortcutServiceProvider.overrideWith(
-              (ref) => _TestHomeScreenShortcutService(),
+              (ref) => NoopHomeScreenShortcutService(),
             ),
             pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
               (ref) => Stream<Set<int>>.value(const <int>{}),
@@ -306,7 +273,7 @@ void registerWidgetHomeScreenAttentionTests() {
             allHostsProvider.overrideWith(
               (ref) => Stream.value([_host(1, 'Alpha'), _host(2, 'Beta')]),
             ),
-            tmuxServiceProvider.overrideWithValue(_MockTmuxService()),
+            tmuxServiceProvider.overrideWithValue(MockTmuxService()),
             monkeyMuxServiceProvider.overrideWithValue(monkeyMux),
             acpSessionManagerProvider.overrideWithValue(manager),
             connectionBridgeListerProvider.overrideWithValue((session) async {

@@ -14,8 +14,10 @@ import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/connection_attempt_dialog.dart';
+import 'package:monkeyssh/presentation/widgets/connection_attempt_logic.dart';
 
 import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 
 const _freeMonetizationState = MonetizationState(
   billingAvailability: MonetizationBillingAvailability.unavailable,
@@ -73,23 +75,12 @@ class _FailingActiveSessionsNotifier extends ActiveSessionsNotifier {
   }) => result.future;
 }
 
-Host _host() => Host(
+Host _host() => testHost(
   id: 42,
   label: 'stalled box',
   hostname: 'stalled.example.com',
-  port: 22,
   username: 'tester',
-  isFavorite: false,
-  autoConnectRequiresConfirmation: false,
-  autoForwardPorts: false,
-  sortOrder: 0,
   createdAt: DateTime(2024),
-  updatedAt: DateTime(2024),
-  notifyAgentAttention: true,
-  notifyAgentFinished: true,
-  notifyWindowAlerts: true,
-  notifyShellNotifications: true,
-  pushWhenClosed: true,
 );
 
 void main() {
@@ -357,5 +348,27 @@ void main() {
       expect(result!.cancelled, isTrue);
       expect(find.byType(AlertDialog), findsNothing);
     });
+  });
+
+  group('isExpectedConnectionAttemptFailure', () {
+    for (final failure in <String, Object>{
+      'cancelled': const SshConnectionCancelledException(),
+      'auth abort': SSHAuthAbortError('Authentication timed out'),
+      'auth failure': SSHAuthFailError('Authentication failed'),
+      'SSH state': SSHStateError('Transport closed'),
+      'SSH socket': SSHSocketError(const SocketException('Disconnected')),
+      'socket': const SocketException('Disconnected'),
+      'TLS handshake': const HandshakeException('Handshake failed'),
+      'TLS': const TlsException('TLS connection failed'),
+      'OS': const OSError('Connection refused', 61),
+      'unexpected state': StateError('Unexpected connection state'),
+    }.entries) {
+      test('${failure.key} classification without an SSH stack frame', () {
+        expect(
+          isExpectedConnectionAttemptFailure(failure.value, StackTrace.current),
+          failure.value is! StateError,
+        );
+      });
+    }
   });
 }

@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'diagnostics_log_service.dart';
 import 'serial_task_queue.dart';
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -784,13 +785,10 @@ class SshRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
     if (resolvedPath == null) {
       return null;
     }
-    final quotedPath = _shellQuote(resolvedPath);
+    final quotedPath = shellEscapePosixArg(resolvedPath);
     _adbPathCache[session] = quotedPath;
     return quotedPath;
   }
-
-  static String _shellQuote(String value) =>
-      "'${value.replaceAll("'", "'\"'\"'")}'";
 
   @override
   Future<RemoteListenerScope> listenerScope(

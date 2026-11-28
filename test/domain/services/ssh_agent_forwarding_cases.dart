@@ -12,14 +12,13 @@ import 'package:monkeyssh/domain/services/ssh_agent_forwarding.dart';
 import 'package:monkeyssh/domain/services/ssh_wire.dart';
 import 'package:pointycastle/export.dart' as pc;
 
+import '../../helpers/mocks.dart';
 import '../../helpers/recording_diagnostics_logger.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
 const _failure = 5;
 const _identitiesAnswer = 12;
 const _signResponse = 14;
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 Uint8List _uint32(int value) =>
     Uint8List(4)..buffer.asByteData().setUint32(0, value);
@@ -497,7 +496,7 @@ void registerDomainServicesSshAgentForwardingTests() {
 
       test('ties prompts to the attached client', () async {
         final done = Completer<void>();
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.done).thenAnswer((_) => done.future);
         final requests = <SshAgentSignatureRequest>[];
         final agent = forwarding(
@@ -533,7 +532,7 @@ void registerDomainServicesSshAgentForwardingTests() {
           );
           final changes = StreamController<void>.broadcast();
           addTearDown(changes.close);
-          final client = _MockSshClient();
+          final client = MockSshClient();
           when(() => client.done).thenAnswer((_) => Completer<void>().future);
           final agent = SshAgentForwarding(
             hostId: 7,
@@ -568,9 +567,9 @@ void registerDomainServicesSshAgentForwardingTests() {
         // A changed host key: the first client closes, then a second one
         // authenticates with the same forwarding.
         final firstDone = Completer<void>();
-        final first = _MockSshClient();
+        final first = MockSshClient();
         when(() => first.done).thenAnswer((_) => firstDone.future);
-        final second = _MockSshClient();
+        final second = MockSshClient();
         when(() => second.done).thenAnswer((_) => Completer<void>().future);
         final agent = forwarding()..attachClient(first);
         await pumpEventQueue();
@@ -588,7 +587,7 @@ void registerDomainServicesSshAgentForwardingTests() {
       test('settings saved before the client attaches apply at once', () async {
         // Forwarding was turned off while the connection was still signing in,
         // before the client subscribed to changes.
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.done).thenAnswer((_) => Completer<void>().future);
         final agent = SshAgentForwarding(
           hostId: 7,

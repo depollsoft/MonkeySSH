@@ -95,5 +95,10 @@ void registerTerminalInputTests() {
       expect(terminal.cursorKeysMode, isFalse);
       expect(emit(terminal, TerminalKey.arrowUp), '\x1b[A');
     });
+
+    test('Enter stays CR regardless of keypad mode', () {
+      final terminal = Terminal()..write('\x1b=');
+      expect(emit(terminal, TerminalKey.enter), '\r');
+    });
   });
 }

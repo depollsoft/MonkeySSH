@@ -6,15 +6,12 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/acp_protocol.dart';
 import '../models/agent_launch_preset.dart';
 import '../models/tmux_state.dart';
-import 'acp_client.dart';
-import 'acp_json_rpc_connection.dart';
 import 'acp_ssh_exec_transport.dart';
 import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
-import 'remote_file_service.dart' show shellEscapePosix;
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'terminal_connection_backend_service.dart';
@@ -41,16 +38,6 @@ const _cursorPromptLabelCacheMaxEntries = 512;
 /// Cursor records a prompt whose send failed without rewriting meta.json.
 const _cursorPromptLabelMissTtl = Duration(minutes: 2);
 
-const _fastPathPrefix =
-    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
-const _profileSourcingPrefix =
-    '$_fastPathPrefix'
-    '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
-    r'case "${SHELL##*/}" in '
-    'zsh) { . ~/.zshrc; } >/dev/null 2>&1;; '
-    'bash) { . ~/.bashrc; } >/dev/null 2>&1;; '
-    'esac; '
-    '$_fastPathPrefix';
 const _remoteFileSnapshotBatchSize = 40;
 
 /// Line-limited snapshot reads also stop at a byte ceiling, because one JSONL
@@ -1303,19 +1290,22 @@ Object? Function(String key) _jsonFieldReader(
     : (key) =>
           _readJsonStringFromRaw(raw, key) ?? _readJsonNumberFromRaw(raw, key);
 
+String? _decodeJsonStringCapture(String? rawCapture) {
+  if (rawCapture == null) return null;
+  try {
+    final decoded = jsonDecode('"$rawCapture"');
+    return decoded is String ? decoded : null;
+  } on FormatException {
+    return null;
+  }
+}
+
 String? _readJsonStringFromRaw(String raw, String key) {
   final pattern = RegExp(
     '"${RegExp.escape(key)}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"',
     multiLine: true,
   );
-  final match = pattern.firstMatch(raw);
-  if (match == null) return null;
-  try {
-    final decoded = jsonDecode('"${match.group(1)}"');
-    return decoded is String ? decoded : null;
-  } on FormatException {
-    return null;
-  }
+  return _decodeJsonStringCapture(pattern.firstMatch(raw)?.group(1));
 }
 
 int? _readJsonNumberFromRaw(String raw, String key) {
@@ -4039,7 +4029,9 @@ class AgentSessionDiscoveryService {
     String command, {
     bool sourceProfile = true,
   }) {
-    final prefix = sourceProfile ? _profileSourcingPrefix : _fastPathPrefix;
+    final prefix = sourceProfile
+        ? remoteProfileSourcingPrefix
+        : remoteFastPathPrefix;
     final controlChannelBackend = _controlChannelCommandBackend(session);
     if (controlChannelBackend != null) {
       return _execThroughControlChannel(
@@ -4065,7 +4057,7 @@ class AgentSessionDiscoveryService {
   Future<String> _execThroughControlChannel(
     TerminalConnectionBackend backend,
     String command, {
-    String prefix = _profileSourcingPrefix,
+    String prefix = remoteProfileSourcingPrefix,
   }) async {
     final result = await backend.runClientCommand(
       _markCommandDone('$prefix$command'),
@@ -4216,77 +4208,38 @@ class AgentSessionDiscoveryService {
   }) => session.runQueuedExec(() async {
     final execSession = await openSshExec(
       session.execute(
-        '$_profileSourcingPrefix${_buildAcpSessionListCommand(provider, workingDirectory)}',
+        '$remoteProfileSourcingPrefix${_buildAcpSessionListCommand(provider, workingDirectory)}',
       ),
       _acpResponseTimeout,
     );
     var nextRequestId = 0;
-    final connection = AcpJsonRpcConnection(
-      transport: AcpSshExecTransport(execSession),
-      defaultRequestTimeout: _acpResponseTimeout,
+    final outcome = await listRemoteAcpSessionsOverExec(
+      execSession,
+      timeout: _acpResponseTimeout,
+      max: max,
+      workingDirectories: listWorkingDirectories,
+      continueOnListError: true,
       requestIdFactory: () => nextRequestId++,
     );
-    final client = AcpClient(connection);
-    try {
-      final initialization = await client.initialize(
-        capabilities: const AcpClientCapabilities(
-          fileSystem: AcpFileSystemCapabilities(),
-          booleanConfigOptions: false,
-        ),
-        timeout: _acpResponseTimeout,
-      );
-      if (!initialization.agentCapabilities.session.list) {
-        return null;
-      }
-
-      final sessionsById = <String, ToolSessionInfo>{};
-      var hadError = false;
-      for (final listWorkingDirectory in listWorkingDirectories) {
-        String? cursor;
-        final seenCursors = <String>{};
-        do {
-          late final AcpSessionListResult listResult;
-          try {
-            listResult = await client.listSessions(
-              cwd: listWorkingDirectory,
-              cursor: cursor,
-              timeout: _acpResponseTimeout,
-            );
-          } on AcpProtocolException {
-            hadError = true;
-            break;
-          } on AcpRemoteException {
-            hadError = true;
-            break;
-          }
-          for (final sessionInfo in listResult.sessions) {
-            final info = ToolSessionInfo(
-              toolName: toolName,
-              sessionId: sessionInfo.sessionId,
-              workingDirectory: sessionInfo.cwd.isEmpty
-                  ? null
-                  : sessionInfo.cwd,
-              lastActive: _parseDateTimeValue(sessionInfo.updatedAt),
-              summary: sessionInfo.title,
-              additionalDirectories: sessionInfo.additionalDirectories,
-            );
-            sessionsById.putIfAbsent(info.sessionId, () => info);
-          }
-          cursor = listResult.nextCursor;
-          if (cursor != null && !seenCursors.add(cursor)) {
-            hadError = true;
-            break;
-          }
-        } while (cursor != null && sessionsById.length < max);
-      }
-
-      return _AcpSessionListResult(
-        sessions: sortAndLimitDiscoveredSessions(sessionsById.values, max),
-        hadError: hadError,
-      );
-    } finally {
-      await client.close();
+    if (!outcome.supported) {
+      return null;
     }
+
+    final sessions = [
+      for (final sessionInfo in outcome.sessions)
+        ToolSessionInfo(
+          toolName: toolName,
+          sessionId: sessionInfo.sessionId,
+          workingDirectory: sessionInfo.cwd.isEmpty ? null : sessionInfo.cwd,
+          lastActive: _parseDateTimeValue(sessionInfo.updatedAt),
+          summary: sessionInfo.title,
+          additionalDirectories: sessionInfo.additionalDirectories,
+        ),
+    ];
+    return _AcpSessionListResult(
+      sessions: sortAndLimitDiscoveredSessions(sessions, max),
+      hadError: outcome.hadError,
+    );
   }, priority: SshExecPriority.low);
 
   Future<List<_ListedFile>> _listCopilotWorkspaceFiles(
@@ -4972,14 +4925,9 @@ String? _antigravityAnnotationPathForConversationFile(String path) {
 
 String? _extractAntigravityAnnotationTitle(String raw) {
   final match = RegExp(r'title\s*:\s*"((?:\\.|[^"\\])*)"').firstMatch(raw);
-  if (match == null) return null;
-  try {
-    final decoded = jsonDecode('"${match.group(1)}"');
-    if (decoded is String && decoded.trim().isNotEmpty) {
-      return _summarizeSessionText(decoded);
-    }
-  } on FormatException {
-    return null;
+  final decoded = _decodeJsonStringCapture(match?.group(1));
+  if (decoded != null && decoded.trim().isNotEmpty) {
+    return _summarizeSessionText(decoded);
   }
   return null;
 }

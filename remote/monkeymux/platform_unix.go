@@ -67,15 +67,6 @@ func ptyWinsize(cols int, rows int, widthPx int, heightPx int) *pty.Winsize {
 	return size
 }
 
-func (p *unixPty) Fd() uintptr {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return ^uintptr(0)
-	}
-	return p.file.Fd()
-}
-
 func (p *unixPty) foregroundProcessGroup() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -167,7 +158,7 @@ func startWindowSized(
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
-	cmd.Env = withPaneTTYEnvironment(cmd.Env, tty.Name())
+	cmd.Env = withAgentLaunchEnvironment(cmd.Env, "MONKEYMUX_PANE_TTY", tty.Name())
 	if err := cmd.Start(); err != nil {
 		_ = ptmx.Close()
 		return nil, nil, err
@@ -241,6 +232,21 @@ func inspectProcess(pid int) processSnapshot {
 	return inspectPSProcess(pid)
 }
 
+func readProcStat(pid int) (prefix string, fields []string, ok bool) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return "", nil, false
+	}
+	text := string(data)
+	// The comm field is parenthesized and may itself contain spaces and
+	// parentheses, so the numbered fields are counted from its closing brace.
+	end := strings.LastIndex(text, ")")
+	if end < 0 {
+		return "", nil, false
+	}
+	return text[:end+1], strings.Fields(text[end+1:]), true
+}
+
 func inspectProcFSProcess(pid int) (processSnapshot, bool) {
 	if !procFSDescribesThisNamespace() {
 		// A container that mounted the host's /proc would describe a different
@@ -248,18 +254,10 @@ func inspectProcFSProcess(pid int) (processSnapshot, bool) {
 		// bogus "proof" about an unrelated process.
 		return processSnapshot{}, false
 	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
+	statPrefix, fields, ok := readProcStat(pid)
+	if !ok {
 		return processSnapshot{}, false
 	}
-	text := string(data)
-	// The comm field is parenthesized and may itself contain spaces and
-	// parentheses, so the numbered fields are counted from its closing brace.
-	end := strings.LastIndex(text, ")")
-	if end < 0 {
-		return processSnapshot{}, false
-	}
-	fields := strings.Fields(text[end+1:])
 	// These offsets are relative to field 3 (state), the first field after comm.
 	const (
 		stateOffset     = 0
@@ -272,7 +270,7 @@ func inspectProcFSProcess(pid int) (processSnapshot, bool) {
 		known:     true,
 		running:   fields[stateOffset] != "Z",
 		arguments: true,
-		image:     linuxProcessImage(pid, text[:end+1]),
+		image:     linuxProcessImage(pid, statPrefix),
 	}
 	if ticks, err := strconv.ParseInt(fields[startTimeOffset], 10, 64); err == nil {
 		if boot, ok := linuxBootTime(); ok {

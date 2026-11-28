@@ -48,17 +48,14 @@ func newKittyClipboardTestServer(t *testing.T) (*muxServer, *muxWindow, *muxWind
 
 func waitForAttachOutput(t *testing.T, attach *recordingConn, want string) string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got := attach.String()
-		if strings.Contains(got, want) {
-			return got
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("attach output %q never contained %q", got, want)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	var got string
+	waitUntil(t, 2*time.Second, time.Millisecond, func() bool {
+		got = attach.String()
+		return strings.Contains(got, want)
+	}, func() {
+		t.Fatalf("attach output %q never contained %q", got, want)
+	})
+	return got
 }
 
 func windowPtyOutput(t *testing.T, window *muxWindow) string {
@@ -975,17 +972,13 @@ func startKittyClipboardInputWorker(t *testing.T, server *muxServer, attach *rec
 
 func waitForWindowPtyOutput(t *testing.T, window *muxWindow, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got := windowPtyOutput(t, window)
-		if got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("window got %q, want %q", got, want)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	var got string
+	waitUntil(t, 2*time.Second, time.Millisecond, func() bool {
+		got = windowPtyOutput(t, window)
+		return got == want
+	}, func() {
+		t.Fatalf("window got %q, want %q", got, want)
+	})
 }
 
 // A request whose client goes away before answering it is answered EBUSY at

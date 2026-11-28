@@ -8,9 +8,10 @@ import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
 import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
+
+import '../../helpers/recording_diagnostics_logger.dart';
 
 String b64(String value) => base64Encode(utf8.encode(value));
 
@@ -56,41 +57,6 @@ class _FakePlatform implements KittyClipboardPlatform {
       KittyClipboardPasteRead.snapshot(KittyClipboardSnapshot(stored));
 }
 
-class _RecordingLogger implements DiagnosticsLogger {
-  final events = <(String, Map<String, Object?>)>[];
-
-  void _record(String message, Map<String, Object?> fields) =>
-      events.add((message, fields));
-
-  @override
-  void debug(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const {},
-  }) => _record(message, fields);
-
-  @override
-  void info(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const {},
-  }) => _record(message, fields);
-
-  @override
-  void warning(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const {},
-  }) => _record(message, fields);
-
-  @override
-  void error(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const {},
-  }) => _record(message, fields);
-}
-
 class _Harness {
   _Harness({int maxWriteBytes = kittyClipboardMaxBytes}) {
     handler = KittyClipboardHandler(
@@ -111,7 +77,7 @@ class _Harness {
   }
 
   final platform = _FakePlatform();
-  final logger = _RecordingLogger();
+  final logger = RecordingDiagnosticsLogger();
   final replies = <String>[];
   late final KittyClipboardHandler handler;
   bool canWrite = true;
@@ -781,8 +747,8 @@ void registerDomainServicesKittyClipboardServiceTests() {
       await harness.packets();
 
       expect(harness.logger.events, isNotEmpty);
-      for (final (_, fields) in harness.logger.events) {
-        for (final value in fields.values) {
+      for (final event in harness.logger.events) {
+        for (final value in event.fields.values) {
           expect(value, anyOf(isNull, isA<num>(), isA<bool>(), isA<String>()));
           if (value is String) {
             expect(value, isNot(contains('secret')));

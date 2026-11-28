@@ -451,52 +451,99 @@ func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
 	}
 }
 
+type codexLockedResumeWatchHarness struct {
+	server     *muxServer
+	pty        *codexLockedResumeTestPty
+	window     *muxWindow
+	held       atomic.Bool
+	heldProbes atomic.Int32
+	released   chan struct{}
+	done       chan struct{}
+}
+
+func startCodexLockedResumeTestWatch(
+	t *testing.T,
+	session string,
+	fgGroup int,
+	policy codexLockedResumePolicy,
+	onUnlocked func(),
+	closeOnCleanup bool,
+) *codexLockedResumeWatchHarness {
+	t.Helper()
+	h := &codexLockedResumeWatchHarness{
+		server:   newMuxServer(session),
+		pty:      &codexLockedResumeTestPty{},
+		released: make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	h.pty.foreground.Store(int64(fgGroup))
+	h.window = &muxWindow{id: "@1", agentTool: "codex", pty: h.pty, lastActivity: time.Now()}
+	h.server.windows = []*muxWindow{h.window}
+	h.server.activeID = "@1"
+	h.server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+	h.held.Store(true)
+	var once sync.Once
+	lockHeld := func() bool {
+		if h.held.Load() {
+			h.heldProbes.Add(1)
+			return true
+		}
+		once.Do(func() { close(h.released) })
+		if onUnlocked != nil {
+			onUnlocked()
+		}
+		return false
+	}
+	go func() {
+		h.server.watchCodexLockedResume(h.window, resumedIn41, lockHeld, policy)
+		close(h.done)
+	}()
+	if closeOnCleanup {
+		t.Cleanup(func() {
+			h.server.mu.Lock()
+			h.window.closed = true
+			h.server.mu.Unlock()
+			<-h.done
+		})
+	}
+	return h
+}
+
+func defaultCodexLockedResumeTestPolicy() codexLockedResumePolicy {
+	return codexLockedResumePolicy{
+		poll:       5 * time.Millisecond,
+		promptWait: time.Minute,
+		settle:     time.Minute,
+		limit:      time.Minute,
+		backoff:    time.Hour,
+		maxPresses: 4,
+	}
+}
+
+func (h *codexLockedResumeWatchHarness) waitDone(t *testing.T, format string, args ...any) {
+	t.Helper()
+	select {
+	case <-h.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf(format, args...)
+	}
+}
+
 // A paste can hold the window's input lock while the child is blocked. If
 // the program changes during that wait, the queued press must not land in the
 // next program.
 func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-input")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(41)
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+	h := startCodexLockedResumeTestWatch(t, "codex-locked-resume-input", 41, defaultCodexLockedResumeTestPolicy(), nil, false)
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return h.heldProbes.Load() >= 2 })
 
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes atomic.Int32
-	released := make(chan struct{})
-	var once sync.Once
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
-		once.Do(func() { close(released) })
-		return false
-	}
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
-		close(done)
-	}()
-	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
-
-	window.inputMu.Lock()
-	held.Store(false)
-	<-released // step has decided to press for group 41.
-	pty.foreground.Store(42)
-	window.inputMu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("watcher kept watching the next program")
-	}
-	if got := pty.String(); got != "" {
+	h.window.inputMu.Lock()
+	h.held.Store(false)
+	<-h.released // step has decided to press for group 41.
+	h.pty.foreground.Store(42)
+	h.window.inputMu.Unlock()
+	h.waitDone(t, "watcher kept watching the next program")
+	if got := h.pty.String(); got != "" {
 		t.Fatalf("pressed %q into the next program", got)
 	}
 }
@@ -506,109 +553,47 @@ func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
 // retry budget.
 func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-reacquired")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(41)
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+	policy := defaultCodexLockedResumeTestPolicy()
+	policy.maxPresses = 1
+	h := startCodexLockedResumeTestWatch(t, "codex-locked-resume-reacquired", 41, policy, nil, true)
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return h.heldProbes.Load() >= 2 })
 
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes atomic.Int32
-	released := make(chan struct{})
-	var once sync.Once
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
-		once.Do(func() { close(released) })
-		return false
-	}
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 1})
-		close(done)
-	}()
-	t.Cleanup(func() {
-		server.mu.Lock()
-		window.closed = true
-		server.mu.Unlock()
-		<-done
-	})
-	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
-
-	window.inputMu.Lock()
-	held.Store(false)
-	<-released // step has decided to press.
-	held.Store(true)
-	probes := heldProbes.Load()
-	window.inputMu.Unlock()
+	h.window.inputMu.Lock()
+	h.held.Store(false)
+	<-h.released // step has decided to press.
+	h.held.Store(true)
+	probes := h.heldProbes.Load()
+	h.window.inputMu.Unlock()
 	waitForCodexLockedResume(t, "probes after reacquisition", func() bool {
-		return heldProbes.Load() >= probes+3 || pty.String() != ""
+		return h.heldProbes.Load() >= probes+3 || h.pty.String() != ""
 	})
-	if got := pty.String(); got != "" {
+	if got := h.pty.String(); got != "" {
 		t.Fatalf("pressed %q while another client held the lock", got)
 	}
 
 	// With a budget of one press, the unsent press must still leave it.
-	held.Store(false)
-	waitForCodexLockedResume(t, "R press", func() bool { return pty.String() == "r" })
+	h.held.Store(false)
+	waitForCodexLockedResume(t, "R press", func() bool { return h.pty.String() == "r" })
 }
 
 // The backoff runs from when R was written, not from when the watcher decided
 // to press before waiting for window input.
 func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-backoff")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(41)
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
-
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes atomic.Int32
-	released := make(chan struct{})
-	var once sync.Once
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
-		once.Do(func() { close(released) })
-		return false
-	}
 	const backoff = 200 * time.Millisecond
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: time.Minute, backoff: backoff, maxPresses: 4})
-		close(done)
-	}()
-	t.Cleanup(func() {
-		server.mu.Lock()
-		window.closed = true
-		server.mu.Unlock()
-		<-done
-	})
-	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+	policy := defaultCodexLockedResumeTestPolicy()
+	policy.backoff = backoff
+	h := startCodexLockedResumeTestWatch(t, "codex-locked-resume-backoff", 41, policy, nil, true)
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return h.heldProbes.Load() >= 2 })
 
-	window.inputMu.Lock()
-	held.Store(false)
-	<-released
+	h.window.inputMu.Lock()
+	h.held.Store(false)
+	<-h.released
 	time.Sleep(backoff + backoff/2) // The press waits longer than the backoff.
-	window.inputMu.Unlock()
-	waitForCodexLockedResume(t, "first R press", func() bool { return pty.String() != "" })
+	h.window.inputMu.Unlock()
+	waitForCodexLockedResume(t, "first R press", func() bool { return h.pty.String() != "" })
 	time.Sleep(backoff / 2)
-	if got := pty.String(); got != "r" {
+	if got := h.pty.String(); got != "r" {
 		t.Fatalf("window input = %q within half a backoff of the first press, want one R", got)
 	}
 }
@@ -619,52 +604,19 @@ func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
 // the old lease ends.
 func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-leftover")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(42) // The resume ran as group 41 and has exited.
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
-
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes atomic.Int32
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
-		return false
-	}
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
-		close(done)
-	}()
-	t.Cleanup(func() {
-		server.mu.Lock()
-		window.closed = true
-		server.mu.Unlock()
-		<-done
-	})
+	// The resume ran as group 41 and has exited.
+	h := startCodexLockedResumeTestWatch(t, "codex-locked-resume-leftover", 42, defaultCodexLockedResumeTestPolicy(), nil, true)
 	waitForCodexLockedResume(t, "the watch to end or probe the lock", func() bool {
 		select {
-		case <-done:
+		case <-h.done:
 			return true
 		default:
-			return heldProbes.Load() >= 2
+			return h.heldProbes.Load() >= 2
 		}
 	})
-	held.Store(false)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("watcher kept watching the next program; it received %q", pty.String())
-	}
-	if got := pty.String(); got != "" {
+	h.held.Store(false)
+	h.waitDone(t, "watcher kept watching the next program; it received %q", h.pty.String())
+	if got := h.pty.String(); got != "" {
 		t.Fatalf("pressed %q into the next program", got)
 	}
 }
@@ -674,50 +626,19 @@ func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T)
 // after that probe, not before it.
 func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-last-probe")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(41)
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
-
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes, freeProbes atomic.Int32
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
+	var freeProbes atomic.Int32
+	var h *codexLockedResumeWatchHarness
+	h = startCodexLockedResumeTestWatch(t, "codex-locked-resume-last-probe", 41, defaultCodexLockedResumeTestPolicy(), func() {
 		// The first free probe decides to press; the second is the press's
 		// own, after it has the window's input.
 		if freeProbes.Add(1) == 2 {
-			pty.foreground.Store(42)
+			h.pty.foreground.Store(42)
 		}
-		return false
-	}
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
-		close(done)
-	}()
-	t.Cleanup(func() {
-		server.mu.Lock()
-		window.closed = true
-		server.mu.Unlock()
-		<-done
-	})
-	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
-	held.Store(false)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("watcher kept watching the next program")
-	}
-	if got := pty.String(); got != "" {
+	}, true)
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return h.heldProbes.Load() >= 2 })
+	h.held.Store(false)
+	h.waitDone(t, "watcher kept watching the next program")
+	if got := h.pty.String(); got != "" {
 		t.Fatalf("pressed %q into the program that took over during the probe", got)
 	}
 }
@@ -726,53 +647,24 @@ func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
 // input past the bound is not sent.
 func TestWatchCodexLockedResumeStopsPressingAtTheLimit(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("codex-locked-resume-limit")
-	pty := &codexLockedResumeTestPty{}
-	pty.foreground.Store(41)
-	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
-
-	var held atomic.Bool
-	held.Store(true)
-	var heldProbes atomic.Int32
-	released := make(chan struct{})
-	var once sync.Once
-	lockHeld := func() bool {
-		if held.Load() {
-			heldProbes.Add(1)
-			return true
-		}
-		once.Do(func() { close(released) })
-		return false
-	}
 	const limit = 500 * time.Millisecond
-	done := make(chan struct{})
-	go func() {
-		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
-			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
-				settle: time.Minute, limit: limit, backoff: time.Hour, maxPresses: 4})
-		close(done)
-	}()
-	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+	policy := defaultCodexLockedResumeTestPolicy()
+	policy.limit = limit
+	h := startCodexLockedResumeTestWatch(t, "codex-locked-resume-limit", 41, policy, nil, false)
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return h.heldProbes.Load() >= 2 })
 
-	window.inputMu.Lock()
-	held.Store(false)
+	h.window.inputMu.Lock()
+	h.held.Store(false)
 	select {
-	case <-released: // Within the bound, step has decided to press.
-	case <-done:
-		window.inputMu.Unlock()
+	case <-h.released: // Within the bound, step has decided to press.
+	case <-h.done:
+		h.window.inputMu.Unlock()
 		t.Skip("the watch reached its bound before the lock was released")
 	}
 	time.Sleep(limit) // The watch started before the decision, so the bound has passed.
-	window.inputMu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("watcher outlived its time bound")
-	}
-	if got := pty.String(); got != "" {
+	h.window.inputMu.Unlock()
+	h.waitDone(t, "watcher outlived its time bound")
+	if got := h.pty.String(); got != "" {
 		t.Fatalf("pressed %q after the time bound", got)
 	}
 }
@@ -801,11 +693,7 @@ func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
 // waitRejectedCondition.
 func waitForCodexLockedResume(t *testing.T, description string, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !ready() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", description)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(t, 5*time.Second, 5*time.Millisecond, ready, func() {
+		t.Fatalf("timed out waiting for %s", description)
+	})
 }

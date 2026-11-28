@@ -6,8 +6,8 @@ import (
 	"unicode/utf8"
 )
 
-// RenderFrame serialises the current picture into escape sequences that
-// reproduce it on a client whose terminal was just reset (the sequence is
+// RenderFrameReplacing serialises the current picture into escape sequences
+// that reproduce it on a client whose terminal was just reset (the sequence is
 // applied after activeWindowReplayPrefix and after the window's private modes
 // were re-enabled). The output is self-contained: every visible row is
 // addressed absolutely, attributes are always emitted as a full reset+set,
@@ -25,15 +25,9 @@ import (
 //
 // The direct Kitty placements on the screen are placed again on their cells
 // once the rows are painted, before the cursor is restored (see
-// vtscreen_kitty_placements.go).
-func (s *terminalScreen) RenderFrame() []byte {
-	return s.RenderFrameReplacing(nil)
-}
-
-// RenderFrameReplacing is RenderFrame placing again only the direct
-// placements of the images replace accepts, those the replay carries, or
-// every one for nil. A replay that places a main-screen image again first
-// deletes the client's copies of it (KittyMainPlacementDeletes).
+// vtscreen_kitty_placements.go), filtered by replace (every placement for nil).
+// A replay that places a main-screen image again first deletes the client's
+// copies of it (KittyMainPlacementDeletes).
 func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil
@@ -84,23 +78,17 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	return out
 }
 
-// RenderMainScreen paints the main screen an alternate-screen application
-// hides, with its scrollback and saved cursor, for a client that was reset
-// onto its main screen. A window replay sends it before re-entering the
-// alternate screen, so the application's exit finds the main screen the model
-// kept rather than a cleared one. The cursor is left where that exit puts it:
-// on the cursor mode 1049 saved on entry (home with the default rendition
-// once a DECSTR reset it), with the origin mode, rendition and charsets it
-// saved, all of which the replayed 1049 entry saves again, or on the main
-// cursor for 47 and 1047. It is nil while the main screen shows; RenderFrame
-// paints it then. Its direct Kitty placements are placed again as RenderFrame
-// places them.
-func (s *terminalScreen) RenderMainScreen() []byte {
-	return s.RenderMainScreenReplacing(nil)
-}
-
-// RenderMainScreenReplacing is RenderMainScreen placing again only the direct
-// placements of the images replace accepts, as RenderFrameReplacing does.
+// RenderMainScreenReplacing paints the main screen an alternate-screen
+// application hides, with its scrollback and saved cursor, for a client that
+// was reset onto its main screen. A window replay sends it before re-entering
+// the alternate screen, so the application's exit finds the main screen the
+// model kept rather than a cleared one. The cursor is left where that exit
+// puts it: on the cursor mode 1049 saved on entry (home with the default
+// rendition once a DECSTR reset it), with the origin mode, rendition and
+// charsets it saved, all of which the replayed 1049 entry saves again, or on
+// the main cursor for 47 and 1047. It is nil while the main screen shows;
+// RenderFrameReplacing paints it then. Its direct Kitty placements are placed
+// again for images replace accepts (or every one for nil).
 func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) bool) []byte {
 	if s == nil || !s.altActive {
 		return nil

@@ -18,14 +18,8 @@ import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/acp_writer_lease_banner.dart';
 
+import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
-
-class _MockSshService extends Mock implements SshService {}
-
-class _MockSshSession extends Mock implements SshSession {}
-
-class _MockHostCliLaunchPreferencesService extends Mock
-    implements HostCliLaunchPreferencesService {}
 
 final _now = DateTime(2026, 10, 9, 12);
 
@@ -79,11 +73,11 @@ AcpSessionState _heldSession(MonkeyMuxAcpRemoteWriter writer) {
 }
 
 Widget _chat(FakeAcpSessionManager manager) {
-  final ssh = _MockSshService();
-  final sshSession = _MockSshSession();
+  final ssh = MockSshService();
+  final sshSession = MockSshSession();
   when(() => sshSession.connectionId).thenReturn(7);
   when(() => ssh.getSessionsForHost(any())).thenReturn([sshSession]);
-  final launchPreferences = _MockHostCliLaunchPreferencesService();
+  final launchPreferences = MockHostCliLaunchPreferencesService();
   when(() => launchPreferences.getPreferencesForHost(any()))
       .thenAnswer((_) async => const HostCliLaunchPreferences());
   final key = fakeAcpKey();

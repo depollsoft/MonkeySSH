@@ -61,7 +61,6 @@ import '../shortcuts/app_shortcuts.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
-import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_config_option_controls.dart';
 import '../widgets/acp_connection_support.dart';
 import '../widgets/acp_elicitation_surface.dart';
@@ -79,6 +78,7 @@ import '../widgets/acp_unread_digest_bar.dart';
 import '../widgets/acp_writer_lease_banner.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/scroll_edge_fade.dart';
 import '../widgets/system_vertical_bar.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -562,7 +562,6 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   Future<AcpSessionLaunchResult?> _reconnect({
     required String cwd,
-    List<AcpSessionKey> replace = const <AcpSessionKey>[],
     bool takeOver = false,
   }) async {
     final manager = ref.read(acpSessionManagerProvider);
@@ -582,32 +581,27 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         .getPreferencesForHost(_key.hostId);
     if (!mounted) return null;
     _providerSignInRequested = false;
-    final result = await manager.reconnectSession(
-      hostId: _key.hostId,
-      providerId: _key.providerId,
-      bridgeId: _key.bridgeId,
-      acpSessionId: _key.acpSessionId,
-      cwd: cwd,
-      confirmInstall: (request) => confirmAcpMonkeyMuxInstall(context, request),
-      chooseAuthentication: acpAuthenticationChooser(
-        context,
-        offerProviderCommand: _hasProviderSignInCommand,
-        onProviderCommand: () => _providerSignInRequested = true,
+    return runAcpLaunchWithConcurrencyResolution(
+      context,
+      ref,
+      launch: (replace) => manager.reconnectSession(
+        hostId: _key.hostId,
+        providerId: _key.providerId,
+        bridgeId: _key.bridgeId,
+        acpSessionId: _key.acpSessionId,
+        cwd: cwd,
+        confirmInstall: (request) =>
+            confirmAcpMonkeyMuxInstall(context, request),
+        chooseAuthentication: acpAuthenticationChooser(
+          context,
+          offerProviderCommand: _hasProviderSignInCommand,
+          onProviderCommand: () => _providerSignInRequested = true,
+        ),
+        autoApprovePermissions: launchPreferences.startInYoloMode,
+        replace: replace,
+        takeOver: takeOver,
       ),
-      autoApprovePermissions: launchPreferences.startInYoloMode,
-      replace: replace,
-      takeOver: takeOver,
     );
-    if (result is AcpSessionLaunchBlocked && mounted) {
-      return resolveAcpConcurrencyBlock(
-        context,
-        ref,
-        result.decision,
-        relaunch: (replace) =>
-            _reconnect(cwd: cwd, replace: replace, takeOver: takeOver),
-      );
-    }
-    return result;
   }
 
   /// Returns a live SFTP client owned by the host's current SSH connection,
@@ -2157,34 +2151,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         .requestFocus();
   }
 
-  Future<bool> _confirmDeleteSession() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete session?'),
-        content: const Text(
-          'This permanently removes the session from the agent. This action '
-          'cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
-              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
-            ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete session'),
-          ),
-        ],
-      ),
-    );
-    return confirmed ?? false;
-  }
+  Future<bool> _confirmDeleteSession() => showDeleteConfirmationDialog(
+    context,
+    title: 'Delete session?',
+    message:
+        'This permanently removes the session from the agent. This action '
+        'cannot be undone.',
+    confirmLabel: 'Delete session',
+    requestFocus: terminalOverlayRouteRequestFocus(context),
+  );
 
   Future<void> _handleAction(
     _ChatAction action,
@@ -2239,23 +2214,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   /// opening the new session or surfacing a safe error.
   Future<void> _fork() async {
     final manager = ref.read(acpSessionManagerProvider);
-    AcpSessionLaunchResult? result = await manager.forkSession(_key);
-
-    if (result is AcpSessionLaunchBlocked) {
-      if (!mounted) {
-        return;
-      }
-      final decision = result.decision;
-      result = await resolveAcpConcurrencyBlock(
-        context,
-        ref,
-        decision,
-        relaunch: (replace) => manager.forkSession(_key, replace: replace),
-        allowStopAndContinue: !decision.blockingSessionKeys.contains(
-          _key.value,
-        ),
-      );
-    }
+    final result = await runAcpLaunchWithConcurrencyResolution(
+      context,
+      ref,
+      launch: (replace) => manager.forkSession(_key, replace: replace),
+      allowStopAndContinue: (decision) =>
+          !decision.blockingSessionKeys.contains(_key.value),
+    );
 
     if (!mounted || result == null) {
       return;

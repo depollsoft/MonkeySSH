@@ -108,7 +108,7 @@ func runAgentLaunchWrapper(args []string) {
 	}
 	launch.env = withAgentLaunchEnvironment(launch.env, "MONKEYMUX_AGENT_PID", strconv.Itoa(os.Getpid()))
 	if tty := resolveAgentLaunchPaneTTY(); tty != "" {
-		launch.env = withPaneTTYEnvironment(launch.env, tty)
+		launch.env = withAgentLaunchEnvironment(launch.env, "MONKEYMUX_PANE_TTY", tty)
 	}
 	if launch.replacedTUIConfig {
 		fmt.Fprintln(os.Stderr, "monkeymux: the MonkeyMux identity plugin replaced OPENCODE_TUI_CONFIG for this launch")

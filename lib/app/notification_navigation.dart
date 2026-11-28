@@ -16,33 +16,47 @@ String buildTmuxAlertHomeLocation() => Uri(
   },
 ).toString();
 
+String _appendNotificationTapId(String location, String notificationTapId) {
+  final targetUri = Uri.parse(location);
+  return targetUri
+      .replace(
+        queryParameters: {
+          ...targetUri.queryParameters,
+          'notificationTap': notificationTapId,
+        },
+      )
+      .toString();
+}
+
+/// Opens [targetLocation] above the Connections tab so system and predictive
+/// Back match manual navigation.
+void openNotificationStack({required GoRouter router, String? targetLocation}) {
+  router.go(buildTmuxAlertHomeLocation());
+  if (targetLocation == null) return;
+  unawaited(router.push<void>(targetLocation));
+}
+
 /// Builds the terminal route for a tmux alert notification navigation.
 String buildTmuxAlertNotificationTerminalLocation(
   TmuxAlertNotificationPayload payload, {
   required String notificationTapId,
-}) {
-  final targetUri = Uri.parse(buildTmuxAlertTerminalLocation(payload));
-  final queryParameters = Map<String, String>.from(targetUri.queryParameters)
-    ..['notificationTap'] = notificationTapId;
-  return targetUri.replace(queryParameters: queryParameters).toString();
-}
+}) => _appendNotificationTapId(
+  buildTmuxAlertTerminalLocation(payload),
+  notificationTapId,
+);
 
 /// Opens a tmux alert notification with the same stack as manual navigation.
 void openTmuxAlertNotificationStack({
   required GoRouter router,
   required TmuxAlertNotificationPayload payload,
   required String notificationTapId,
-}) {
-  router.go(buildTmuxAlertHomeLocation());
-  unawaited(
-    router.push<void>(
-      buildTmuxAlertNotificationTerminalLocation(
-        payload,
-        notificationTapId: notificationTapId,
-      ),
-    ),
-  );
-}
+}) => openNotificationStack(
+  router: router,
+  targetLocation: buildTmuxAlertNotificationTerminalLocation(
+    payload,
+    notificationTapId: notificationTapId,
+  ),
+);
 
 /// Opens an ACP notification with Connections beneath its terminal so
 /// system and predictive Back match manual navigation.
@@ -50,33 +64,22 @@ void openAcpNotificationStack({
   required GoRouter router,
   required AcpNotificationPayload payload,
   required String notificationTapId,
-}) {
-  router.go(buildTmuxAlertHomeLocation());
-  final target = Uri.parse(buildAcpNotificationLocation(payload));
-  unawaited(
-    router.push<void>(
-      target
-          .replace(
-            queryParameters: {
-              ...target.queryParameters,
-              'notificationTap': notificationTapId,
-            },
-          )
-          .toString(),
-    ),
-  );
-}
+}) => openNotificationStack(
+  router: router,
+  targetLocation: _appendNotificationTapId(
+    buildAcpNotificationLocation(payload),
+    notificationTapId,
+  ),
+);
 
 /// Builds the terminal route for a terminal desktop notification navigation.
 String buildTerminalNotificationNavigationLocation(
   TerminalNotificationPayload payload, {
   required String notificationTapId,
-}) {
-  final targetUri = Uri.parse(buildTerminalNotificationLocation(payload));
-  final queryParameters = Map<String, String>.from(targetUri.queryParameters)
-    ..['notificationTap'] = notificationTapId;
-  return targetUri.replace(queryParameters: queryParameters).toString();
-}
+}) => _appendNotificationTapId(
+  buildTerminalNotificationLocation(payload),
+  notificationTapId,
+);
 
 /// Opens a terminal desktop notification with the same stack as manual
 /// navigation.
@@ -84,17 +87,13 @@ void openTerminalNotificationStack({
   required GoRouter router,
   required TerminalNotificationPayload payload,
   required String notificationTapId,
-}) {
-  router.go(buildTmuxAlertHomeLocation());
-  unawaited(
-    router.push<void>(
-      buildTerminalNotificationNavigationLocation(
-        payload,
-        notificationTapId: notificationTapId,
-      ),
-    ),
-  );
-}
+}) => openNotificationStack(
+  router: router,
+  targetLocation: buildTerminalNotificationNavigationLocation(
+    payload,
+    notificationTapId: notificationTapId,
+  ),
+);
 
 /// Retains the latest tap until navigation is allowed after a frame.
 class NotificationNavigationScheduler<T extends Object> {

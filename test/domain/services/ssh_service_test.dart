@@ -42,6 +42,7 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
 import 'package:monkeyssh/domain/services/port_forward_browser_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/ssh_agent_forwarding.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
@@ -50,9 +51,10 @@ import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
 
-import '../../helpers/handshake_chunk_socket.dart';
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
+import '../../helpers/recording_diagnostics_logger.dart';
 import '../../helpers/ssh_key_fixtures.dart';
 
 const _backgroundSshChannel = MethodChannel(
@@ -72,6 +74,7 @@ class _CapturingSshService extends SshService {
     super.wifiNetworkService,
     super.wifiPermissionTimeout,
     super.onNonFatalError,
+    super.agentForwardingResolver,
   });
 
   SshConnectionConfig? capturedConfig;
@@ -151,10 +154,8 @@ class _CountingKeyRepository extends KeyRepository {
   }
 }
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 class _AuthenticationFixture {
-  final client = _MockSshClient();
+  final client = MockSshClient();
   late final SshService service;
   SSHPasswordRequestHandler? capturedPassword;
   SSHUserInfoRequestHandler? capturedUserInfo;
@@ -217,7 +218,7 @@ class _AuthenticationFixture {
 /// `hangTargetAuth` stops answering. [forward] answers each tunnel the jump
 /// host is asked to open.
 class _JumpReconnectFixture {
-  final jumpClient = _MockSshClient();
+  final jumpClient = MockSshClient();
   int forwardCount = 0;
   late final SshService service;
 
@@ -268,7 +269,7 @@ class _JumpReconnectFixture {
             keepAliveInterval,
           }) {
             final isJump = clientIndex++ == 0;
-            final client = isJump ? jumpClient : _MockSshClient();
+            final client = isJump ? jumpClient : MockSshClient();
             when(client.close).thenAnswer((_) async {});
             when(() => client.authenticated).thenAnswer((_) async {
               final bytes = await (socket as HostKeySource).hostKeyBytes;
@@ -317,7 +318,7 @@ typedef _ServerAuthStep = Future<void> Function(
 
 /// A trusted host whose successive connections play [steps] in order.
 class _ReconnectFixture {
-  final clients = <_MockSshClient>[];
+  final clients = <MockSshClient>[];
   final sockets = <_FakeHostKeySocket>[];
   final socketTimeouts = <Duration?>[];
   int socketCount = 0;
@@ -384,7 +385,7 @@ class _ReconnectFixture {
             keepAliveInterval,
           }) {
             final step = steps[fixture.clients.length];
-            final client = _MockSshClient();
+            final client = MockSshClient();
             fixture.clients.add(client);
             when(client.close).thenAnswer((_) async {});
             when(() => client.authenticated).thenAnswer((_) async {
@@ -409,10 +410,6 @@ class _ReconnectFixture {
     return fixture;
   }
 }
-
-class _MockExecSession extends MockSessionWithChannel {}
-
-class _MockSftpClient extends Mock implements SftpClient {}
 
 class _MockTelemetryService extends Mock implements TelemetryService {}
 
@@ -439,8 +436,6 @@ class _RecordingSessionTelemetry extends TelemetryService {
 class _MockSshService extends Mock implements SshService {}
 
 class _MockRemoteForward extends Mock implements SSHRemoteForward {}
-
-class _MockHostRepository extends Mock implements HostRepository {}
 
 class _MockPortForwardRepository extends Mock
     implements PortForwardRepository {}
@@ -634,7 +629,7 @@ Future<void> _waitUntil(bool Function() condition) async {
   fail('Timed out waiting for condition');
 }
 
-void _stubSessionStreams(_MockExecSession session, {String stdout = ''}) {
+void _stubSessionStreams(MockSessionWithChannel session, {String stdout = ''}) {
   when(() => session.stdout).thenAnswer(
     (_) => Stream<Uint8List>.fromIterable([
       Uint8List.fromList(utf8.encode(stdout)),
@@ -1120,7 +1115,7 @@ class _FakeActiveSessionsSshService extends SshService {
     }
     await connectGate?.future;
     final connectionId = _nextConnectionId++;
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final clientDoneCompleter = Completer<void>();
     _clientDoneCompleters[connectionId] = clientDoneCompleter;
     when(() => client.done).thenAnswer((_) => clientDoneCompleter.future);
@@ -1157,8 +1152,8 @@ class _FakeActiveSessionsSshService extends SshService {
   @override
   SshSession? getSession(int connectionId) => _sessions[connectionId];
 
-  _MockSshClient clientFor(int connectionId) =>
-      _sessions[connectionId]!.client as _MockSshClient;
+  MockSshClient clientFor(int connectionId) =>
+      _sessions[connectionId]!.client as MockSshClient;
 
   void completeConnection(int connectionId) {
     final completer = _clientDoneCompleters[connectionId];
@@ -1196,21 +1191,9 @@ void main() {
   registerFallbackValue(Uint8List(0));
   registerFallbackValue(Duration.zero);
 
-  group('SshConnectionState', () {
-    test('has expected values', () {
-      expect(SshConnectionState.values, hasLength(6));
-      expect(SshConnectionState.disconnected, isNotNull);
-      expect(SshConnectionState.connecting, isNotNull);
-      expect(SshConnectionState.authenticating, isNotNull);
-      expect(SshConnectionState.connected, isNotNull);
-      expect(SshConnectionState.error, isNotNull);
-      expect(SshConnectionState.reconnecting, isNotNull);
-    });
-  });
-
   group('automatic port forwarding', () {
     test('close cancels a pending automatic-forward bind', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(client.close).thenAnswer((_) async {});
       final session = _PendingBindAutomaticForwardSession(client: client);
       final configured = session.configureAutomaticPortForwarding(
@@ -1333,7 +1316,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('builds a valid persistent POSIX watcher command', () async {
       final session = _testSession(
-        _MockSshClient(),
+        MockSshClient(),
         connectionId: 7,
         hostname: 'dev.example.com',
       );
@@ -1353,7 +1336,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('builds a streaming Windows watcher command', () {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       final session = _testSession(
@@ -1381,17 +1364,17 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final first = SshSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: config,
       );
       final reconnected = SshSession(
         connectionId: 99,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: config,
       );
       final differentHost = _testSession(
-        _MockSshClient(),
+        MockSshClient(),
         hostId: 43,
         hostname: 'other.example.com',
       );
@@ -1401,8 +1384,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('rejects listener scans that end without a completion marker', () {
-      final client = _MockSshClient();
-      final execSession = _MockExecSession();
+      final client = MockSshClient();
+      final execSession = MockSessionWithChannel();
       _stubSessionStreams(
         execSession,
         stdout: 'LISTEN 0 4096 127.0.0.1:3000 0.0.0.0:*\n',
@@ -1422,8 +1405,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('probes listener PIDs for connected-shell lineage', () async {
-      final client = _MockSshClient();
-      final execSession = _MockExecSession();
+      final client = MockSshClient();
+      final execSession = MockSessionWithChannel();
       _stubSessionStreams(
         execSession,
         stdout: '__monkeyssh_port_discovery_done__\n',
@@ -1465,7 +1448,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       'keeps mux process roots while automatic forwarding is disabled',
       () async {
         final session = _testSession(
-          _MockSshClient(),
+          MockSshClient(),
           connectionId: 7,
           hostname: 'dev.example.com',
         );
@@ -1486,7 +1469,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         final session = _AutomaticForwardTestSession(
           connectionId: 1,
           hostId: 7,
-          client: _MockSshClient(),
+          client: MockSshClient(),
           config: const SshConnectionConfig(
             hostname: 'dev.example.com',
             port: 2222,
@@ -1539,7 +1522,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     );
 
     test('does not automatically forward an active reverse listener', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final remoteForward = _MockRemoteForward();
       when(() => remoteForward.host).thenReturn('127.0.0.1');
       when(() => remoteForward.port).thenReturn(41002);
@@ -1594,7 +1577,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('binds detected ports under the host proxy domain', () async {
       final session = _testSession(
-        _MockSshClient(),
+        MockSshClient(),
         hostId: 7,
         hostname: 'dev.example.com',
       );
@@ -1631,7 +1614,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       'keeps an automatic tunnel when a saved replacement cannot bind',
       () async {
         final session = _testSession(
-          _MockSshClient(),
+          MockSshClient(),
           hostId: 7,
           hostname: 'dev.example.com',
         );
@@ -1675,7 +1658,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final session = _AutomaticForwardTestSession(
         connectionId: 1,
         hostId: 7,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -1697,7 +1680,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final session = _AutomaticForwardTestSession(
         connectionId: 1,
         hostId: 7,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -1729,7 +1712,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final session = _AutomaticForwardTestSession(
         connectionId: 1,
         hostId: 7,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -1755,8 +1738,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'streams changed listener snapshots over one watcher channel',
       () async {
-        final client = _MockSshClient();
-        final watcher = _MockExecSession();
+        final client = MockSshClient();
+        final watcher = MockSessionWithChannel();
         final stdout = StreamController<Uint8List>();
         final done = Completer<void>();
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -1853,7 +1836,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     testWidgets('bounds a watcher channel open that never answers', (
       tester,
     ) async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final opening = Completer<SSHSession>();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) => opening.future);
@@ -1863,7 +1846,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       await tester.pump(const Duration(seconds: 11));
       expect(await started, isFalse);
 
-      final late = _MockExecSession();
+      final late = MockSessionWithChannel();
       opening.complete(late);
       await tester.pump();
       verify(late.channel.destroy).called(1);
@@ -1873,8 +1856,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'reapplies the watcher snapshot when only exclusions change',
       () async {
-        final client = _MockSshClient();
-        final watcher = _MockExecSession();
+        final client = MockSshClient();
+        final watcher = MockSessionWithChannel();
         final stdout = StreamController<Uint8List>();
         final done = Completer<void>();
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -1933,8 +1916,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     );
 
     test('serializes watcher and fallback polling reconciliation', () async {
-      final client = _MockSshClient();
-      final watcher = _MockExecSession();
+      final client = MockSshClient();
+      final watcher = MockSessionWithChannel();
       final stdout = StreamController<Uint8List>();
       final done = Completer<void>();
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -1998,8 +1981,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('reclassifies listeners after mux process roots arrive', () async {
-      final client = _MockSshClient();
-      final watchers = [_MockExecSession(), _MockExecSession()];
+      final client = MockSshClient();
+      final watchers = [MockSessionWithChannel(), MockSessionWithChannel()];
       final stdoutControllers = [
         StreamController<Uint8List>(),
         StreamController<Uint8List>(),
@@ -2088,8 +2071,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('does not poll after watcher reports discovery unsupported', () async {
-      final client = _MockSshClient();
-      final watcher = _MockExecSession();
+      final client = MockSshClient();
+      final watcher = MockSessionWithChannel();
       final stdout = StreamController<Uint8List>();
       final done = Completer<void>();
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2155,11 +2138,11 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'falls back to periodic scans if the watcher channel closes',
       () async {
-        final client = _MockSshClient();
-        final watcher = _MockExecSession();
+        final client = MockSshClient();
+        final watcher = MockSessionWithChannel();
         final watcherStdout = StreamController<Uint8List>();
         final watcherDone = Completer<void>();
-        final scan = _MockExecSession();
+        final scan = MockSessionWithChannel();
         _stubSessionStreams(
           scan,
           stdout:
@@ -2226,7 +2209,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
   test('session keeps MonkeyMux host resize gating for terminal lifetime', () {
     final session = _testSession(
-      _MockSshClient(),
+      MockSshClient(),
       hostId: 1,
       hostname: 'example.com',
     );
@@ -3020,7 +3003,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
 
       await expectLater(
-        captureHostKeyFromHandshakeChunks(<Uint8List>[
+        _captureHostKeyFromHandshakeChunks(<Uint8List>[
           Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r')),
           Uint8List.fromList(utf8.encode('\n')),
           Uint8List.sublistView(kexReplyPacket, 0, 3),
@@ -3035,7 +3018,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       'fails host key capture when the handshake packet is too large',
       () async {
         await expectLater(
-          captureHostKeyFromHandshakeChunks(<Uint8List>[
+          _captureHostKeyFromHandshakeChunks(<Uint8List>[
             Uint8List.fromList(utf8.encode('SSH-2.0-test-server\r\n')),
             _oversizedPacketHeader(),
           ]),
@@ -3052,58 +3035,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
   });
 
   group('SshConnectionConfig', () {
-    test('creates with required fields', () {
-      const config = SshConnectionConfig(
-        hostname: 'example.com',
-        port: 22,
-        username: 'user',
-      );
-
-      expect(config.hostname, 'example.com');
-      expect(config.port, 22);
-      expect(config.username, 'user');
-      expect(config.password, isNull);
-      expect(config.privateKey, isNull);
-      expect(config.passphrase, isNull);
-      expect(config.identityKeys, isNull);
-      expect(config.jumpHost, isNull);
-      expect(config.keepAliveInterval, const Duration(seconds: 30));
-      expect(config.connectionTimeout, const Duration(seconds: 30));
-    });
-
-    test('creates with all fields', () {
-      const jumpConfig = SshConnectionConfig(
-        hostname: 'jump.example.com',
-        port: 2222,
-        username: 'jumpuser',
-      );
-      const config = SshConnectionConfig(
-        hostname: 'target.example.com',
-        port: 22,
-        username: 'user',
-        password: 'pass123',
-        privateKey: '-----BEGIN KEY-----',
-        passphrase: 'secret',
-        jumpHost: jumpConfig,
-        keepAliveInterval: Duration(seconds: 60),
-        connectionTimeout: Duration(seconds: 15),
-      );
-
-      expect(config.hostname, 'target.example.com');
-      expect(config.port, 22);
-      expect(config.username, 'user');
-      expect(config.password, 'pass123');
-      expect(config.privateKey, '-----BEGIN KEY-----');
-      expect(config.passphrase, 'secret');
-      expect(config.identityKeys, isNull);
-      expect(config.jumpHost, isNotNull);
-      expect(config.jumpHost!.hostname, 'jump.example.com');
-      expect(config.jumpHost!.port, 2222);
-      expect(config.jumpHost!.username, 'jumpuser');
-      expect(config.keepAliveInterval, const Duration(seconds: 60));
-      expect(config.connectionTimeout, const Duration(seconds: 15));
-    });
-
     group('fromHost', () {
       late AppDatabase db;
 
@@ -3213,68 +3144,12 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
   });
 
-  group('SshConnectionResult', () {
-    test('creates success result', () {
-      const result = SshConnectionResult(success: true);
-
-      expect(result.success, isTrue);
-      expect(result.error, isNull);
-      expect(result.client, isNull);
-    });
-
-    test('creates failure result with error', () {
-      const result = SshConnectionResult(
-        success: false,
-        error: 'Connection refused',
-      );
-
-      expect(result.success, isFalse);
-      expect(result.error, 'Connection refused');
-      expect(result.client, isNull);
-    });
-  });
-
-  group('ActiveTunnelInfo', () {
-    test('creates with required fields', () {
-      const info = ActiveTunnelInfo(
-        portForwardId: 1,
-        localHost: '127.0.0.1',
-        localPort: 3306,
-        remoteHost: 'db.internal',
-        remotePort: 3306,
-        isLocal: true,
-      );
-
-      expect(info.portForwardId, 1);
-      expect(info.localHost, '127.0.0.1');
-      expect(info.localPort, 3306);
-      expect(info.browserHost, isNull);
-      expect(info.browserPort, isNull);
-      expect(info.remoteHost, 'db.internal');
-      expect(info.remotePort, 3306);
-      expect(info.isLocal, isTrue);
-    });
-
-    test('supports remote forward info', () {
-      const info = ActiveTunnelInfo(
-        portForwardId: 2,
-        localHost: 'localhost',
-        localPort: 8080,
-        remoteHost: 'localhost',
-        remotePort: 80,
-        isLocal: false,
-      );
-
-      expect(info.isLocal, isFalse);
-    });
-  });
-
   group('SshSession terminal previews', () {
     tearDown(resetQueuedSshExecsForTesting);
 
     test('notifies preview listeners when the terminal theme changes', () {
       final session = _testSession(
-        _MockSshClient(),
+        MockSshClient(),
         hostId: 2,
         hostname: 'example.com',
       );
@@ -3291,8 +3166,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('forwards execute requests with an optional PTY config', () async {
-      final client = _MockSshClient();
-      final execSession = _MockExecSession();
+      final client = MockSshClient();
+      final execSession = MockSessionWithChannel();
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
 
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -3313,8 +3188,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('opens interactive shells with a truecolor login bootstrap', () async {
-      final client = _MockSshClient();
-      final shell = _MockExecSession();
+      final client = MockSshClient();
+      final shell = MockSessionWithChannel();
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
       const pty = SSHPtyConfig(width: 120, height: 30);
 
@@ -3335,8 +3210,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('opens commands without an outer PTY when requested', () async {
-      final client = _MockSshClient();
-      final shell = _MockExecSession();
+      final client = MockSshClient();
+      final shell = MockSessionWithChannel();
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
       const pty = SSHPtyConfig(width: 120, height: 30);
 
@@ -3366,8 +3241,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('seeds terminalWindowMetrics from initial SSHPtyConfig pixel size for early CSI 14 t', () async {
       for (final requestPty in [true, false]) {
-        final client = _MockSshClient();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final shell = MockSessionWithChannel();
         final stdoutController = StreamController<Uint8List>();
         final writes = <String>[];
         final session = _testSession(
@@ -3421,8 +3296,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'emits shell done when a completed startup command has no login fallback',
       () async {
-        final client = _MockSshClient();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final shell = MockSessionWithChannel();
         final shellDone = Completer<void>();
         final session = _testSession(
           client,
@@ -3464,8 +3339,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'gates Kitty graphics by the actual Windows channel transport',
       () async {
-        final client = _MockSshClient();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final shell = MockSessionWithChannel();
         when(() => client.remoteVersion)
             .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -3497,7 +3372,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     // its images through a replay of the window it shows (a reopen) and
     // drops them, before the replay's own, for another window.
     test('MonkeyMux replay tags keep or drop the shown images', () async {
-      final session = _testSession(_MockSshClient());
+      final session = _testSession(MockSshClient());
       final terminal = session.getOrCreateTerminal()..resize(20, 6);
       int anchors() => [
         for (var row = 0; row < terminal.mainBuffer.lines.length; row++)
@@ -3529,7 +3404,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     // window starts without them, since one without shell integration, or
     // with no exit status yet, sends nothing that would replace them.
     test('MonkeyMux replay tags of another window drop its shell status', () {
-      final session = _testSession(_MockSshClient());
+      final session = _testSession(MockSshClient());
       final terminal = session.getOrCreateTerminal()..resize(20, 6);
       String tag(String window) =>
           '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
@@ -3554,9 +3429,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('returns completed startup commands to a login shell without disconnecting', () async {
-      final client = _MockSshClient();
-      final startupShell = _MockExecSession();
-      final loginShell = _MockExecSession();
+      final client = MockSshClient();
+      final startupShell = MockSessionWithChannel();
+      final loginShell = MockSessionWithChannel();
       final startupStdout = StreamController<Uint8List>();
       final loginStdout = StreamController<Uint8List>();
       final startupDone = Completer<void>();
@@ -3665,9 +3540,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('sends no kitty clipboard reply owed to a finished command to its login shell', () async {
-      final client = _MockSshClient();
-      final startupShell = _MockExecSession();
-      final loginShell = _MockExecSession();
+      final client = MockSshClient();
+      final startupShell = MockSessionWithChannel();
+      final loginShell = MockSessionWithChannel();
       final startupDone = Completer<void>();
       final loginDone = Completer<void>();
       final loginOpen = Completer<SSHSession>();
@@ -3745,9 +3620,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'a login shell after a finished command starts in replace mode',
       () async {
-        final client = _MockSshClient();
-        final startupShell = _MockExecSession();
-        final loginShell = _MockExecSession();
+        final client = MockSshClient();
+        final startupShell = MockSessionWithChannel();
+        final loginShell = MockSessionWithChannel();
         final startupOutput = StreamController<Uint8List>();
         final startupDone = Completer<void>();
         final loginDone = Completer<void>();
@@ -3813,9 +3688,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     for (final screenOwnsOutput in [false, true]) {
       test('hands the login shell a terminal the ended command no longer holds'
           '${screenOwnsOutput ? ' (screen output handler)' : ''}', () async {
-        final client = _MockSshClient();
-        final startupShell = _MockExecSession();
-        final loginShell = _MockExecSession();
+        final client = MockSshClient();
+        final startupShell = MockSessionWithChannel();
+        final loginShell = MockSessionWithChannel();
         final startupStdout = StreamController<Uint8List>();
         final loginStdout = StreamController<Uint8List>();
         final startupDone = Completer<void>();
@@ -3929,8 +3804,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'falls back to shell request when truecolor bootstrap is rejected',
       () async {
-        final client = _MockSshClient();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final shell = MockSessionWithChannel();
         final session = _testSession(
           client,
           hostId: 2,
@@ -3958,8 +3833,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     );
 
     test('requests terminal capability env on Windows remotes', () async {
-      final client = _MockSshClient();
-      final shell = _MockExecSession();
+      final client = MockSshClient();
+      final shell = MockSessionWithChannel();
       final session = _testSession(client, hostId: 2, hostname: 'example.com');
       const pty = SSHPtyConfig(width: 120, height: 30);
       final terminalCapabilityEnvironment = {
@@ -3999,9 +3874,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'falls back to a cmd capability prefix when Windows env is rejected',
       () async {
-        final client = _MockSshClient();
-        final detection = _MockExecSession();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final detection = MockSessionWithChannel();
+        final shell = MockSessionWithChannel();
         final session = _testSession(
           client,
           hostId: 2,
@@ -4048,9 +3923,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test(
       'falls back to a PowerShell capability prefix for PowerShell remotes',
       () async {
-        final client = _MockSshClient();
-        final detection = _MockExecSession();
-        final shell = _MockExecSession();
+        final client = MockSshClient();
+        final detection = MockSessionWithChannel();
+        final shell = MockSessionWithChannel();
         final session = _testSession(
           client,
           hostId: 2,
@@ -4099,8 +3974,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     );
 
     test('retries transient SFTP channel open failures', () async {
-      final client = _MockSshClient();
-      final sftp = _MockSftpClient();
+      final client = MockSshClient();
+      final sftp = MockSftpClient();
       final session = _testSession(
         client,
         connectionId: 11,
@@ -4124,8 +3999,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('discarding SFTP consumes close errors after disconnect', () async {
-      final client = _MockSshClient();
-      final sftp = _MockSftpClient();
+      final client = MockSshClient();
+      final sftp = MockSftpClient();
       final session = _testSession(
         client,
         connectionId: 11,
@@ -4146,7 +4021,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('does not retry non-transient SFTP channel open failures', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _testSession(
         client,
         connectionId: 11,
@@ -4167,7 +4042,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test('runs queued exec work against the session connection', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _testSession(
         client,
         connectionId: 9,
@@ -4291,7 +4166,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     Future<
       ({
         Completer<void> done,
-        _MockExecSession shell,
+        MockSessionWithChannel shell,
         SshSession session,
         StreamController<Uint8List> stderr,
         StreamController<Uint8List> stdout,
@@ -4299,8 +4174,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       })
     >
     openShell() async {
-      final client = _MockSshClient();
-      final shell = _MockExecSession();
+      final client = MockSshClient();
+      final shell = MockSessionWithChannel();
       final stdout = StreamController<Uint8List>();
       final stderr = StreamController<Uint8List>();
       final done = Completer<void>();
@@ -5055,7 +4930,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       fakeSshService = _FakeActiveSessionsSshService();
       telemetry = _RecordingSessionTelemetry();
       notificationService = _DelayedTerminalNotificationService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
       methodCalls = <MethodCall>[];
       BackgroundSshService.debugIsSupportedPlatformOverride = true;
@@ -5892,7 +5767,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('cancelConnectionAttempt aborts an in-flight connect', () async {
       final cancellableService = _CancellableConnectSshService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
       final localContainer = ProviderContainer(
         overrides: [
@@ -5931,7 +5806,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             label: demo ? 'App Review Demo · Rating' : 'Rating',
             tags: const Value('app-review,demo'),
           );
-          final hostRepository = _MockHostRepository();
+          final hostRepository = MockHostRepository();
           when(() => hostRepository.getById(host.id))
               .thenAnswer((_) async => host);
           when(() => hostRepository.updateLastConnected(host.id))
@@ -5987,7 +5862,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         final cancellableService = _CancellableConnectSshService(
           expectedAttempts: 2,
         );
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
         final localContainer = ProviderContainer(
           overrides: [
@@ -6021,7 +5896,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('honors cancellation that races a reused connection', () async {
       final localSshService = _FakeActiveSessionsSshService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(any())).thenAnswer((_) async => null);
       final localContainer = ProviderContainer(
         overrides: [
@@ -6057,7 +5932,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final session = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6066,7 +5941,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         name: 'link',
         configurationLog: <String>[],
       );
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final sessions = <SshSession>[];
@@ -6107,7 +5982,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final session = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6140,7 +6015,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final older = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6152,7 +6027,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final newer = _RecordingAutomaticForwardSession(
         connectionId: 2,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6162,7 +6037,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         configurationLog: configurationLog,
       );
       await older.updateAutomaticPortForwardProcessRoots({7300});
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final localContainer = ProviderContainer(
@@ -6198,7 +6073,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final older = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6210,7 +6085,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final newer = _RecordingAutomaticForwardSession(
         connectionId: 2,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6220,7 +6095,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         configurationLog: configurationLog,
       );
       await older.updateAutomaticPortForwardProcessRoots({7300});
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final localContainer = ProviderContainer(
@@ -6254,7 +6129,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final primary = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6264,7 +6139,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final secondary = _RecordingAutomaticForwardSession(
         connectionId: 2,
         hostId: 43,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
@@ -6284,7 +6159,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         isAutomatic: true,
         isShellRelated: true,
       );
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       when(
@@ -6388,7 +6263,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         final primary = _RecordingAutomaticForwardSession(
           connectionId: 1,
           hostId: 42,
-          client: _MockSshClient(),
+          client: MockSshClient(),
           config: SshConnectionConfig(
             hostname: hostname,
             port: 22,
@@ -6405,7 +6280,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         final unrelated = _RecordingAutomaticForwardSession(
           connectionId: 2,
           hostId: 43,
-          client: _MockSshClient(),
+          client: MockSshClient(),
           config: SshConnectionConfig(
             hostname: otherHostname,
             port: 22,
@@ -6432,7 +6307,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           isAutomatic: true,
           isShellRelated: true,
         );
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         when(() => hostRepository.getById(42))
             .thenAnswer((_) async => _automaticForwardHost(enabled: true));
         final localContainer = ProviderContainer(
@@ -6472,7 +6347,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         useRecordedTunnels: true,
         tunnelChanges: changes,
       );
-      final hosts = _MockHostRepository();
+      final hosts = MockHostRepository();
       when(() => hosts.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final localContainer = ProviderContainer(
@@ -6536,7 +6411,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           useRecordedTunnels: true,
           tunnelChanges: changes,
         );
-        final hosts = _MockHostRepository();
+        final hosts = MockHostRepository();
         when(() => hosts.getById(42))
             .thenAnswer((_) async => _automaticForwardHost(enabled: true));
         final localContainer = ProviderContainer(
@@ -6579,14 +6454,14 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final primary = _RecordingAutomaticForwardSession(
         connectionId: 1,
         hostId: 42,
-        client: _MockSshClient(),
+        client: MockSshClient(),
         config: const SshConnectionConfig(
           hostname: 'dev.example.com',
           port: 22,
           username: 'tester',
         ),
       );
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: true));
       final portForwardRepository = _MockPortForwardRepository();
@@ -6645,7 +6520,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         final slowSshService = _FakeActiveSessionsSshService(
           connectGate: connectGate,
         );
-        final hostRepository = _MockHostRepository();
+        final hostRepository = MockHostRepository();
         var currentHost = _automaticForwardHost(enabled: true);
         when(() => hostRepository.getById(42))
             .thenAnswer((_) async => currentHost);
@@ -6678,7 +6553,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('serializes automatic forwarding reconfiguration per host', () async {
       final localSshService = _FakeActiveSessionsSshService();
-      final hostRepository = _MockHostRepository();
+      final hostRepository = MockHostRepository();
       when(() => hostRepository.getById(42))
           .thenAnswer((_) async => _automaticForwardHost(enabled: false));
       when(
@@ -6988,7 +6863,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         test(
           '${isLocal ? 'local' : 'reverse'} relay handles $ending',
           () async {
-            final client = _MockSshClient();
+            final client = MockSshClient();
             final forward = _SingleCloseForwardChannel();
             final session = _testSession(client);
             final channelBytes = <int>[];
@@ -7102,7 +6977,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     }
 
     test('stopping a reverse tunnel ends its accepted connections', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final forward = _SingleCloseForwardChannel();
       final session = _testSession(client);
       final remoteForward = _MockRemoteForward();
@@ -7281,7 +7156,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       'peer closes before open',
     ]) {
       test('Crashlytics local forward handles $scenario', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final forward = _SingleCloseForwardChannel();
         final opening = Completer<SSHForwardChannel>();
         final requested = Completer<void>();
@@ -7597,7 +7472,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             label: demo ? 'App Review Demo · Timestamp' : 'Timestamp',
             tags: const Value('app-review,demo'),
           );
-          final repository = _MockHostRepository();
+          final repository = MockHostRepository();
           final timestamp = Completer<bool>();
           when(() => repository.getById(host.id)).thenAnswer((_) async => host);
           when(() => repository.updateLastConnected(host.id))
@@ -7631,7 +7506,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       test(
         'bulk shutdown preserves new sessions when close fails: $failClose',
         () async {
-          final repository = _MockHostRepository();
+          final repository = MockHostRepository();
           when(() => repository.getById(any()))
               .thenAnswer((_) async => _automaticForwardHost(enabled: false));
           when(() => repository.updateLastConnected(any()))
@@ -7641,7 +7516,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             keyRepository: null,
           );
           addTearDown(service.disconnectAll);
-          final clients = List.generate(3, (_) => _MockSshClient());
+          final clients = List.generate(3, (_) => MockSshClient());
           final closing = Completer<void>();
           final started = Completer<void>();
           when(clients[0].close).thenAnswer((_) {
@@ -7695,8 +7570,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       test(
         'session close handles ${asynchronous ? 'async' : 'sync'} disconnected transport EOF',
         () async {
-          final client = _MockSshClient();
-          final dependent = _MockSshClient();
+          final client = MockSshClient();
+          final dependent = MockSshClient();
           final error = SSHStateError('Transport is closed');
           final stack = StackTrace.fromString(
             '#0 SSHTransport.sendPacket\n#1 SSHChannelController._sendEOFIfNeeded\n#2 SSHClient._closeChannels',
@@ -7725,7 +7600,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     }
 
     test('session close still reports unrelated SSH state failures', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final error = SSHStateError('Unexpected state');
       when(client.close).thenAnswer((_) => Future<void>.error(error));
       final session = SshSession(
@@ -7745,7 +7620,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       test(
         'closeAll closes every client when client $failureIndex fails',
         () async {
-          final clients = List.generate(3, (_) => _MockSshClient());
+          final clients = List.generate(3, (_) => MockSshClient());
           final failure = StateError('client close failed');
           for (final client in clients) {
             when(client.close).thenAnswer((_) async {});
@@ -8385,7 +8260,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
               keepAliveInterval,
             }) {
               identityLists.add(identities);
-              final client = _MockSshClient();
+              final client = MockSshClient();
               when(client.close).thenAnswer((_) async {});
               when(() => client.forwardLocal('destination', 22))
                   .thenAnswer((_) async => endpoint);
@@ -8455,7 +8330,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             );
           }
           final endpoint = _FakeForwardHostKeySocket(hostKey);
-          final jump = _MockSshClient();
+          final jump = MockSshClient();
           when(() => jump.authenticated).thenAnswer((_) async {});
           when(jump.close).thenAnswer((_) async {});
           when(() => jump.forwardLocal('destination', 22))
@@ -8523,7 +8398,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           _FakeHostKeySocket(hostKeyBytes),
           _FakeHostKeySocket(hostKeyBytes),
         ];
-        final client = _MockSshClient();
+        final client = MockSshClient();
         var socketIndex = 0;
         var promptCount = 0;
         var clientFactoryCalls = 0;
@@ -8607,7 +8482,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
               keepAliveInterval,
             }) {
               clientFactoryCalls++;
-              return _MockSshClient();
+              return MockSshClient();
             },
       );
 
@@ -8648,7 +8523,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         resetFirstSeen: true,
       );
       final sockets = [_FakeHostKeySocket(hostKeyBytes)];
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var socketIndex = 0;
       var promptCount = 0;
       var clientFactoryCalls = 0;
@@ -9760,7 +9635,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
       final progress = <String>[];
       final jumpSockets = <_FakeHostKeySocket>[];
-      final clients = <_MockSshClient>[];
+      final clients = <MockSshClient>[];
       final service = SshService(
         knownHostsRepository: knownHostsRepository,
         interactiveAuthPromptHandler: (_) async => ['typed-secret'],
@@ -9783,7 +9658,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
               // The jump host's first sign-in stalls after the password, its
               // second succeeds, and the destination then signs in unasked.
               final index = clients.length;
-              final client = _MockSshClient();
+              final client = MockSshClient();
               clients.add(client);
               when(client.close).thenAnswer((_) async {});
               when(() => client.isClosed).thenReturn(false);
@@ -9865,8 +9740,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         _FakeHostKeySocket(changedHostKeyBytes),
         _FakeHostKeySocket(changedHostKeyBytes),
       ];
-      final firstClient = _MockSshClient();
-      final retryClient = _MockSshClient();
+      final firstClient = MockSshClient();
+      final retryClient = MockSshClient();
       var socketIndex = 0;
       var clientIndex = 0;
       var promptCount = 0;
@@ -9955,7 +9830,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           resetFirstSeen: true,
         );
         final socket = _FakeHostKeySocket(changedHostKeyBytes);
-        final client = _MockSshClient();
+        final client = MockSshClient();
         var socketCount = 0;
         var clientFactoryCalls = 0;
         var promptCount = 0;
@@ -10032,7 +9907,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         _FakeHostKeySocket(probeHostKeyBytes),
         _FakeHostKeySocket(changedHostKeyBytes),
       ];
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var socketIndex = 0;
 
       when(client.close).thenAnswer((_) async {});
@@ -10144,8 +10019,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final targetSocket = _FakeForwardHostKeySocket(
         _ed25519HostKeyBlob([4, 5, 6]),
       );
-      final jumpClient = _MockSshClient();
-      final targetClient = _MockSshClient();
+      final jumpClient = MockSshClient();
+      final targetClient = MockSshClient();
       var clientIndex = 0;
 
       when(() => jumpClient.forwardLocal('target.example.com', 22))
@@ -10252,8 +10127,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       final jumpSocket = _FakeHostKeySocket(jumpHostKeyBytes);
       final targetSocket = _FakeForwardHostKeySocket(targetHostKeyBytes);
-      final jumpClient = _MockSshClient();
-      final targetClient = _MockSshClient();
+      final jumpClient = MockSshClient();
+      final targetClient = MockSshClient();
       var socketConnectCount = 0;
       var forwardCount = 0;
       var clientIndex = 0;
@@ -10331,7 +10206,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         addTearDown(db.close);
         final knownHostsRepository = KnownHostsRepository(db);
         final socket = _FakeHostKeySocket(_ed25519HostKeyBlob([7, 8, 9]));
-        final client = _MockSshClient();
+        final client = MockSshClient();
 
         when(client.close).thenAnswer((_) async {});
 
@@ -10405,8 +10280,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           _FakeHostKeySocket(changedHostKeyBytes),
           _FakeHostKeySocket(changedHostKeyBytes),
         ];
-        final firstClient = _MockSshClient();
-        final retryClient = _MockSshClient();
+        final firstClient = MockSshClient();
+        final retryClient = MockSshClient();
         var socketIndex = 0;
         var clientIndex = 0;
 
@@ -10993,7 +10868,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
               keepAliveInterval,
             }) {
               clientFactoryCalls++;
-              return _MockSshClient();
+              return MockSshClient();
             },
       );
 
@@ -11063,7 +10938,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         hostname: 'slow-auth.example.com',
         hostKeyBytes: hostKeyBytes,
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final authenticationStarted = Completer<void>();
       when(() => client.authenticated).thenAnswer((_) {
         if (!authenticationStarted.isCompleted) {
@@ -11178,6 +11053,442 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(service.sessions, isEmpty);
     });
   });
+
+  group('SshSession SFTP client lifecycle', () {
+    late MockSshClient client;
+    late SshSession session;
+    late MockSftpClient oldClient;
+    late MockSftpClient replacement;
+
+    setUp(() {
+      client = MockSshClient();
+      oldClient = MockSftpClient();
+      replacement = MockSftpClient();
+      when(client.close).thenAnswer((_) async {});
+      when(oldClient.close).thenAnswer((_) async {});
+      when(replacement.close).thenAnswer((_) async {});
+      session = SshSession(
+        connectionId: 91,
+        hostId: 2,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.com',
+          port: 22,
+          username: 'tester',
+        ),
+      );
+    });
+
+    tearDown(() => session.close());
+
+    test('concurrent SFTP opens share one client and cache it', () async {
+      final open = Completer<SftpClient>();
+      when(client.sftp).thenAnswer((_) => open.future);
+
+      final first = session.sftp();
+      final second = session.sftp();
+      expect(second, same(first));
+      open.complete(oldClient);
+
+      expect(await first, same(oldClient));
+      expect(await second, same(oldClient));
+      expect(await session.sftp(), same(oldClient));
+      verify(client.sftp).called(1);
+      verifyNever(oldClient.close);
+
+      session.discardSftpClient(await first);
+
+      verify(oldClient.close).called(1);
+    });
+
+    for (final oldCompletesFirst in [true, false]) {
+      test(
+        'invalidated SFTP open rejects all waiters and preserves replacement '
+        'when old completes ${oldCompletesFirst ? 'first' : 'last'}',
+        () async {
+          final oldOpen = Completer<SftpClient>();
+          final newOpen = Completer<SftpClient>();
+          var opens = 0;
+          when(
+            client.sftp,
+          ).thenAnswer((_) => opens++ == 0 ? oldOpen.future : newOpen.future);
+          final oldFuture = session.sftp();
+          final first = expectLater(oldFuture, throwsA(isA<SSHStateError>()));
+          final second = expectLater(
+            session.sftp(),
+            throwsA(isA<SSHStateError>()),
+          );
+
+          session.discardSftpOpen(oldFuture);
+          final next = session.sftp();
+          if (oldCompletesFirst) {
+            oldOpen.complete(oldClient);
+            await Future.wait([first, second]);
+            newOpen.complete(replacement);
+          } else {
+            newOpen.complete(replacement);
+            expect(await next, same(replacement));
+            oldOpen.complete(oldClient);
+            await Future.wait([first, second]);
+          }
+
+          expect(await next, same(replacement));
+          expect(await session.sftp(), same(replacement));
+          verify(oldClient.close).called(1);
+          verifyNever(replacement.close);
+          verify(client.sftp).called(2);
+        },
+      );
+    }
+
+    test('null SFTP cleanup preserves pending and cached clients', () async {
+      final open = Completer<SftpClient>();
+      when(client.sftp).thenAnswer((_) => open.future);
+      final pending = session.sftp();
+
+      session.discardSftpClient(null);
+      expect(session.sftp(), same(pending));
+      open.complete(replacement);
+      expect(await pending, same(replacement));
+
+      session.discardSftpClient(null);
+      expect(await session.sftp(), same(replacement));
+      verifyNever(replacement.close);
+      verify(client.sftp).called(1);
+    });
+
+    test('discarding a completed SFTP open releases its client', () async {
+      when(client.sftp).thenAnswer((_) async => oldClient);
+      final open = session.sftp();
+      await open;
+
+      session.discardSftpOpen(open);
+      await pumpEventQueue();
+
+      verify(oldClient.close).called(1);
+      when(client.sftp).thenAnswer((_) async => replacement);
+      expect(await session.sftp(), same(replacement));
+    });
+
+    test('shutdown closes the cached SFTP client', () async {
+      when(client.sftp).thenAnswer((_) async => oldClient);
+      await session.sftp();
+
+      await session.close();
+
+      verify(oldClient.close).called(1);
+    });
+
+    test('stale SFTP discard closes only the supplied client', () async {
+      when(client.sftp).thenAnswer((_) async => replacement);
+      await session.sftp();
+
+      session.discardSftpClient(oldClient);
+
+      verify(oldClient.close).called(1);
+      verifyNever(replacement.close);
+      expect(await session.sftp(), same(replacement));
+      verify(client.sftp).called(1);
+    });
+
+    for (final standalone in [false, true]) {
+      test('closes late ${standalone ? 'standalone' : 'shared'} SFTP client '
+          'after session shutdown', () async {
+        final open = Completer<SftpClient>();
+        when(client.sftp).thenAnswer((_) => open.future);
+        final result = expectLater(
+          standalone ? session.openStandaloneSftp() : session.sftp(),
+          throwsA(isA<SSHStateError>()),
+        );
+
+        await session.close();
+        open.complete(oldClient);
+        await result;
+
+        verify(oldClient.close).called(1);
+      });
+    }
+
+    test('rejects shared and standalone SFTP opens after shutdown', () async {
+      when(client.sftp).thenAnswer((_) async => oldClient);
+      await session.close();
+
+      await expectLater(session.sftp(), throwsA(isA<SSHStateError>()));
+      await expectLater(
+        session.openStandaloneSftp(),
+        throwsA(isA<SSHStateError>()),
+      );
+
+      verifyNever(client.sftp);
+    });
+
+    test(
+      'does not retry SFTP negotiation after shutdown during backoff',
+      () async {
+        var opens = 0;
+        when(client.sftp).thenAnswer((_) {
+          if (opens++ == 0) {
+            return Future<SftpClient>.error(
+              SSHChannelOpenError(2, 'open failed'),
+            );
+          }
+          return Future.value(oldClient);
+        });
+        final result = expectLater(
+          session.sftp(),
+          throwsA(isA<SSHStateError>()),
+        );
+        await pumpEventQueue();
+
+        await session.close();
+        await result;
+
+        verify(client.sftp).called(1);
+      },
+    );
+  });
+
+  group('connectToHost agent forwarding', () {
+    late AppDatabase db;
+
+    SshAgentForwarding forwarding(int hostId) => SshAgentForwarding(
+      hostId: hostId,
+      hostLabel: 'destination',
+      loadPolicy: () async => SshAgentForwardingPolicy.off,
+      diagnostics: RecordingDiagnosticsLogger(),
+    );
+
+    setUp(() {
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+    });
+
+    tearDown(() => db.close());
+
+    test(
+      'connectToHost resolves forwarding for the destination only',
+      () async {
+        final encryption = SecretEncryptionService.forTesting();
+        final hostRepository = HostRepository(db, encryption);
+        final jumpId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'bastion',
+            hostname: 'jump.example.com',
+            username: 'dev',
+            password: const Value('jump-secret'),
+          ),
+        );
+        final hostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'build box',
+            hostname: 'build.example.com',
+            username: 'dev',
+            password: const Value('secret'),
+            jumpHostId: Value(jumpId),
+          ),
+        );
+        final resolvedHosts = <int>[];
+        final hostForwarding = forwarding(hostId);
+        final service = _CapturingSshService(
+          hostRepository: hostRepository,
+          keyRepository: KeyRepository(db, encryption),
+          agentForwardingResolver: (host) async {
+            resolvedHosts.add(host.id);
+            return hostForwarding;
+          },
+        );
+
+        await service.connectToHost(hostId);
+
+        expect(resolvedHosts, [hostId]);
+        expect(service.capturedConfig?.agentForwarding, same(hostForwarding));
+        expect(service.capturedConfig?.jumpHost, isNotNull);
+        expect(service.capturedConfig?.jumpHost?.agentForwarding, isNull);
+      },
+    );
+
+    test(
+      'connectToHost leaves forwarding off when the resolver says so',
+      () async {
+        final encryption = SecretEncryptionService.forTesting();
+        final hostRepository = HostRepository(db, encryption);
+        final hostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'build box',
+            hostname: 'build.example.com',
+            username: 'dev',
+            password: const Value('secret'),
+          ),
+        );
+        final service = _CapturingSshService(
+          hostRepository: hostRepository,
+          keyRepository: KeyRepository(db, encryption),
+          agentForwardingResolver: (_) async => null,
+        );
+
+        await service.connectToHost(hostId);
+
+        expect(service.capturedConfig, isNotNull);
+        expect(service.capturedConfig?.agentForwarding, isNull);
+      },
+    );
+
+    test('a cancel lands while forwarding waits on the Pro check', () async {
+      final encryption = SecretEncryptionService.forTesting();
+      final hostRepository = HostRepository(db, encryption);
+      final hostId = await hostRepository.insert(
+        HostsCompanion.insert(
+          label: 'build box',
+          hostname: 'build.example.com',
+          username: 'dev',
+          password: const Value('secret'),
+        ),
+      );
+      final service = _CapturingSshService(
+        hostRepository: hostRepository,
+        keyRepository: KeyRepository(db, encryption),
+        agentForwardingResolver: (_) => Completer<SshAgentForwarding?>().future,
+      );
+      final token = SshConnectionCancellationToken();
+
+      final result = service.connectToHost(hostId, cancellationToken: token);
+      await pumpEventQueue();
+      token.cancel();
+
+      expect((await result).cancelled, isTrue);
+      expect(service.capturedConfig, isNull);
+    });
+
+    test(
+      'connect builds the destination client with the agent handler',
+      () async {
+        final knownHosts = KnownHostsRepository(db);
+        final hostKey = _ed25519HostKeyBlob([1, 2, 3]);
+        for (final hostname in ['destination', 'jump']) {
+          await _seedTrustedHost(
+            knownHosts,
+            hostname: hostname,
+            hostKeyBytes: hostKey,
+          );
+        }
+        final endpoint = _FakeForwardHostKeySocket(hostKey);
+        final plainClients = <String>[];
+        SSHAgentHandler? servedHandler;
+        MockSshClient? destinationClient;
+
+        MockSshClient fakeClient(
+          SSHSocket socket,
+          SSHHostkeyVerifyHandler? onVerifyHostKey,
+        ) {
+          final client = MockSshClient();
+          when(client.close).thenAnswer((_) async {});
+          when(() => client.done).thenAnswer((_) => Completer<void>().future);
+          when(() => client.forwardLocal('destination', 22))
+              .thenAnswer((_) async => endpoint);
+          when(() => client.authenticated).thenAnswer((_) async {
+            final bytes = await (socket as HostKeySource).hostKeyBytes;
+            await onVerifyHostKey!(
+              'ssh-ed25519',
+              _hostKeyCallbackFingerprint(bytes),
+            );
+          });
+          return client;
+        }
+
+        final service = SshService(
+          knownHostsRepository: knownHosts,
+          socketConnector: (host, port, {timeout}) async =>
+              _FakeHostKeySocket(hostKey),
+          clientFactory:
+              (
+                socket, {
+                required username,
+                onVerifyHostKey,
+                onPasswordRequest,
+                onUserInfoRequest,
+                identities,
+                keepAliveInterval,
+              }) {
+                plainClients.add(username);
+                return fakeClient(socket, onVerifyHostKey);
+              },
+          agentForwardingClientFactory:
+              (
+                socket, {
+                required username,
+                required agentHandler,
+                onVerifyHostKey,
+                onPasswordRequest,
+                onUserInfoRequest,
+                identities,
+                keepAliveInterval,
+              }) {
+                servedHandler = agentHandler;
+                return destinationClient = fakeClient(socket, onVerifyHostKey);
+              },
+        );
+        final hostForwarding = forwarding(1);
+
+        final result = await service.connect(
+          SshConnectionConfig(
+            hostname: 'destination',
+            port: 22,
+            username: 'dest-user',
+            password: 'secret',
+            agentForwarding: hostForwarding,
+            jumpHost: const SshConnectionConfig(
+              hostname: 'jump',
+              port: 22,
+              username: 'jump-user',
+              password: 'secret',
+            ),
+          ),
+        );
+
+        expect(result.success, isTrue);
+        expect(plainClients, ['jump-user']);
+        expect(servedHandler, same(hostForwarding));
+        expect(result.client, same(destinationClient));
+        // Attached, so pending prompts end when this client closes.
+        verify(() => destinationClient!.done).called(1);
+        await result.closeAll();
+      },
+    );
+  });
+}
+
+Future<Uint8List> _captureHostKeyFromHandshakeChunks(
+  Iterable<Uint8List> chunks,
+) {
+  final capturingSocket = HostKeyCapturingSshSocket(
+    _FiniteChunkSshSocket(chunks),
+  );
+  unawaited(capturingSocket.stream.drain<void>());
+  return capturingSocket.hostKeyBytes;
+}
+
+class _FiniteChunkSshSocket implements SSHSocket {
+  _FiniteChunkSshSocket(Iterable<Uint8List> chunks)
+    : stream = Stream<Uint8List>.fromIterable(chunks);
+
+  @override
+  final Stream<Uint8List> stream;
+
+  final _sinkController = StreamController<List<int>>();
+
+  @override
+  StreamSink<List<int>> get sink => _sinkController.sink;
+
+  @override
+  Future<void> close() => _sinkController.close();
+
+  @override
+  Future<void> flush() async {}
+
+  @override
+  Future<void> get done async {}
+
+  @override
+  void destroy() {}
 }
 
 Uint8List _ed25519HostKeyBlob(List<int> keyData) {

@@ -48,7 +48,6 @@ import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
 import 'acp_auth_method_sheet.dart';
-import 'acp_concurrency_choice.dart';
 import 'acp_connection_support.dart';
 import 'acp_custom_agent_launch.dart';
 import 'acp_session_presentation.dart';
@@ -719,6 +718,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       if (!mounted || worktreeDirectory == null) return null;
       launchCwd = worktreeDirectory;
     }
+    final providerLabelOverride = formatAcpProfileProviderLabel(
+      builtinProvider?.label,
+      selectedProfile,
+    );
     if (recent != null) {
       return manager.reconnectSession(
         hostId: recent.hostId,
@@ -729,9 +732,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         confirmInstall: _confirmInstall,
         chooseAuthentication: _chooseAuthentication,
         launchCommandOverride: launchCommandOverride,
-        providerLabelOverride: selectedProfile?.showInTitle ?? false
-            ? '${builtinProvider?.label ?? 'Agent'} · ${selectedProfile!.label}'
-            : null,
+        providerLabelOverride: providerLabelOverride,
         autoApprovePermissions: launchPreferences.startInYoloMode,
         replace: replace,
         workspace: _workspace.options,
@@ -744,9 +745,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       confirmInstall: _confirmInstall,
       chooseAuthentication: _chooseAuthentication,
       launchCommandOverride: launchCommandOverride,
-      providerLabelOverride: selectedProfile?.showInTitle ?? false
-          ? '${builtinProvider?.label ?? 'Agent'} · ${selectedProfile!.label}'
-          : null,
+      providerLabelOverride: providerLabelOverride,
       autoApprovePermissions: launchPreferences.startInYoloMode,
       replace: replace,
       workspace: _workspace.options,
@@ -833,26 +832,14 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     }
 
     try {
-      var result = await launchAndSettle(reuseResolvedLaunch: afterSignIn);
-      // Resolve a free-tier concurrency block, then retry once.
-      if (result is AcpSessionLaunchBlocked && mounted) {
-        final resolved = await resolveAcpConcurrencyBlock(
-          context,
-          ref,
-          result.decision,
-          relaunch: (replace) => launchAndSettle(replace: replace),
-        );
-        // Null also covers the sheet being dismissed while the choice dialog
-        // or upgrade route was open, so re-check mounted before touching state.
-        if (!mounted) {
-          return;
-        }
-        if (resolved == null) {
-          setState(() => _busy = false);
-          return;
-        }
-        result = resolved;
-      }
+      final result = await runAcpLaunchWithConcurrencyResolution(
+        context,
+        ref,
+        launch: (replace) => launchAndSettle(
+          replace: replace,
+          reuseResolvedLaunch: replace.isEmpty && afterSignIn,
+        ),
+      );
       if (!mounted) {
         return;
       }

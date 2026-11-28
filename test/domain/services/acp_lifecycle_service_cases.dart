@@ -1,7 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,19 +10,14 @@ import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/host_notifications.dart';
-import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
-import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_client.dart';
-import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_lifecycle_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
-import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
-import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
+import '../../helpers/acp_test_fakes.dart';
 import '../../support/fake_acp_session_manager.dart';
 
 class _RecordingAcpNotificationService extends LocalNotificationService {
@@ -56,207 +50,18 @@ class _RecordingAcpNotificationService extends LocalNotificationService {
   }
 }
 
-/// A minimal fake ACP agent transport: enough to open sessions, push
-/// permission requests, and complete prompt turns.
-class _FakeAcpServer implements AcpTransport {
-  _FakeAcpServer() : failInitialize = false;
+FakeAcpBridgeConnector _createLifecycleConnector() => FakeAcpBridgeConnector(
+  transportFactory: (_, _, _, {required takeOver}) => FakeAcpTransport(
+    sync: false,
+    autoReplyPrompt: true,
+    agentCapabilities: const <String, Object?>{
+      'loadSession': false,
+      'sessionCapabilities': <String, Object?>{'resume': <String, Object?>{}},
+    },
+  ),
+);
 
-  /// When true, `initialize` fails so a reconnect can be forced to fail.
-  bool failInitialize;
-
-  final _incoming = StreamController<List<int>>();
-  int _sessionCounter = 0;
-  int _serverRequestId = 0;
-  bool closed = false;
-
-  @override
-  Stream<List<int>> get incoming => _incoming.stream;
-
-  @override
-  Future<void> write(List<int> bytes) async {
-    final decoded = jsonDecode(utf8.decode(bytes).trim());
-    final message = (decoded! as Map).cast<String, Object?>();
-    final method = message['method'];
-    final id = message['id'];
-    if (id == null) return;
-
-    switch (method) {
-      case 'initialize':
-        if (failInitialize) {
-          _replyError(id, -32602, 'Invalid params');
-          break;
-        }
-        _reply(id, {
-          'protocolVersion': 1,
-          'agentCapabilities': {
-            'loadSession': false,
-            'sessionCapabilities': {'resume': <String, Object?>{}},
-          },
-        });
-      case 'session/new':
-        _reply(id, {'sessionId': 'session-${++_sessionCounter}'});
-      case 'session/resume':
-        _reply(id, <String, Object?>{});
-      case 'session/prompt':
-        _reply(id, {'stopReason': 'end_turn'});
-      default:
-        _reply(id, <String, Object?>{});
-    }
-  }
-
-  /// Pushes a `session/request_permission` server request.
-  void requestPermission(String sessionId) {
-    _push({
-      'jsonrpc': '2.0',
-      'id': 'srv-${++_serverRequestId}',
-      'method': 'session/request_permission',
-      'params': {
-        'sessionId': sessionId,
-        'toolCall': {'toolCallId': 't1', 'title': 'Write file'},
-        'options': [
-          {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
-        ],
-      },
-    });
-  }
-
-  void _reply(Object? id, Object? result) =>
-      _push({'jsonrpc': '2.0', 'id': id, 'result': result});
-
-  void _replyError(Object? id, int code, String message) => _push({
-    'jsonrpc': '2.0',
-    'id': id,
-    'error': {'code': code, 'message': message},
-  });
-
-  void _push(Map<String, Object?> message) {
-    if (closed) return;
-    _incoming.add(utf8.encode('${jsonEncode(message)}\n'));
-  }
-
-  @override
-  Future<void> close() async {
-    if (closed) return;
-    closed = true;
-    await _incoming.close();
-  }
-}
-
-class _FakeConnector implements AcpBridgeConnector {
-  _FakeConnector() : serverFactory = null;
-
-  final _FakeAcpServer Function(int hostId, String bridgeId)? serverFactory;
-  final Map<String, _FakeAcpServer> servers = <String, _FakeAcpServer>{};
-  final List<String> stoppedBridges = <String>[];
-  final Set<String> availableBridges = <String>{};
-  int _bridgeCounter = 0;
-
-  @override
-  Future<MonkeyMuxAcpBridgeStartResult> startBridge({
-    required int hostId,
-    required String providerId,
-    required String providerLabel,
-    required List<String> launchArgv,
-    required String cwd,
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async {
-    final bridgeId = 'bridge-${++_bridgeCounter}';
-    availableBridges.add(bridgeId);
-    return MonkeyMuxAcpBridgeStartResult(bridgeId: bridgeId);
-  }
-
-  @override
-  Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
-    int hostId, {
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => [
-    for (final bridgeId in availableBridges)
-      MonkeyMuxAcpBridgeMetadata(
-        id: bridgeId,
-        provider: 'Copilot CLI',
-        commandHash: 'hash',
-        state: MonkeyMuxAcpProviderState.running,
-        clientCount: 0,
-        pendingRequestCount: 0,
-        inFlightTurnCount: 0,
-        lastActivity: DateTime.now(),
-        startedAt: DateTime.now(),
-        nextSequence: 1,
-      ),
-  ];
-
-  @override
-  Future<String> resolveWorkingDirectory(
-    int hostId,
-    String cwd, {
-    bool trustAbsolute = false,
-  }) async => cwd;
-
-  @override
-  Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
-    int hostId,
-    String bridgeId,
-  ) async => MonkeyMuxAcpBridgeMetadata(
-    id: bridgeId,
-    provider: 'Copilot CLI',
-    commandHash: 'hash',
-    state: MonkeyMuxAcpProviderState.running,
-    clientCount: 0,
-    pendingRequestCount: 0,
-    inFlightTurnCount: 0,
-    lastActivity: DateTime.now(),
-    startedAt: DateTime.now(),
-    nextSequence: 1,
-  );
-
-  @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {
-    stoppedBridges.add(bridgeId);
-    availableBridges.remove(bridgeId);
-  }
-
-  @override
-  AcpBridgeSession connect({
-    required int hostId,
-    required String bridgeId,
-    required String providerId,
-    int lastAcknowledgedSequence = 0,
-    bool takeOver = false,
-  }) {
-    final server = serverFactory?.call(hostId, bridgeId) ?? _FakeAcpServer();
-    servers[bridgeId] = server;
-    final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();
-    final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
-    final connection = AcpJsonRpcConnection(transport: server);
-    final client = AcpClient(connection);
-    return AcpBridgeSession(
-      client: client,
-      transportStates: states.stream,
-      transportErrors: errors.stream,
-      onClose: () async {
-        // Lets a test pause a detach in flight (for example to race a
-        // foreground resume against it) by holding the close open until the
-        // test explicitly completes the gate.
-        final gate = closeGates[bridgeId];
-        if (gate != null) await gate.future;
-        await client.close();
-        await states.close();
-        await errors.close();
-      },
-    );
-  }
-
-  /// Completers that gate [AcpBridgeSession.close] for a given bridge id,
-  /// used only to deterministically reproduce detach-vs-foreground races.
-  final Map<String, Completer<void>> closeGates = <String, Completer<void>>{};
-
-  @override
-  Future<AcpHostCapabilityBinding?> resolveCapabilityBinding(
-    int hostId,
-  ) async => null;
-}
-
-Future<void> _pump() => Future<void>.delayed(const Duration(milliseconds: 20));
+Future<void> _pump() => pumpAcpEventLoop();
 
 /// Registers tests from acp_lifecycle_service_test.dart.
 void registerDomainServicesAcpLifecycleServiceTests() {
@@ -264,7 +69,7 @@ void registerDomainServicesAcpLifecycleServiceTests() {
     late AppDatabase database;
     late SettingsService settings;
     late AcpRecentSessionsService recentSessions;
-    late _FakeConnector connector;
+    late FakeAcpBridgeConnector connector;
     late AcpSessionManager manager;
     late LocalNotificationService notificationService;
     late Set<int> connectedHostIds;
@@ -283,7 +88,7 @@ void registerDomainServicesAcpLifecycleServiceTests() {
       database = AppDatabase.forTesting(NativeDatabase.memory());
       settings = SettingsService(database);
       recentSessions = AcpRecentSessionsService(settings);
-      connector = _FakeConnector();
+      connector = _createLifecycleConnector();
       connectedHostIds = <int>{1, 2};
       manager = AcpSessionManager(
         connector: connector,
@@ -339,7 +144,7 @@ void registerDomainServicesAcpLifecycleServiceTests() {
         // remains live and exercises background update delivery.
         connectedHostIds.remove(1);
 
-        connector.servers.values.single.requestPermission(key.acpSessionId);
+        connector.transports.values.single.requestPermission(key.acpSessionId);
         await _pump();
 
         expect(
@@ -685,7 +490,7 @@ void registerDomainServicesAcpLifecycleServiceTests() {
         final taps = <AcpNotificationPayload>[];
         notificationService.acpNotificationTaps.listen(taps.add);
 
-        connector.servers.values.single.requestPermission(
+        connector.transports.values.single.requestPermission(
           manager.state.byKeyValue(key.value)!.key.acpSessionId,
         );
         await _pump();
@@ -704,7 +509,7 @@ void registerDomainServicesAcpLifecycleServiceTests() {
           await lifecycle.handleBackground();
           connectedHostIds.remove(1);
 
-          connector.servers.values.single.requestPermission(
+          connector.transports.values.single.requestPermission(
             manager.state.byKeyValue(key.value)!.key.acpSessionId,
           );
           await _pump();

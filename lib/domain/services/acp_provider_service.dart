@@ -7,6 +7,7 @@ import '../models/acp_authentication.dart';
 import '../models/acp_provider.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'monkeymux_acp_bridge_service.dart';
+import 'serial_task_queue.dart';
 import 'settings_json_list.dart';
 import 'settings_service.dart';
 
@@ -67,7 +68,7 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
 
   final SettingsService _settings;
   final DateTime Function() _clock;
-  final _mutations = SerializedMutations();
+  final _mutations = SerialTaskQueue();
 
   /// Loads every stored definition in display order. Unreadable entries are
   /// skipped.

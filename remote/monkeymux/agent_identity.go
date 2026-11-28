@@ -322,14 +322,3 @@ func agentIdentityHookCommand(args []string) {
 	}
 	writeAgentIdentityMarker(encodeAgentIdentityMarker(identity))
 }
-
-// Always return a fresh slice; callers may share their inherited environment.
-func withPaneTTYEnvironment(env []string, path string) []string {
-	result := make([]string, 0, len(env)+1)
-	for _, value := range env {
-		if !strings.HasPrefix(value, "MONKEYMUX_PANE_TTY=") {
-			result = append(result, value)
-		}
-	}
-	return append(result, "MONKEYMUX_PANE_TTY="+path)
-}

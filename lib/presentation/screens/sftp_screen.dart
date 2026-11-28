@@ -1948,7 +1948,13 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   Future<void> _showCreateDirectoryDialog() async {
     final name = await showDialog<String>(
       context: context,
-      builder: (context) => _CreateDirectoryDialog(currentPath: _currentPath),
+      builder: (context) => _SftpNameDialog(
+        title: 'Create Folder',
+        labelText: 'Folder name',
+        confirmLabel: 'Create',
+        helperText: 'Created inside $_currentPath',
+        validator: validateSftpDirectoryName,
+      ),
     );
 
     if (name == null || _sftp == null) {
@@ -1987,7 +1993,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   Future<void> _showRenameDialog(SftpName file) async {
     final newName = await showDialog<String>(
       context: context,
-      builder: (context) => _RenameDialog(initialName: file.filename),
+      builder: (context) => _SftpNameDialog(
+        title: 'Rename',
+        labelText: 'New name',
+        confirmLabel: 'Rename',
+        initialValue: file.filename,
+      ),
     );
 
     if (newName != null && newName.isNotEmpty && _sftp != null) {
@@ -2878,80 +2889,30 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 }
 
-class _CreateDirectoryDialog extends StatefulWidget {
-  const _CreateDirectoryDialog({required this.currentPath});
+class _SftpNameDialog extends StatefulWidget {
+  const _SftpNameDialog({
+    required this.title,
+    required this.labelText,
+    required this.confirmLabel,
+    this.initialValue = '',
+    this.helperText,
+    this.validator,
+  });
 
-  final String currentPath;
+  final String title;
+  final String labelText;
+  final String confirmLabel;
+  final String initialValue;
+  final String? helperText;
+  final String? Function(String value)? validator;
 
   @override
-  State<_CreateDirectoryDialog> createState() => _CreateDirectoryDialogState();
+  State<_SftpNameDialog> createState() => _SftpNameDialogState();
 }
 
-class _CreateDirectoryDialogState extends State<_CreateDirectoryDialog> {
-  late final TextEditingController _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) =>
-      ValueListenableBuilder<TextEditingValue>(
-        valueListenable: _controller,
-        builder: (context, value, _) {
-          final validationMessage = validateSftpDirectoryName(value.text);
-          final canCreate = validationMessage == null;
-
-          return AlertDialog(
-            title: const Text('Create Folder'),
-            content: TextField(
-              controller: _controller,
-              autofocus: true,
-              textInputAction: TextInputAction.done,
-              decoration: InputDecoration(
-                labelText: 'Folder name',
-                helperText: 'Created inside ${widget.currentPath}',
-                errorText: value.text.isEmpty ? null : validationMessage,
-              ),
-              onSubmitted: canCreate ? _submit : null,
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: canCreate ? () => _submit(value.text) : null,
-                child: const Text('Create'),
-              ),
-            ],
-          );
-        },
-      );
-
-  void _submit(String value) {
-    final trimmed = value.trim();
-    if (validateSftpDirectoryName(trimmed) != null) {
-      return;
-    }
-    Navigator.pop(context, trimmed);
-  }
-}
-
-class _RenameDialog extends StatefulWidget {
-  const _RenameDialog({required this.initialName});
-
-  final String initialName;
-
-  @override
-  State<_RenameDialog> createState() => _RenameDialogState();
-}
-
-class _RenameDialogState extends State<_RenameDialog> {
+class _SftpNameDialogState extends State<_SftpNameDialog> {
   late final TextEditingController _controller = TextEditingController(
-    text: widget.initialName,
+    text: widget.initialValue,
   );
 
   @override
@@ -2961,14 +2922,40 @@ class _RenameDialogState extends State<_RenameDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Rename'),
+  Widget build(BuildContext context) {
+    final validator = widget.validator;
+    if (validator == null) {
+      return _buildDialog(context, errorText: null, canSubmit: true);
+    }
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _controller,
+      builder: (context, value, _) {
+        final validationMessage = validator(value.text);
+        return _buildDialog(
+          context,
+          errorText: value.text.isEmpty ? null : validationMessage,
+          canSubmit: validationMessage == null,
+        );
+      },
+    );
+  }
+
+  Widget _buildDialog(
+    BuildContext context, {
+    required String? errorText,
+    required bool canSubmit,
+  }) => AlertDialog(
+    title: Text(widget.title),
     content: TextField(
       controller: _controller,
       autofocus: true,
-      decoration: const InputDecoration(labelText: 'New name'),
       textInputAction: TextInputAction.done,
-      onSubmitted: _submit,
+      decoration: InputDecoration(
+        labelText: widget.labelText,
+        helperText: widget.helperText,
+        errorText: errorText,
+      ),
+      onSubmitted: canSubmit ? _submit : null,
     ),
     actions: [
       TextButton(
@@ -2976,15 +2963,20 @@ class _RenameDialogState extends State<_RenameDialog> {
         child: const Text('Cancel'),
       ),
       FilledButton(
-        onPressed: () => _submit(_controller.text),
-        child: const Text('Rename'),
+        onPressed: canSubmit ? () => _submit(_controller.text) : null,
+        child: Text(widget.confirmLabel),
       ),
     ],
   );
 
   void _submit(String value) {
     final trimmed = value.trim();
-    if (trimmed.isEmpty) {
+    final validator = widget.validator;
+    if (validator != null) {
+      if (validator(trimmed) != null) {
+        return;
+      }
+    } else if (trimmed.isEmpty) {
       return;
     }
     Navigator.pop(context, trimmed);

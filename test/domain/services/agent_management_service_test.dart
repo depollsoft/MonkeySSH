@@ -20,13 +20,11 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/windows_remote_powershell.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 class _MockExecSession extends Mock implements SSHSession {}
-
-class _MockChannel extends Mock implements SSHChannel {}
 
 class _MockDiscovery extends Mock implements AgentSessionDiscoveryService {}
 
@@ -41,7 +39,7 @@ AgentManagementService _unlockedManagementService(
 
 SSHSession _execOutput(String output, {int exitCode = 0}) {
   final exec = _MockExecSession();
-  when(() => exec.channel).thenReturn(_MockChannel());
+  when(() => exec.channel).thenReturn(MockUnderlyingSshChannel());
   when(() => exec.stdout).thenAnswer(
     (_) => Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(output))),
   );
@@ -53,7 +51,7 @@ SSHSession _execOutput(String output, {int exitCode = 0}) {
 }
 
 SshSession _remoteSession(
-  _MockSshClient client, {
+  MockSshClient client, {
   int connectionId = 77,
   int hostId = 3,
 }) => SshSession(
@@ -106,7 +104,7 @@ void main() {
     test(
       'cachedState returns the last probe with its session quotas',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((call) async {
               final command = call.positionalArguments.first as String;
@@ -138,7 +136,7 @@ void main() {
     for (final action in ['inspect', 'refreshAll', 'install']) {
       test('missing CLI becomes readable immediately after $action', () async {
         var installed = false;
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((call) async {
               final command = call.positionalArguments.first as String;
@@ -182,7 +180,7 @@ void main() {
     }
 
     test('a late path probe cannot overwrite an explicit recheck', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final stale = Completer<SSHSession>();
       var probes = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -216,7 +214,7 @@ void main() {
     test(
       'a failed path probe is not cached as a missing installation',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         var probes = 0;
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((call) async {
@@ -250,7 +248,7 @@ void main() {
     test(
       'a queued path lookup is skipped after the ring is cancelled',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _remoteSession(client, connectionId: 882);
         final release = Completer<void>();
         final blockers = [
@@ -278,7 +276,7 @@ void main() {
     test(
       'already-dispatched cancelled reads still retain provider cooldowns',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final response = Completer<SSHSession>();
         var quotaReads = 0;
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -321,7 +319,7 @@ void main() {
     test(
       'ring cancelled behind another tool never starts a new quota probe',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final blocked = Completer<SSHSession>();
         var quotaReads = 0;
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -374,7 +372,7 @@ void main() {
       test(
         'SSH queue cancellation retains live consumer=$liveConsumer',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           var quotaReads = 0;
           when(() => client.execute(any(), pty: any(named: 'pty')))
               .thenAnswer((call) async {
@@ -433,7 +431,7 @@ void main() {
   test('a partial non-throttle failure does not reset the previous backoff attempt', () async {
     var now = DateTime.utc(2026, 9, 12, 12);
     var partialFailure = false;
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
       (_) async => _execOutput(
         '__monkeyssh_usage__={"id":"pi","status":"available","windows":[{"label":"Weekly","usedPercent":25}],'
@@ -470,7 +468,7 @@ void main() {
   });
 
   test('active usage reader checks one CLI without upstream metadata and reuses its path', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final commands = <String>[];
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((call) async {
@@ -495,7 +493,7 @@ void main() {
     expect(commands.first, isNot(contains('__monkeyssh_agent_latest__')));
   });
   test('active usage reader does no work without Pro', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final service = AgentManagementService(
       _MockDiscovery(),
       canManageAgents: () async => false,
@@ -512,7 +510,7 @@ void main() {
   test(
     'abandoning active usage after path discovery prevents the quota request',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var current = true;
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async {
@@ -534,7 +532,7 @@ void main() {
     },
   );
   test('replacement SSH session cannot reuse the previous account quota cache', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     var count = 0;
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
       _,
@@ -563,7 +561,7 @@ void main() {
   });
 
   test('overlapping retryable usage checks share one probe', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final opening = Completer<SSHSession>();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) => opening.future);
@@ -596,7 +594,7 @@ void main() {
     test(
       'queues and coalesces usage after ${addAgent ? 'an install' : 'a path change'}',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final opening = Completer<SSHSession>();
         final commands = <String>[];
         when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
@@ -656,7 +654,7 @@ void main() {
   }
 
   test('ACP adapters do not request or return account usage', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final service = _unlockedManagementService(_MockDiscovery());
     final runtimes = [
       for (final definition in agentRuntimeDefinitions)
@@ -675,7 +673,7 @@ void main() {
   test(
     'all installed CLI agents request usage and partial failures can retry',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
@@ -723,7 +721,7 @@ void main() {
   test(
     'Windows sends the probe through stdin within the command limit',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       final input = StreamController<Uint8List>();
@@ -769,7 +767,7 @@ void main() {
         '${fromManager ? 'management' : 'ring'} read', () async {
       var now = DateTime.utc(2026, 9, 12, 12);
       final checkedAt = now;
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((call) async {
@@ -855,7 +853,7 @@ void main() {
 
   test('server cooldown survives cache age, path changes, and reconnects on the same host', () async {
     var now = DateTime.utc(2026, 9, 12, 12);
-    final client = _MockSshClient();
+    final client = MockSshClient();
     var calls = 0;
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async {
@@ -905,7 +903,7 @@ void main() {
   test('repeated throttles back off and a successful response clears the attempt count', () async {
     var now = DateTime.utc(2026, 9, 12, 12);
     var available = false;
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
       (_) async => _execOutput(
         available
@@ -956,7 +954,7 @@ void main() {
     'partial throttling ignores elapsed resets until Retry-After ends',
     () async {
       var now = DateTime.utc(2026, 9, 12, 12);
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async {
@@ -993,7 +991,7 @@ void main() {
 
   test('cachedState judges each quota by its own read time', () async {
     var now = DateTime(2026, 9, 29, 9);
-    final client = _MockSshClient();
+    final client = MockSshClient();
     String probed(String id) =>
         '__monkeyssh_agent_runtime__=cli:$id\n'
         '__monkeyssh_agent_path__=/bin/$id\n'
@@ -1036,7 +1034,7 @@ void main() {
   });
 
   test('switching agent reads also retains unrelated successful snapshots', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     var calls = 0;
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
       _,
@@ -1064,7 +1062,7 @@ void main() {
   });
 
   test('switching agent reads retains the Claude cooldown', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     var calls = 0;
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async {
@@ -1096,7 +1094,7 @@ void main() {
   });
 
   test('partial quota snapshots respect provider throttling', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     var calls = 0;
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async {
@@ -1126,7 +1124,7 @@ void main() {
     'usage is gated, cached per connection, and excludes matching ACP rows',
     () async {
       var now = DateTime.utc(2026, 9, 10);
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async {
@@ -1181,7 +1179,7 @@ void main() {
   test(
     'failed usage checks retry immediately for every supported agent',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenThrow(StateError('SECRET'));
       final session = _remoteSession(client);
@@ -1208,7 +1206,7 @@ void main() {
   test(
     'retrying a failed provider preserves other provider cooldowns',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
@@ -1245,7 +1243,7 @@ void main() {
       final reset = initiallyPast
           ? '2026-09-10T11:59:00Z'
           : '2026-09-10T12:01:00Z';
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         _,
@@ -1283,7 +1281,7 @@ void main() {
     tester,
   ) async {
     final opening = Completer<SSHSession>();
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) => opening.future);
     final session = _remoteSession(client);
@@ -1333,7 +1331,7 @@ void main() {
       final exec = SSHSession(channel.channel);
       var closed = false;
       unawaited(exec.done.then((_) => closed = true));
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async => exec);
       final session = _remoteSession(client);
@@ -1488,7 +1486,7 @@ void main() {
       test(
         '${listing ?? 'no'} listing, $version via ${method ?? 'unreported'} is $expectedSource',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final session = _remoteSession(client);
           when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
           when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
@@ -1593,7 +1591,7 @@ void main() {
 
       for (final batched in [false, true]) {
         test('Pi detects 0.85.1 from 0.85.0, windows=$windows, batched=$batched', () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final session = _remoteSession(client);
           when(() => client.remoteVersion).thenReturn(
             windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.9',
@@ -1650,7 +1648,7 @@ void main() {
     for (final windows in [false, true]) {
       for (final mode in ['inspect', 'refresh', 'background']) {
         test('all runtimes detect updates, $mode, windows=$windows', () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final discovery = _MockDiscovery();
           final session = _remoteSession(client);
           when(() => client.remoteVersion).thenReturn(
@@ -2727,7 +2725,7 @@ exit "$result"
     test(
       'failed update results strip terminal controls across chunks',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final discovery = _MockDiscovery();
         final session = _remoteSession(client);
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -2765,7 +2763,7 @@ exit "$result"
     );
 
     test('detects npm ownership and an available update', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -2802,7 +2800,7 @@ exit "$result"
     });
 
     test('marks skipped postinstall installations as repairable', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       final definition = agentCliRuntimeDefinitions.firstWhere(
@@ -2837,7 +2835,7 @@ exit "$result"
     });
 
     test('detects Antigravity ACP through its npx launcher', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       final definition = agentStandaloneAcpRuntimeDefinitions.firstWhere(
@@ -2872,7 +2870,7 @@ exit "$result"
     test(
       'forced update checks bypass cache and share in-flight probes',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _remoteSession(client);
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
         var calls = 0;
@@ -2894,7 +2892,7 @@ exit "$result"
     );
 
     test('evicts expired connections on lookup and insertion', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2924,7 +2922,7 @@ exit "$result"
     });
 
     test('bounds the cache and keeps the newest connection cached', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
       var calls = 0;
       when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2945,7 +2943,7 @@ exit "$result"
     });
 
     test('free access blocks every management operation before SSH', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _remoteSession(client);
       final discovery = _MockDiscovery();
       var allowed = false;
@@ -3002,7 +3000,7 @@ exit "$result"
     test(
       'automatic update checks include CLIs and standalone adapters',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final discovery = _MockDiscovery();
         final session = _remoteSession(client);
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3031,7 +3029,7 @@ exit "$result"
     );
 
     test('refresh probes all runtimes through one SSH channel', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3072,7 +3070,7 @@ exit "$result"
     test(
       'refresh batches installed metadata into a second SSH channel',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final discovery = _MockDiscovery();
         final session = _remoteSession(client);
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3231,7 +3229,7 @@ exit "$result"
         'transport error',
       ]) {
         test('finishes OpenCode update setup: $outcome, windows=$windows', () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final discovery = _MockDiscovery();
           final session = _remoteSession(client);
           when(() => client.remoteVersion).thenReturn(
@@ -3364,7 +3362,7 @@ exit "$result"
       test(
         'blocks duplicate actions and releases the guard after $outcome',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final discovery = _MockDiscovery();
           final session = _remoteSession(client);
           final management = _unlockedManagementService(discovery);
@@ -3436,7 +3434,7 @@ exit "$result"
       test(
         'does not repair a healthy or failed update, exit=$exitCode',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final discovery = _MockDiscovery();
           final session = _remoteSession(client);
           final definition = agentCliRuntimeDefinitions.firstWhere(
@@ -3477,7 +3475,7 @@ exit "$result"
     }
 
     test('zero exit does not mean a broken CLI was repaired', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       final definition = agentCliRuntimeDefinitions.firstWhere(
@@ -3518,7 +3516,7 @@ exit "$result"
           (d) => d.id == 'cli:openclaw',
         );
         for (final (exitCode, succeeds) in [(75, true), (1, false)]) {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final discovery = _MockDiscovery();
           final session = _remoteSession(client);
           when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3572,7 +3570,7 @@ exit "$result"
       final definition = agentCliRuntimeDefinitions.singleWhere(
         (d) => d.id == 'cli:openclaw',
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3680,7 +3678,7 @@ exit "$result"
     test(
       'keeps completed metadata when a later registry lookup times out',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final session = _remoteSession(client);
         final done = Completer<void>();
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
@@ -3719,7 +3717,7 @@ exit "$result"
     );
 
     test('registry failure does not hide the installed version', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _remoteSession(client);
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
       var count = 0;
@@ -3739,7 +3737,7 @@ exit "$result"
     });
 
     test('streams install output and invalidates provider discovery', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final discovery = _MockDiscovery();
       final session = _remoteSession(client);
       when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');

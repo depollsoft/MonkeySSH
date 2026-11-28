@@ -11,18 +11,11 @@ import (
 )
 
 type attachTransitionPty struct {
+	recordingPty
 	mu     sync.Mutex
 	width  int
 	height int
 }
-
-func (p *attachTransitionPty) Read([]byte) (int, error) { return 0, io.EOF }
-
-func (p *attachTransitionPty) Write(data []byte) (int, error) {
-	return len(data), nil
-}
-
-func (p *attachTransitionPty) Close() error { return nil }
 
 func (p *attachTransitionPty) Resize(width int, height int) error {
 	p.mu.Lock()
@@ -31,8 +24,6 @@ func (p *attachTransitionPty) Resize(width int, height int) error {
 	p.mu.Unlock()
 	return nil
 }
-
-func (p *attachTransitionPty) Fd() uintptr { return 0 }
 
 func (p *attachTransitionPty) size() (int, int) {
 	p.mu.Lock()

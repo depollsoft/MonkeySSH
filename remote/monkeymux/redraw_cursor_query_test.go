@@ -760,13 +760,11 @@ func TestRestartedRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
 
 func waitForTerminalRepliesSettled(t *testing.T, client *attachClient, windowID string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for client.owesTerminalReplies(windowID, time.Now()) {
-		if time.Now().After(deadline) {
-			t.Fatal("the client still owes the window a reply")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
+		return !client.owesTerminalReplies(windowID, time.Now())
+	}, func() {
+		t.Fatal("the client still owes the window a reply")
+	})
 }
 
 func TestCsiQueryParametersAreReadAsNumbers(t *testing.T) {

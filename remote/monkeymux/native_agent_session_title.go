@@ -3,11 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,10 @@ type jsonlTail struct {
 }
 
 func (tail *jsonlTail) read(path string, reset func(), observe func(line []byte, truncated bool)) {
+	tail.readLimit(path, nativeAgentTitleRecordLimitBytes, false, reset, observe)
+}
+
+func (tail *jsonlTail) readLimit(path string, limit int, resetOnOpenError bool, reset func(), observe func(line []byte, truncated bool)) {
 	if path != tail.path {
 		*tail = jsonlTail{path: path}
 		reset()
@@ -114,6 +119,10 @@ func (tail *jsonlTail) read(path string, reset func(), observe func(line []byte,
 	}
 	file, err := os.Open(path)
 	if err != nil {
+		if resetOnOpenError {
+			*tail = jsonlTail{path: path}
+			reset()
+		}
 		return
 	}
 	defer file.Close()
@@ -133,7 +142,7 @@ func (tail *jsonlTail) read(path string, reset func(), observe func(line []byte,
 	}
 	reader := bufio.NewReaderSize(io.LimitReader(file, info.Size()-tail.offset), 64*1024)
 	for {
-		line, truncated, bytesRead, readErr := readBoundedLine(reader, nativeAgentTitleRecordLimitBytes)
+		line, truncated, bytesRead, readErr := readBoundedLine(reader, limit)
 		if readErr != nil {
 			break
 		}
@@ -383,7 +392,7 @@ func codexRolloutFile(codexHome, sessionID string) string {
 			}
 			return ""
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+		slices.SortFunc(entries, func(a, b os.DirEntry) int { return cmp.Compare(b.Name(), a.Name()) })
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue

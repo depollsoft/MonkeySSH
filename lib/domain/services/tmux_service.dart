@@ -14,8 +14,8 @@ import '../models/tmux_flags.dart';
 import '../models/tmux_state.dart';
 import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
-import 'remote_file_service.dart' show shellEscapePosix;
 import 'remote_multiplexer_service.dart';
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -3247,15 +3247,8 @@ String _buildReusableTmuxClientFlag(String tokenValue) {
   return '$flag ${_shellQuoteReusableTmuxClientFlagValue(value)}';
 }
 
-String _shellQuoteReusableTmuxClientFlagValue(String value) {
-  if (value == '~') {
-    return r'"$HOME"';
-  }
-  if (value.startsWith('~/')) {
-    return r'"$HOME"' + shellEscapePosix(value.substring(1));
-  }
-  return shellEscapePosix(value);
-}
+String _shellQuoteReusableTmuxClientFlagValue(String value) =>
+    shellEscapePosixPath(value);
 
 bool _isReusableTmuxClientFlag(String value) {
   if (value == '-S' || value == '-L' || value == '-f') {
@@ -4345,7 +4338,7 @@ String buildAgentToolDetectionCommand({AgentLaunchTool? tool}) {
   // Single-quote the inner snippet for the outer shell, then escape any
   // single quotes inside it. There are none today, but this keeps the
   // builder safe if someone adds a binary name containing a quote.
-  final quotedInner = "'${inner.replaceAll("'", "'\"'\"'")}'";
+  final quotedInner = shellEscapePosixArg(inner);
   return r'SH="${SHELL:-/bin/sh}"; "$SH" -ic '
       '$quotedInner '
       '2>/dev/null || true';

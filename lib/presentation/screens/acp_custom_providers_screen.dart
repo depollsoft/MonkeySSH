@@ -16,7 +16,9 @@ import '../../app/theme.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../widgets/brand_empty_state.dart';
+import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/system_vertical_bar.dart';
+import '../widgets/unsaved_changes_guard.dart';
 
 /// Opens the custom agent list on the nearest navigator.
 Future<void> openAcpCustomProvidersScreen(BuildContext context) =>
@@ -499,55 +501,16 @@ class _AcpCustomProviderEditScreenState
   Future<void> _delete() async {
     final definition = widget.definition;
     if (definition == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete custom agent?'),
-        content: const Text(
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete custom agent?',
+      message:
           'It will no longer appear in new sessions. Sessions already '
           'running keep going until they end.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
-    if (!(confirmed ?? false) || !mounted) return;
+    if (!confirmed || !mounted) return;
     await ref.read(acpCustomProviderServiceProvider).delete(definition.id);
     if (!mounted) return;
-    setState(() => _allowPop = true);
-    Navigator.of(context).pop();
-  }
-
-  Future<void> _confirmDiscard() async {
-    final discard = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Discard changes?'),
-        content: const Text('Your edits to this custom agent will be lost.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Keep editing'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Discard'),
-          ),
-        ],
-      ),
-    );
-    if (!(discard ?? false) || !mounted) return;
     setState(() => _allowPop = true);
     Navigator.of(context).pop();
   }
@@ -560,11 +523,9 @@ class _AcpCustomProviderEditScreenState
     );
     final definition = widget.definition;
     final isEditing = definition != null;
-    return PopScope<Object?>(
-      canPop: _allowPop || !_dirty,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) unawaited(_confirmDiscard());
-      },
+    return UnsavedChangesGuard(
+      hasUnsavedChanges: !_allowPop && _dirty,
+      message: 'Your edits to this custom agent will be lost.',
       child: Scaffold(
         appBar: VerticalBarAppBar(
           AppBar(

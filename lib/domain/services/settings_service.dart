@@ -15,6 +15,7 @@ import '../../data/database/database.dart';
 import '../models/host_cli_launch_preferences.dart';
 import '../models/terminal_theme.dart';
 import '../models/terminal_themes.dart';
+import 'settings_json_list.dart';
 
 /// Keys for app settings.
 abstract final class SettingKeys {
@@ -440,8 +441,10 @@ abstract class _AsyncSettingsNotifier<T> extends Notifier<T> {
   }
 }
 
-abstract class _BooleanSettingsNotifier extends _AsyncSettingsNotifier<bool> {
-  _BooleanSettingsNotifier(this._key, {required bool defaultValue})
+/// Notifier for a boolean setting backed by [SettingsService].
+class BooleanSettingsNotifier extends _AsyncSettingsNotifier<bool> {
+  /// Creates a boolean settings notifier for [_key] with [defaultValue].
+  BooleanSettingsNotifier(this._key, {required bool defaultValue})
     : _defaultValue = defaultValue;
 
   final String _key;
@@ -459,6 +462,23 @@ abstract class _BooleanSettingsNotifier extends _AsyncSettingsNotifier<bool> {
     _setPersistedState(enabled);
   }
 }
+
+NotifierProvider<BooleanSettingsNotifier, bool> _booleanSettingsProvider(
+  String key, {
+  required bool defaultValue,
+}) => NotifierProvider<BooleanSettingsNotifier, bool>(
+  () => BooleanSettingsNotifier(key, defaultValue: defaultValue),
+);
+
+FutureProvider<bool> _initializedBoolProvider(
+  NotifierProvider<BooleanSettingsNotifier, bool> notifierProvider,
+) => FutureProvider<bool>((ref) async {
+  final value = await ref.watch(notifierProvider.notifier).initializedValue();
+  // Watching the default before initialization can invalidate a pending read
+  // with no listeners, leaving its future waiting for a rebuild indefinitely.
+  if (!ref.mounted) return value;
+  return ref.watch(notifierProvider);
+});
 
 /// Notifier for the app-wide coding-agent window default.
 class AgentWindowModePreferenceNotifier
@@ -525,7 +545,7 @@ final themeModeNotifierProvider =
     NotifierProvider<ThemeModeNotifier, ThemeMode>(ThemeModeNotifier.new);
 
 /// Notifier for terminal themes applying to app chrome.
-class TerminalThemesApplyToAppNotifier extends _BooleanSettingsNotifier {
+class TerminalThemesApplyToAppNotifier extends BooleanSettingsNotifier {
   /// Creates the notifier for [SettingKeys.terminalThemesApplyToApp].
   TerminalThemesApplyToAppNotifier()
     : super(SettingKeys.terminalThemesApplyToApp, defaultValue: true);
@@ -626,7 +646,7 @@ final autoLockTimeoutNotifierProvider =
     NotifierProvider<AutoLockTimeoutNotifier, int>(AutoLockTimeoutNotifier.new);
 
 /// Notifier for mux window close confirmations.
-class ConfirmMuxWindowCloseNotifier extends _BooleanSettingsNotifier {
+class ConfirmMuxWindowCloseNotifier extends BooleanSettingsNotifier {
   /// Creates the notifier for [SettingKeys.confirmMuxWindowClose].
   ConfirmMuxWindowCloseNotifier()
     : super(SettingKeys.confirmMuxWindowClose, defaultValue: true);
@@ -659,7 +679,7 @@ final cursorStyleNotifierProvider =
     NotifierProvider<CursorStyleNotifier, String>(CursorStyleNotifier.new);
 
 /// Notifier for bell sound with write capability.
-class BellSoundNotifier extends _BooleanSettingsNotifier {
+class BellSoundNotifier extends BooleanSettingsNotifier {
   /// Creates the notifier for [SettingKeys.bellSound].
   BellSoundNotifier() : super(SettingKeys.bellSound, defaultValue: true);
 }
@@ -671,7 +691,7 @@ final bellSoundNotifierProvider = NotifierProvider<BellSoundNotifier, bool>(
 
 /// Notifier for terminal desktop notifications (OSC 9/777/99) with write
 /// capability.
-class TerminalNotificationsNotifier extends _BooleanSettingsNotifier {
+class TerminalNotificationsNotifier extends BooleanSettingsNotifier {
   /// Creates the notifier for [SettingKeys.terminalNotifications].
   TerminalNotificationsNotifier()
     : super(SettingKeys.terminalNotifications, defaultValue: true);
@@ -683,83 +703,41 @@ final terminalNotificationsNotifierProvider =
       TerminalNotificationsNotifier.new,
     );
 
-/// Notifier for coding-agent update indicators.
-class AgentUpdateNotificationsNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.agentUpdateNotifications].
-  AgentUpdateNotificationsNotifier()
-    : super(SettingKeys.agentUpdateNotifications, defaultValue: true);
-}
-
 /// Provider for coding-agent update indicators.
-final agentUpdateNotificationsNotifierProvider =
-    NotifierProvider<AgentUpdateNotificationsNotifier, bool>(
-      AgentUpdateNotificationsNotifier.new,
-    );
-
-/// Notifier for terminal wake lock with write capability.
-class TerminalWakeLockNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.terminalWakeLock].
-  TerminalWakeLockNotifier()
-    : super(SettingKeys.terminalWakeLock, defaultValue: false);
-}
+final agentUpdateNotificationsNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.agentUpdateNotifications,
+  defaultValue: true,
+);
 
 /// Provider for terminal wake lock with write capability.
-final terminalWakeLockNotifierProvider =
-    NotifierProvider<TerminalWakeLockNotifier, bool>(
-      TerminalWakeLockNotifier.new,
-    );
-
-/// Notifier for terminal file path links with write capability.
-class TerminalPathLinksNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.terminalPathLinks].
-  TerminalPathLinksNotifier()
-    : super(SettingKeys.terminalPathLinks, defaultValue: true);
-}
+final terminalWakeLockNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.terminalWakeLock,
+  defaultValue: false,
+);
 
 /// Provider for terminal file path links with write capability.
-final terminalPathLinksNotifierProvider =
-    NotifierProvider<TerminalPathLinksNotifier, bool>(
-      TerminalPathLinksNotifier.new,
-    );
-
-/// Notifier for terminal file path underlines with write capability.
-class TerminalPathLinkUnderlinesNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.terminalPathLinkUnderlines].
-  TerminalPathLinkUnderlinesNotifier()
-    : super(SettingKeys.terminalPathLinkUnderlines, defaultValue: true);
-}
+final terminalPathLinksNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.terminalPathLinks,
+  defaultValue: true,
+);
 
 /// Provider for terminal file path underlines with write capability.
-final terminalPathLinkUnderlinesNotifierProvider =
-    NotifierProvider<TerminalPathLinkUnderlinesNotifier, bool>(
-      TerminalPathLinkUnderlinesNotifier.new,
-    );
-
-/// Notifier for forwarded localhost links with write capability.
-class PortForwardBrowserLinksNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.portForwardBrowserLinks].
-  PortForwardBrowserLinksNotifier()
-    : super(SettingKeys.portForwardBrowserLinks, defaultValue: true);
-}
+final terminalPathLinkUnderlinesNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.terminalPathLinkUnderlines,
+  defaultValue: true,
+);
 
 /// Provider for forwarded localhost links with write capability.
-final portForwardBrowserLinksNotifierProvider =
-    NotifierProvider<PortForwardBrowserLinksNotifier, bool>(
-      PortForwardBrowserLinksNotifier.new,
-    );
-
-/// Notifier for terminal shell completion popups with write capability.
-class ShellCompletionsNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.shellCompletions].
-  ShellCompletionsNotifier()
-    : super(SettingKeys.shellCompletions, defaultValue: true);
-}
+final portForwardBrowserLinksNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.portForwardBrowserLinks,
+  defaultValue: true,
+);
 
 /// Provider for terminal shell completion popups with write capability.
-final shellCompletionsNotifierProvider =
-    NotifierProvider<ShellCompletionsNotifier, bool>(
-      ShellCompletionsNotifier.new,
-    );
+final shellCompletionsNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.shellCompletions,
+  defaultValue: true,
+);
 
 /// State for terminal theme settings (light and dark).
 class TerminalThemeSettings {
@@ -833,28 +811,11 @@ class TerminalThemeSettingsNotifier
   Future<Set<String>> _getCustomTerminalThemeIds(
     SettingsService settings,
   ) async {
-    final json = await settings.getString(SettingKeys.customTerminalThemes);
-    if (json == null || json.isEmpty) {
-      return const {};
-    }
-
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! List) {
-        return const {};
-      }
-
-      final themeIds = <String>{};
-      for (final item in decoded) {
-        final theme = TerminalThemeData.tryFromJson(item);
-        if (theme != null) {
-          themeIds.add(theme.id);
-        }
-      }
-      return themeIds;
-    } on FormatException {
-      return const {};
-    }
+    final raw = await settings.getString(SettingKeys.customTerminalThemes);
+    return {
+      for (final item in decodeJsonList(raw))
+        if (TerminalThemeData.tryFromJson(item) case final theme?) theme.id,
+    };
   }
 
   String _normalizeThemeId(
@@ -919,37 +880,22 @@ final terminalThemeSettingsProvider =
     );
 
 /// Provider for shared clipboard setting.
-final sharedClipboardProvider = FutureProvider<bool>((ref) async {
-  final value = await ref
-      .watch(sharedClipboardNotifierProvider.notifier)
-      .initializedValue();
-  // Watching the default before initialization can invalidate a pending read
-  // with no listeners, leaving its future waiting for a rebuild indefinitely.
-  if (!ref.mounted) return value;
-  return ref.watch(sharedClipboardNotifierProvider);
-});
+final sharedClipboardProvider = _initializedBoolProvider(
+  sharedClipboardNotifierProvider,
+);
 
 /// Provider for local clipboard read sharing setting.
-final sharedClipboardLocalReadProvider = FutureProvider<bool>((ref) async {
-  final value = await ref
-      .watch(sharedClipboardLocalReadNotifierProvider.notifier)
-      .initializedValue();
-  // Subscribe to changes only after the persisted value has been loaded.
-  if (!ref.mounted) return value;
-  return ref.watch(sharedClipboardLocalReadNotifierProvider);
-});
+final sharedClipboardLocalReadProvider = _initializedBoolProvider(
+  sharedClipboardLocalReadNotifierProvider,
+);
 
 /// Initialized preference: prevents a default-on probe before saved opt-out loads.
-final showUsageRingsProvider = FutureProvider<bool>((ref) async {
-  final value = await ref
-      .watch(showUsageRingsNotifierProvider.notifier)
-      .initializedValue();
-  if (!ref.mounted) return value;
-  return ref.watch(showUsageRingsNotifierProvider);
-});
+final showUsageRingsProvider = _initializedBoolProvider(
+  showUsageRingsNotifierProvider,
+);
 
 /// Persists the user's choice independently of current Pro entitlement.
-class ShowUsageRingsNotifier extends _BooleanSettingsNotifier {
+class ShowUsageRingsNotifier extends BooleanSettingsNotifier {
   /// Defaults on; access is separately guarded by the Pro feature gate.
   ShowUsageRingsNotifier()
     : super(SettingKeys.showUsageRings, defaultValue: true);
@@ -959,41 +905,20 @@ class ShowUsageRingsNotifier extends _BooleanSettingsNotifier {
 final showUsageRingsNotifierProvider =
     NotifierProvider<ShowUsageRingsNotifier, bool>(ShowUsageRingsNotifier.new);
 
-/// Notifier for shared clipboard remote-to-local writes.
-class SharedClipboardNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.sharedClipboard].
-  SharedClipboardNotifier()
-    : super(SettingKeys.sharedClipboard, defaultValue: false);
-}
-
 /// Provider for shared clipboard setting with write capability.
-final sharedClipboardNotifierProvider =
-    NotifierProvider<SharedClipboardNotifier, bool>(
-      SharedClipboardNotifier.new,
-    );
-
-/// Notifier for local clipboard reads from the remote side.
-class SharedClipboardLocalReadNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.sharedClipboardLocalRead].
-  SharedClipboardLocalReadNotifier()
-    : super(SettingKeys.sharedClipboardLocalRead, defaultValue: false);
-}
+final sharedClipboardNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.sharedClipboard,
+  defaultValue: false,
+);
 
 /// Provider for local clipboard read sharing with write capability.
-final sharedClipboardLocalReadNotifierProvider =
-    NotifierProvider<SharedClipboardLocalReadNotifier, bool>(
-      SharedClipboardLocalReadNotifier.new,
-    );
-
-/// Notifier for tap-to-show-keyboard with write capability.
-class TapToShowKeyboardNotifier extends _BooleanSettingsNotifier {
-  /// Creates the notifier for [SettingKeys.tapToShowKeyboard].
-  TapToShowKeyboardNotifier()
-    : super(SettingKeys.tapToShowKeyboard, defaultValue: true);
-}
+final sharedClipboardLocalReadNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.sharedClipboardLocalRead,
+  defaultValue: false,
+);
 
 /// Provider for tap-to-show-keyboard setting with write capability.
-final tapToShowKeyboardNotifierProvider =
-    NotifierProvider<TapToShowKeyboardNotifier, bool>(
-      TapToShowKeyboardNotifier.new,
-    );
+final tapToShowKeyboardNotifierProvider = _booleanSettingsProvider(
+  SettingKeys.tapToShowKeyboard,
+  defaultValue: true,
+);

@@ -6,7 +6,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
-import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
@@ -19,6 +18,9 @@ import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
+
 /// Registers tests from monkeymux_service_test.dart.
 void registerDomainServicesMonkeymuxServiceTests() {
   group('monkeymux_service', () {
@@ -30,14 +32,14 @@ void registerDomainServicesMonkeymuxServiceTests() {
           testWidgets(
             '$operation bounds ${opens ? 'busy output' : 'channel opening'}',
             (tester) async {
-              final client = _MockSshClient();
+              final client = MockSshClient();
               final installer = _MockMonkeyMuxInstaller();
               final session = _buildSession(client, connectionId: 88001);
               final service = MonkeyMuxService(installer: installer);
               final opening = Completer<SSHSession>();
               final stdout = StreamController<Uint8List>();
               final channel = _buildSilentControlSession(stdout);
-              final underlying = _MockChannel();
+              final underlying = MockUnderlyingSshChannel();
               when(() => channel.channel).thenReturn(underlying);
               when(
                 () => installer.ensureInstalled(
@@ -269,7 +271,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         SshSession createSession() => SshSession(
           connectionId: 42,
           hostId: 1,
-          client: _MockSshClient(),
+          client: MockSshClient(),
           config: const SshConnectionConfig(
             hostname: 'example.com',
             port: 22,
@@ -1085,7 +1087,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       setUpAll(() => registerFallbackValue(Uint8List(0)));
 
       test('caches bracketed input support from a one-shot hello', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 898);
         final stdoutController = StreamController<Uint8List>();
@@ -1152,7 +1154,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         test(
           'late window list cannot refill cache after clear=$clearConnection',
           () async {
-            final client = _MockSshClient();
+            final client = MockSshClient();
             final installer = _MockMonkeyMuxInstaller();
             final session = _buildSession(client, connectionId: 896);
             final pending = Completer<SSHSession>();
@@ -1228,7 +1230,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       }
 
       test('recycles a watcher without closing existing consumers', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 897);
         final oldOutput = StreamController<Uint8List>();
@@ -1278,7 +1280,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'window actions prefer stable IDs and fall back to indices',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client);
           final output = StreamController<Uint8List>();
@@ -1329,7 +1331,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       );
 
       test('new agent windows carry a command to restore them with', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client);
         final output = StreamController<Uint8List>();
@@ -1376,7 +1378,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'preserves an exact bracketed paste in one control request',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 899);
           final stdoutController = StreamController<Uint8List>();
@@ -1468,7 +1470,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         Duration? responseTimeout,
         bool terminalViewHidden = false,
       }) async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: connectionId)
           ..terminalViewHidden = terminalViewHidden;
@@ -1678,7 +1680,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'includes cellWidth and cellHeight in resize and focusClient requests',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 901);
           final stdoutController = StreamController<Uint8List>();
@@ -1751,7 +1753,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       setUpAll(() => registerFallbackValue(Uint8List(0)));
 
       test('listWindows fails instead of hanging when no response arrives', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 900);
         // A control channel that opens successfully but never emits a response
@@ -1800,7 +1802,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'refreshWindows starts a new query after an older request fails',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 901);
           final stdoutController = StreamController<Uint8List>();
@@ -1847,7 +1849,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         },
       );
       test('listWindows fails instead of hanging when the watcher is disposed', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 902);
         final stdoutController = StreamController<Uint8List>();
@@ -1901,7 +1903,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('listWindows recovers after the control channel never opens', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 903);
         final neverOpens = Completer<SSHSession>();
@@ -1954,7 +1956,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'low-priority run_command timeout keeps a live control channel',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 905);
           final stdoutController = StreamController<Uint8List>();
@@ -2014,7 +2016,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       );
 
       test('low-priority timeout on a silent channel recycles it', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 906);
         final stdoutController = StreamController<Uint8List>();
@@ -2048,7 +2050,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('periodic agent metadata probe pauses while backgrounded', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 907);
         final stdoutController = StreamController<Uint8List>();
@@ -2109,7 +2111,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         ('a Windows helper never runs the POSIX probe', 'windows-amd64', 0),
       ]) {
         test('agent metadata: $name', () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 908);
           final stdoutController = StreamController<Uint8List>();
@@ -2178,7 +2180,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       }
 
       test('gives every queued control command a distinct id', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 904);
         final stdoutController = StreamController<Uint8List>();
@@ -2228,7 +2230,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
 
       test('an older helper is unsupported, except for an unregister, which '
           'stays pending', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client);
         final outputs = <StreamController<Uint8List>>[];
@@ -2300,7 +2302,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       setUpAll(() => registerFallbackValue(Uint8List(0)));
 
       test('reads the running server version from the control hello', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 909);
         final commands = <String>[];
@@ -2328,7 +2330,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'counts native ACP windows from the initial control snapshot',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(client, connectionId: 917);
           when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
@@ -2359,7 +2361,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
 
       for (final nativeAcp in [false, true]) {
         test('finds a matching helper path, native ACP=$nativeAcp', () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(
             client,
@@ -2419,7 +2421,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
         'monkeymux selection ',
       );
       addTearDown(() => home.delete(recursive: true));
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: 920);
       // Both helpers successfully open the same server socket. The matching
@@ -2466,7 +2468,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       test(
         'keeps server status without a matching helper, selection error=$selectionFails',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           final installer = _MockMonkeyMuxInstaller();
           final session = _buildSession(
             client,
@@ -2501,7 +2503,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       // version compiled into the helper binary, so the binary — not the bundled
       // manifest label — decides whether an update would actually apply.
       test('reads the version the installed binary reports', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 910);
         final commands = <String>[];
@@ -2522,7 +2524,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('quotes the helper path for Windows remotes', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 911);
         final commands = <String>[];
@@ -2547,7 +2549,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('returns null when the probe produces no output', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 912);
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2560,7 +2562,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('skips login shell banner text before the version line', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 914);
         when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
@@ -2576,7 +2578,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('returns null when no line looks like a version', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 915);
         when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
@@ -2590,7 +2592,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('accepts a pre-release version suffix', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 916);
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2603,7 +2605,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
       });
 
       test('returns null when the probe fails', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final installer = _MockMonkeyMuxInstaller();
         final session = _buildSession(client, connectionId: 913);
         when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -2618,11 +2620,7 @@ void registerDomainServicesMonkeymuxServiceTests() {
   });
 }
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 class _MockExecSession extends Mock implements SSHSession {}
-
-class _MockChannel extends Mock implements SSHChannel {}
 
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 

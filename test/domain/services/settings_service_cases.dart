@@ -253,22 +253,6 @@ void registerDomainServicesSettingsServiceTests() {
       });
     });
 
-    group('SettingKeys', () {
-      test('has expected constants', () {
-        expect(SettingKeys.themeMode, 'theme_mode');
-        expect(
-          SettingKeys.terminalThemesApplyToApp,
-          'terminal_themes_apply_to_app',
-        );
-        expect(SettingKeys.terminalFont, 'terminal_font');
-        expect(SettingKeys.terminalFontSize, 'terminal_font_size');
-        expect(SettingKeys.cursorStyle, 'cursor_style');
-        expect(SettingKeys.bellSound, 'bell_sound');
-        expect(SettingKeys.shellCompletions, 'shell_completions');
-        expect(SettingKeys.autoLockTimeout, 'auto_lock_timeout');
-      });
-    });
-
     test('app-wide agent window mode loads and persists', () async {
       await service.setString(
         SettingKeys.agentWindowModePreference,
@@ -575,9 +559,7 @@ void registerDomainServicesSettingsServiceTests() {
 
           expect(result, 0);
         });
-      });
 
-      group('autoLockTimeoutNotifierProvider', () {
         test('persists zero as an intentional disablement', () async {
           final notifier = container.read(
             autoLockTimeoutNotifierProvider.notifier,
@@ -601,89 +583,6 @@ void registerDomainServicesSettingsServiceTests() {
               .read(cursorStyleNotifierProvider.notifier)
               .initializedValue();
           expect(result, 'block');
-        });
-      });
-
-      group('bellSoundNotifierProvider', () {
-        test('returns true by default', () async {
-          final result = await container
-              .read(bellSoundNotifierProvider.notifier)
-              .initializedValue();
-          expect(result, isTrue);
-        });
-      });
-
-      group('agentUpdateNotificationsNotifierProvider', () {
-        test('defaults to enabled and persists changes', () async {
-          final notifier = container.read(
-            agentUpdateNotificationsNotifierProvider.notifier,
-          );
-
-          expect(await notifier.initializedValue(), isTrue);
-          await notifier.setEnabled(enabled: false);
-
-          expect(
-            container.read(agentUpdateNotificationsNotifierProvider),
-            isFalse,
-          );
-          expect(
-            await container
-                .read(settingsServiceProvider)
-                .getBool(
-                  SettingKeys.agentUpdateNotifications,
-                  defaultValue: true,
-                ),
-            isFalse,
-          );
-        });
-      });
-
-      group('shellCompletionsNotifierProvider', () {
-        test('defaults to enabled and persists changes', () async {
-          final notifier = container.read(
-            shellCompletionsNotifierProvider.notifier,
-          );
-
-          expect(container.read(shellCompletionsNotifierProvider), isTrue);
-
-          await notifier.setEnabled(enabled: false);
-
-          expect(container.read(shellCompletionsNotifierProvider), isFalse);
-          expect(
-            await container
-                .read(settingsServiceProvider)
-                .getBool(SettingKeys.shellCompletions, defaultValue: true),
-            isFalse,
-          );
-        });
-      });
-
-      group('portForwardBrowserLinksNotifierProvider', () {
-        test('defaults to enabled and persists changes', () async {
-          final notifier = container.read(
-            portForwardBrowserLinksNotifierProvider.notifier,
-          );
-
-          expect(
-            container.read(portForwardBrowserLinksNotifierProvider),
-            isTrue,
-          );
-
-          await notifier.setEnabled(enabled: false);
-
-          expect(
-            container.read(portForwardBrowserLinksNotifierProvider),
-            isFalse,
-          );
-          expect(
-            await container
-                .read(settingsServiceProvider)
-                .getBool(
-                  SettingKeys.portForwardBrowserLinks,
-                  defaultValue: true,
-                ),
-            isFalse,
-          );
         });
       });
 

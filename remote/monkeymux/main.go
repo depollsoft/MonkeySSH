@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -22,7 +23,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,9 +44,6 @@ type muxPty interface {
 	Close() error
 	// Resize sets the pseudo terminal size in character cells.
 	Resize(cols int, rows int) error
-	// Fd returns the underlying file descriptor on POSIX systems, or 0 when
-	// there is no usable descriptor (Windows).
-	Fd() uintptr
 }
 
 // pixelSizedPty is a pty that can report a pixel size along with its grid
@@ -1601,7 +1598,7 @@ func cursorAgentAuthCommand(args []string) {
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	command.Env = inheritedEnvironment(os.Environ())
+	command.Env = slices.Clone(os.Environ())
 	if err := command.Run(); err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitError.ExitCode())
@@ -1880,7 +1877,6 @@ func (w *firstWriteNotifier) Flush() error {
 
 type runningSessionInfo struct {
 	name        string
-	version     string
 	windows     []windowSnapshot
 	attachCount int
 	lastActive  int64
@@ -1960,8 +1956,8 @@ func listSessionsCommand(args []string) {
 		fmt.Fprintln(os.Stdout, "no MonkeyMux sessions")
 		return
 	}
-	sort.Slice(sessions, func(i int, j int) bool {
-		return sessions[i].name < sessions[j].name
+	slices.SortFunc(sessions, func(a, b runningSessionInfo) int {
+		return cmp.Compare(a.name, b.name)
 	})
 	for _, session := range sessions {
 		active := ""
@@ -2038,11 +2034,8 @@ func defaultAttachSession(reader io.Reader, writer io.Writer) (string, error) {
 	if len(sessions) == 1 {
 		return sessions[0].name, nil
 	}
-	sort.Slice(sessions, func(i int, j int) bool {
-		if sessions[i].lastActive == sessions[j].lastActive {
-			return sessions[i].name < sessions[j].name
-		}
-		return sessions[i].lastActive > sessions[j].lastActive
+	slices.SortFunc(sessions, func(a, b runningSessionInfo) int {
+		return cmp.Or(cmp.Compare(b.lastActive, a.lastActive), cmp.Compare(a.name, b.name))
 	})
 	if file, ok := reader.(*os.File); ok && !term.IsTerminal(int(file.Fd())) {
 		return "", errors.New("multiple sessions are running; specify one with -t")
@@ -2133,7 +2126,6 @@ func querySessionAtSocket(path string) (runningSessionInfo, error) {
 		switch response.Type {
 		case "hello":
 			info.name = response.Session
-			info.version = response.Version
 			info.attachCount = response.AttachCount
 		case "window_list":
 			sawWindows = true
@@ -2554,7 +2546,7 @@ func ensureServer(
 			base64.StdEncoding.EncodeToString(initialWindow.capabilityHint),
 		)
 	}
-	daemonEnv := inheritedEnvironment(os.Environ())
+	daemonEnv := slices.Clone(os.Environ())
 	buildServeCmd := func() *exec.Cmd {
 		c := exec.Command(exe, serveArgs...)
 		c.Stdin = nil
@@ -3690,64 +3682,92 @@ func enrichRestoreWithWindowActivity(
 	}
 }
 
-func requestServerRestore(session string) (*serverRestore, error) {
+func dialControlClient(
+	session string,
+) (net.Conn, *json.Encoder, *json.Decoder, controlResponse, error) {
 	conn, err := dialSession(session)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, controlResponse{}, err
 	}
-	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
+	enc, dec, hello, err := handshakeControlClient(conn, session)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, nil, controlResponse{}, err
+	}
+	return conn, enc, dec, hello, nil
+}
 
+func handshakeControlClient(
+	conn net.Conn,
+	session string,
+) (*json.Encoder, *json.Decoder, controlResponse, error) {
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
-		return nil, err
+		return nil, nil, controlResponse{}, err
 	}
-	if _, err := readControlHello(dec); err != nil {
-		return nil, err
+	hello, err := readControlHello(dec)
+	if err != nil {
+		return nil, nil, controlResponse{}, err
 	}
-	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
-	if err := enc.Encode(controlMessage{
-		ID:      requestID,
-		Type:    "upgrade_snapshot",
-		Session: session,
-	}); err != nil {
-		return nil, err
+	return enc, dec, hello, nil
+}
+
+func sendControlRequest(
+	enc *json.Encoder,
+	dec *json.Decoder,
+	request controlMessage,
+	defaultErr string,
+) (controlResponse, error) {
+	if request.ID == "" {
+		request.ID = strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	if err := enc.Encode(request); err != nil {
+		return controlResponse{}, err
 	}
 	for {
 		var response controlResponse
 		if err := dec.Decode(&response); err != nil {
-			return nil, err
+			return controlResponse{}, err
 		}
-		if response.ID != requestID {
+		if response.ID != request.ID {
 			continue
 		}
 		if response.Status == "error" || response.Type == "error" {
-			return nil, errors.New(response.Error)
+			return controlResponse{}, errors.New(firstNonEmptyString(response.Error, defaultErr))
 		}
-		if response.Restore == nil || len(response.Restore.Windows) == 0 {
-			return nil, errors.New("empty restore snapshot")
-		}
-		return response.Restore, nil
+		return response, nil
 	}
 }
 
-func queryServerWindows(session string) ([]windowSnapshot, error) {
-	conn, err := dialSession(session)
+func requestServerRestore(session string) (*serverRestore, error) {
+	conn, enc, dec, _, err := dialControlClient(session)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
 
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	if err := enc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
+	response, err := sendControlRequest(enc, dec, controlMessage{
+		Type:    "upgrade_snapshot",
+		Session: session,
+	}, "")
+	if err != nil {
 		return nil, err
 	}
-	if _, err := readControlHello(dec); err != nil {
+	if response.Restore == nil || len(response.Restore.Windows) == 0 {
+		return nil, errors.New("empty restore snapshot")
+	}
+	return response.Restore, nil
+}
+
+func queryServerWindows(session string) ([]windowSnapshot, error) {
+	conn, enc, dec, _, err := dialControlClient(session)
+	if err != nil {
 		return nil, err
 	}
+	defer conn.Close()
+
 	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := enc.Encode(controlMessage{
 		ID:      requestID,
@@ -3899,13 +3919,12 @@ func captureShellWindowHistories(
 		return nil
 	}
 	defer attachConn.Close()
-	controlConn, err := dialSession(session)
+	controlConn, controlEnc, controlDec, _, err := dialControlClient(session)
 	if err != nil {
 		return nil
 	}
 	defer controlConn.Close()
 	_ = attachConn.SetDeadline(time.Now().Add(socketTimeout))
-	_ = controlConn.SetDeadline(time.Now().Add(socketTimeout))
 
 	if err := json.NewEncoder(attachConn).Encode(controlMessage{
 		Role:    "attach",
@@ -3913,14 +3932,6 @@ func captureShellWindowHistories(
 		Width:   defaultColumns,
 		Height:  defaultRows,
 	}); err != nil {
-		return nil
-	}
-	controlEnc := json.NewEncoder(controlConn)
-	controlDec := json.NewDecoder(controlConn)
-	if err := controlEnc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
-		return nil
-	}
-	if _, err := readControlHello(controlDec); err != nil {
 		return nil
 	}
 
@@ -3953,28 +3964,12 @@ func requestSelectWindow(
 	session string,
 	windowID string,
 ) error {
-	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
-	if err := enc.Encode(controlMessage{
-		ID:       requestID,
+	_, err := sendControlRequest(enc, dec, controlMessage{
 		Type:     "select_window",
 		Session:  session,
 		WindowID: windowID,
-	}); err != nil {
-		return err
-	}
-	for {
-		var response controlResponse
-		if err := dec.Decode(&response); err != nil {
-			return err
-		}
-		if response.ID != requestID {
-			continue
-		}
-		if response.Status == "error" || response.Type == "error" {
-			return errors.New(response.Error)
-		}
-		return nil
-	}
+	}, "")
+	return err
 }
 
 func readAttachReplayHistory(conn net.Conn) []byte {
@@ -4193,8 +4188,8 @@ func readCursorChatEntries() []cursorChatEntry {
 			}
 		}
 	}
-	sort.SliceStable(entries, func(a, b int) bool {
-		return entries[a].updatedAt < entries[b].updatedAt
+	slices.SortStableFunc(entries, func(a, b cursorChatEntry) int {
+		return cmp.Compare(a.updatedAt, b.updatedAt)
 	})
 	return entries
 }
@@ -4410,11 +4405,8 @@ func discoverPiSessions(
 	for key := range fallbackWindows {
 		keys = append(keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].root != keys[j].root {
-			return keys[i].root < keys[j].root
-		}
-		return keys[i].cwd < keys[j].cwd
+	slices.SortFunc(keys, func(a, b fallbackKey) int {
+		return cmp.Or(cmp.Compare(a.root, b.root), cmp.Compare(a.cwd, b.cwd))
 	})
 	for _, key := range keys {
 		indices := fallbackWindows[key]
@@ -5078,7 +5070,7 @@ func readPiSessionEntries(root string) []piSessionEntry {
 		return nil
 	})
 	annotatePiSessionOrigins(entries)
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].modTime.After(entries[j].modTime) })
+	slices.SortStableFunc(entries, func(a, b piSessionEntry) int { return b.modTime.Compare(a.modTime) })
 	return entries
 }
 
@@ -5711,7 +5703,7 @@ func discoverRestoreAgentSessionIDs(
 	for panePid := range liveProcesses {
 		paneIDs = append(paneIDs, panePid)
 	}
-	sort.Ints(paneIDs)
+	slices.Sort(paneIDs)
 	for _, panePid := range paneIDs {
 		if sessions[panePid] != "" {
 			continue
@@ -6142,8 +6134,8 @@ func assignRecentAgentSessions(
 			continue
 		}
 		candidates := candidatesForDirectory(window.workingDirectory)
-		sort.SliceStable(candidates, func(i, j int) bool {
-			return candidates[i].updatedAt.After(candidates[j].updatedAt)
+		slices.SortStableFunc(candidates, func(a, b recentAgentSession) int {
+			return b.updatedAt.Compare(a.updatedAt)
 		})
 		matches := []recentAgentSession{}
 		for _, candidate := range candidates {
@@ -6239,8 +6231,8 @@ func recentAgentSessionFiles(
 		files = append(files, recentFile{path: path, modTime: info.ModTime()})
 		return nil
 	})
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
+	slices.SortFunc(files, func(a, b recentFile) int {
+		return b.modTime.Compare(a.modTime)
 	})
 	if len(files) > limit {
 		files = files[:limit]
@@ -6346,27 +6338,24 @@ func jsonStringField(value any, field string) string {
 	return ""
 }
 
-func defaultProcessOpenFilePathsForMetadata(pid int) []string {
+func lsofFieldN(args ...string) []string {
 	ctx, cancel := context.WithTimeout(context.Background(), processMetadataTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(
-		ctx,
-		"lsof",
-		"-nP",
-		"-p",
-		strconv.Itoa(pid),
-		"-Fn",
-	).Output()
+	output, err := exec.CommandContext(ctx, "lsof", args...).Output()
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}
-	paths := []string{}
+	var paths []string
 	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "n") && len(line) > 1 {
-			paths = append(paths, line[1:])
+		if path, ok := strings.CutPrefix(line, "n"); ok && path != "" {
+			paths = append(paths, path)
 		}
 	}
 	return paths
+}
+
+func defaultProcessOpenFilePathsForMetadata(pid int) []string {
+	return lsofFieldN("-nP", "-p", strconv.Itoa(pid), "-Fn")
 }
 
 func defaultProcessWorkingDirectoryForMetadata(pid int) string {
@@ -6375,26 +6364,8 @@ func defaultProcessWorkingDirectoryForMetadata(pid int) string {
 			return target
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), processMetadataTimeout)
-	defer cancel()
-	output, err := exec.CommandContext(
-		ctx,
-		"lsof",
-		"-nP",
-		"-a",
-		"-p",
-		strconv.Itoa(pid),
-		"-d",
-		"cwd",
-		"-Fn",
-	).Output()
-	if err != nil || ctx.Err() != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "n") && len(line) > 1 {
-			return line[1:]
-		}
+	if paths := lsofFieldN("-nP", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn"); len(paths) > 0 {
+		return paths[0]
 	}
 	return ""
 }
@@ -6441,23 +6412,6 @@ func ancestorPanePID(
 		current = process.ppid
 	}
 	return 0
-}
-
-func sessionIDFromSelectedAgentProcessArgs(
-	processes map[int]processInfo,
-	panePid int,
-	tool string,
-) string {
-	selected := agentProcessesByPane(
-		processes,
-		map[int]struct{}{panePid: {}},
-		tool,
-	)
-	process, ok := selected[panePid]
-	if !ok {
-		return ""
-	}
-	return agentSessionIDFromArgs(tool, process.args)
 }
 
 func agentSessionIDFromArgs(tool string, args string) string {
@@ -8641,15 +8595,11 @@ func addReplyCount(counts map[string]int, windowID string, delta int) map[string
 	return counts
 }
 
-func (c *attachClient) expectTerminalResponses(windowID string, count int) {
-	c.expectTerminalResponsesUntilDelivered(windowID, count, 0)
-}
-
 // expectTerminalResponsesUntilDelivered expects count replies for windowID to
 // a query that ends at output offset deliveredAt. For a client that reports
 // delivery, the replies stay expected past the usual grace until a report
 // covers that offset; zero, or a client that does not report, starts the
-// grace now as expectTerminalResponses does.
+// grace now.
 func (c *attachClient) expectTerminalResponsesUntilDelivered(
 	windowID string,
 	count int,
@@ -9703,16 +9653,18 @@ func (s *muxServer) attachClientByIDLocked(clientID string) *attachClient {
 	return matched
 }
 
+func compareAttachClientFocus(first, second *attachClient) int {
+	return cmp.Or(
+		cmp.Compare(second.focusSequence.Load(), first.focusSequence.Load()),
+		cmp.Compare(second.sequence, first.sequence),
+	)
+}
+
 func moreRecentlyFocusedAttachClient(
 	first *attachClient,
 	second *attachClient,
 ) bool {
-	firstFocus := first.focusSequence.Load()
-	secondFocus := second.focusSequence.Load()
-	if firstFocus != secondFocus {
-		return firstFocus > secondFocus
-	}
-	return first.sequence > second.sequence
+	return compareAttachClientFocus(first, second) < 0
 }
 
 func (s *muxServer) isAttachConnectionLocked(conn net.Conn) bool {
@@ -10892,14 +10844,6 @@ func (s *muxServer) broadcastLocked(response controlResponse) {
 	}
 }
 
-func (s *muxServer) broadcastWindowList(eventType string) {
-	s.broadcast(controlResponse{
-		Type:    eventType,
-		Session: s.session,
-		Windows: s.snapshots(),
-	})
-}
-
 // broadcastWindowListCached snapshots and enqueues the current window list
 // atomically under s.mu before triggering a single-flight background metadata
 // refresh, ensuring no newer window_updated can be queued ahead of it.
@@ -11137,7 +11081,7 @@ func (s *muxServer) runShellCommandContext(
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.Env = inheritedEnvironment(os.Environ())
+	cmd.Env = slices.Clone(os.Environ())
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
@@ -11836,14 +11780,8 @@ func (s *muxServer) deferAttachReplayForRedrawLocked(
 	return true
 }
 
-func (s *muxServer) simulateForegroundResizeIfAttached(
-	conn net.Conn,
-	window *muxWindow,
-) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.isAttachConnectionLocked(conn) || window == nil || window.closed ||
-		window.retainsConPtyNormalScreenLocked() {
+func (s *muxServer) simulateForegroundResizeLocked(window *muxWindow) bool {
+	if window == nil || window.closed || window.retainsConPtyNormalScreenLocked() {
 		return false
 	}
 	s.pauseAttachForwardingForRedrawLocked(
@@ -11855,20 +11793,19 @@ func (s *muxServer) simulateForegroundResizeIfAttached(
 	return true
 }
 
+func (s *muxServer) simulateForegroundResizeIfAttached(
+	conn net.Conn,
+	window *muxWindow,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isAttachConnectionLocked(conn) && s.simulateForegroundResizeLocked(window)
+}
+
 func (s *muxServer) simulateForegroundResizeIfAnyAttached(window *muxWindow) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.attachCountLocked() == 0 || window == nil || window.closed ||
-		window.retainsConPtyNormalScreenLocked() {
-		return false
-	}
-	s.pauseAttachForwardingForRedrawLocked(
-		window,
-		s.publishedWidth,
-		s.publishedHeight,
-	)
-	deliverForegroundGeometry(window, s.publishedWidth, s.publishedHeight)
-	return true
+	return s.attachCountLocked() > 0 && s.simulateForegroundResizeLocked(window)
 }
 
 func (s *muxServer) pauseAttachForwardingForRedrawLocked(
@@ -12239,9 +12176,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	if primaryNeedsFailover {
 		initialOutput = failoverOutput
 	}
-	sort.Slice(clients, func(i int, j int) bool {
-		return moreRecentlyFocusedAttachClient(clients[i], clients[j])
-	})
+	slices.SortFunc(clients, compareAttachClientFocus)
 	s.deliverWithQueryFallback(
 		windowID,
 		primaryClient,
@@ -12682,19 +12617,12 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingPrimaryNeedsFailover = false
 }
 
-// foregroundHistoryFallbackReplayLocked renders screen, the snapshot taken
-// when the redraw pause began or the model as it is now, into a full replay.
-// The frame is the screen's, but the surrounding mode, cursor, and
+// foregroundHistoryFallbackReplayForClientLocked renders screen, the snapshot
+// taken when the redraw pause began or the model as it is now, into a full
+// replay. The frame is the screen's, but the surrounding mode, cursor, and
 // retained-image state is read now, so state the window learned *during* the
 // pause (a mode change, a new image upload) is carried into the fallback
 // instead of being dropped with the discarded redraw.
-func (s *muxServer) foregroundHistoryFallbackReplayLocked(
-	window *muxWindow,
-	screen *terminalScreen,
-) []byte {
-	return s.foregroundHistoryFallbackReplayForClientLocked(window, screen, nil)
-}
-
 func (s *muxServer) foregroundHistoryFallbackReplayForClientLocked(
 	window *muxWindow,
 	screen *terminalScreen,
@@ -13093,7 +13021,7 @@ func appendGroupedPrivateModeReplay(
 	group []string,
 ) []byte {
 	for _, mode := range group {
-		if !containsString(privateModes, mode) {
+		if !slices.Contains(privateModes, mode) {
 			continue
 		}
 		if enabled, ok := window.privateModes[mode]; ok && !enabled {
@@ -13101,7 +13029,7 @@ func appendGroupedPrivateModeReplay(
 		}
 	}
 	for _, mode := range group {
-		if !containsString(privateModes, mode) {
+		if !slices.Contains(privateModes, mode) {
 			continue
 		}
 		if enabled, ok := window.privateModes[mode]; ok && enabled {
@@ -13134,20 +13062,11 @@ func appendPrivateModeReplay(replay []byte, mode string, enabled bool) []byte {
 }
 
 func groupedReplayPrivateMode(mode string) bool {
-	if containsString(alternateScreenReplayPrivateModes, mode) {
+	if slices.Contains(alternateScreenReplayPrivateModes, mode) {
 		return true
 	}
 	for _, group := range groupedReplayPrivateModes {
-		if containsString(group, mode) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
+		if slices.Contains(group, mode) {
 			return true
 		}
 	}
@@ -13323,13 +13242,14 @@ func (s *muxServer) writeAttachOutputIfActive(
 	if len(queryData) > 0 {
 		fallbacks = allClients
 	}
-	sort.Slice(fallbacks, func(i int, j int) bool {
-		iCurrent := fallbacks[i].conn == currentPrimary
-		jCurrent := fallbacks[j].conn == currentPrimary
-		if iCurrent != jCurrent {
-			return iCurrent
+	slices.SortFunc(fallbacks, func(a, b *attachClient) int {
+		if aCurrent, bCurrent := a.conn == currentPrimary, b.conn == currentPrimary; aCurrent != bCurrent {
+			if aCurrent {
+				return -1
+			}
+			return 1
 		}
-		return moreRecentlyFocusedAttachClient(fallbacks[i], fallbacks[j])
+		return compareAttachClientFocus(a, b)
 	})
 	s.deliverWithQueryFallback(
 		windowID,
@@ -13511,18 +13431,20 @@ func (s *muxServer) enqueuePrimaryAttachLocked(
 		clients = append(clients, client)
 	}
 	s.mu.Unlock()
-	sort.Slice(clients, func(i int, j int) bool {
-		iPreferred := clients[i].conn == preferred
-		jPreferred := clients[j].conn == preferred
-		if iPreferred != jPreferred {
-			return iPreferred
+	slices.SortFunc(clients, func(a, b *attachClient) int {
+		if aPreferred, bPreferred := a.conn == preferred, b.conn == preferred; aPreferred != bPreferred {
+			if aPreferred {
+				return -1
+			}
+			return 1
 		}
-		iCurrent := clients[i].conn == currentPrimary
-		jCurrent := clients[j].conn == currentPrimary
-		if iCurrent != jCurrent {
-			return iCurrent
+		if aCurrent, bCurrent := a.conn == currentPrimary, b.conn == currentPrimary; aCurrent != bCurrent {
+			if aCurrent {
+				return -1
+			}
+			return 1
 		}
-		return moreRecentlyFocusedAttachClient(clients[i], clients[j])
+		return compareAttachClientFocus(a, b)
 	})
 	responseCount := terminalQueryResponseCount(data)
 	for _, client := range clients {
@@ -14683,16 +14605,12 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 	return w.screen
 }
 
-func (w *muxWindow) appendHistoryLocked(chunk []byte) {
-	w.appendHistoryReportingCursorLocked(chunk, nil)
-}
-
-// appendHistoryReportingCursorLocked records chunk like appendHistoryLocked and
-// returns the screen model's answers to the cursor position queries at
-// cursorQueries (ascending byte ranges of chunk), each as of its own position,
-// and how many of the queries they answer. The first query the model cannot
-// answer as the client would, and every one after it, is left unanswered so a
-// local answer never overtakes the client's.
+// appendHistoryReportingCursorLocked records chunk into the window's byte
+// history and screen model and returns the screen model's answers to the cursor
+// position queries at cursorQueries (ascending byte ranges of chunk), each as
+// of its own position, and how many of the queries they answer. The first query
+// the model cannot answer as the client would, and every one after it, is left
+// unanswered so a local answer never overtakes the client's.
 func (w *muxWindow) appendHistoryReportingCursorLocked(
 	chunk []byte,
 	cursorQueries [][2]int,
@@ -16665,8 +16583,8 @@ func (w *muxWindow) kittyImageReplaySelectionLocked(
 	// Select by mutation recency so an actively changing older root is retained.
 	// Emission below still follows root order to preserve I= mapping semantics.
 	candidates := append([]string(nil), w.kittyImageOrder...)
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return w.kittyImageSeq[candidates[i]] > w.kittyImageSeq[candidates[j]]
+	slices.SortStableFunc(candidates, func(a, b string) int {
+		return cmp.Compare(w.kittyImageSeq[b], w.kittyImageSeq[a])
 	})
 	selected := make([]string, 0, maxReplayedKittyImages)
 	numberReplays := make(map[string][]byte, maxReplayedKittyImages)
@@ -16872,7 +16790,7 @@ func (w *muxWindow) kittyImageNumberReplayLocked(id string) []byte {
 			numbers = append(numbers, number)
 		}
 	}
-	sort.Strings(numbers)
+	slices.Sort(numbers)
 	var out []byte
 	for _, number := range numbers {
 		out = append(out, "\x1b_Ga=a,i="...)
@@ -17185,6 +17103,32 @@ func parseKittyControl(control string) map[string]string {
 	return args
 }
 
+func rewriteKittyControlSpan(
+	seq []byte,
+	controlStart, controlEnd int,
+	edit func(parts []string) []string,
+) []byte {
+	parts := edit(strings.Split(string(seq[controlStart:controlEnd]), ","))
+	out := make([]byte, 0, len(seq)+8)
+	out = append(out, seq[:controlStart]...)
+	out = append(out, strings.Join(parts, ",")...)
+	return append(out, seq[controlEnd:]...)
+}
+
+// rewriteFirstKittyControl rewrites the key=value control section of the first
+// 7-bit Kitty APC command in seq, preserving any trailing chunks.
+func rewriteFirstKittyControl(seq []byte, edit func(parts []string) []string) []byte {
+	apcEnd := kittyApcEnd(seq, 0)
+	if apcEnd < 0 {
+		return seq
+	}
+	controlEnd := apcEnd - 2 // before ST
+	if semi := bytes.IndexByte(seq[:apcEnd], ';'); semi >= 0 {
+		controlEnd = semi
+	}
+	return rewriteKittyControlSpan(seq, 3, controlEnd, edit)
+}
+
 // rewriteKittyReplayCommand suppresses protocol responses during replay and,
 // for roots, downgrades a=T to store-only a=t so replay never draws or moves
 // the cursor before the foreground app redraws its placements.
@@ -17193,28 +17137,25 @@ func rewriteKittyReplayCommand(seq []byte, storeOnly bool) []byte {
 	if !ok {
 		return append([]byte(nil), seq...)
 	}
-	parts := strings.Split(string(seq[controlStart:controlEnd]), ",")
-	foundQuiet := false
-	for index, part := range parts {
-		key, _, _ := strings.Cut(part, "=")
-		switch key {
-		case "a":
-			if storeOnly && part == "a=T" {
-				parts[index] = "a=t"
+	return rewriteKittyControlSpan(seq, controlStart, controlEnd, func(parts []string) []string {
+		foundQuiet := false
+		for index, part := range parts {
+			key, _, _ := strings.Cut(part, "=")
+			switch key {
+			case "a":
+				if storeOnly && part == "a=T" {
+					parts[index] = "a=t"
+				}
+			case "q":
+				parts[index] = "q=2"
+				foundQuiet = true
 			}
-		case "q":
-			parts[index] = "q=2"
-			foundQuiet = true
 		}
-	}
-	if !foundQuiet {
-		parts = append(parts, "q=2")
-	}
-	out := make([]byte, 0, len(seq)+4)
-	out = append(out, seq[:controlStart]...)
-	out = append(out, strings.Join(parts, ",")...)
-	out = append(out, seq[controlEnd:]...)
-	return out
+		if !foundQuiet {
+			parts = append(parts, "q=2")
+		}
+		return parts
+	})
 }
 
 // rewriteKittyImageReferenceToID makes a retained command independent of an
@@ -17225,37 +17166,26 @@ func rewriteKittyImageReferenceToID(seq []byte, imageID string) []byte {
 	if err != nil || numericID == 0 || len(seq) < 5 {
 		return seq
 	}
-	apcEnd := kittyApcEnd(seq, 0)
-	if apcEnd < 0 {
-		return seq
-	}
-	controlEnd := apcEnd - 2 // before ST
-	if semi := bytes.IndexByte(seq[:apcEnd], ';'); semi >= 0 {
-		controlEnd = semi
-	}
-	parts := strings.Split(string(seq[3:controlEnd]), ",")
-	rewritten := make([]string, 0, len(parts)+1)
-	foundID := false
-	for _, part := range parts {
-		key, _, _ := strings.Cut(part, "=")
-		switch key {
-		case "I":
-			continue
-		case "i":
-			rewritten = append(rewritten, "i="+imageID)
-			foundID = true
-		default:
-			rewritten = append(rewritten, part)
+	return rewriteFirstKittyControl(seq, func(parts []string) []string {
+		rewritten := make([]string, 0, len(parts)+1)
+		foundID := false
+		for _, part := range parts {
+			key, _, _ := strings.Cut(part, "=")
+			switch key {
+			case "I":
+				continue
+			case "i":
+				rewritten = append(rewritten, "i="+imageID)
+				foundID = true
+			default:
+				rewritten = append(rewritten, part)
+			}
 		}
-	}
-	if !foundID {
-		rewritten = append(rewritten, "i="+imageID)
-	}
-	out := make([]byte, 0, len(seq)+len(imageID)+3)
-	out = append(out, seq[:3]...)
-	out = append(out, strings.Join(rewritten, ",")...)
-	out = append(out, seq[controlEnd:]...)
-	return out
+		if !foundID {
+			rewritten = append(rewritten, "i="+imageID)
+		}
+		return rewritten
+	})
 }
 
 func csiSequenceEnd(data []byte, start int) int {
@@ -17921,7 +17851,7 @@ func isTerminalResponseCsi(sequence []byte) bool {
 		)
 	case 't':
 		first, _, ok := strings.Cut(params, ";")
-		return ok && containsString([]string{"4", "5", "6", "8", "9"}, first)
+		return ok && slices.Contains([]string{"4", "5", "6", "8", "9"}, first)
 	case 'y':
 		return strings.HasSuffix(params, "$")
 	case 'u':
@@ -18715,8 +18645,8 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		if final == 'h' || final == 'l' {
 			enabled := final == 'h'
-			if strings.HasPrefix(params, "?") {
-				for _, mode := range csiModeParams(strings.TrimPrefix(params, "?")) {
+			if privateParams, ok := strings.CutPrefix(params, "?"); ok {
+				for _, mode := range csiModeParams(privateParams) {
 					w.setPrivateModeLocked(mode, enabled)
 				}
 			} else {
@@ -19943,12 +19873,7 @@ func (s runningServerStatus) displayVersion() string {
 }
 
 func (s runningServerStatus) supportsCapability(capability string) bool {
-	for _, value := range s.capabilities {
-		if value == capability {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.capabilities, capability)
 }
 
 func promptForServerUpdate(
@@ -20024,22 +19949,11 @@ func normalizeServerUpdatePolicy(value string) (string, error) {
 }
 
 func queryRunningServerStatus(session string) (runningServerStatus, error) {
-	conn, err := dialSession(session)
+	conn, _, _, hello, err := dialControlClient(session)
 	if err != nil {
 		return runningServerStatus{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
-
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	if err := enc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
-		return runningServerStatus{}, err
-	}
-	var hello controlResponse
-	if err := dec.Decode(&hello); err != nil {
-		return runningServerStatus{}, err
-	}
 	return runningServerStatus{
 		version:      hello.Version,
 		capabilities: hello.Capabilities,
@@ -20095,39 +20009,22 @@ func closeOutgoingTerminalWindows(
 	session string,
 	windowIDs []string,
 ) error {
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	if err := enc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
-		return err
-	}
-	if _, err := readControlHello(dec); err != nil {
+	enc, dec, _, err := handshakeControlClient(conn, session)
+	if err != nil {
 		return err
 	}
 	for index, windowID := range windowIDs {
-		requestID := fmt.Sprintf("native-handoff-%d-%d", time.Now().UnixNano(), index)
-		if err := enc.Encode(controlMessage{
-			ID:       requestID,
+		response, err := sendControlRequest(enc, dec, controlMessage{
+			ID:       fmt.Sprintf("native-handoff-%d-%d", time.Now().UnixNano(), index),
 			Type:     "close_window",
 			Session:  session,
 			WindowID: windowID,
-		}); err != nil {
+		}, "unable to close outgoing terminal window")
+		if err != nil {
 			return err
 		}
-		for {
-			var response controlResponse
-			if err := dec.Decode(&response); err != nil {
-				return err
-			}
-			if response.ID != requestID {
-				continue
-			}
-			if response.Status == "error" || response.Type == "error" {
-				return errors.New(firstNonEmptyString(response.Error, "unable to close outgoing terminal window"))
-			}
-			if response.Type != "window_closed" {
-				return errors.New("unexpected terminal-window handoff response")
-			}
-			break
+		if response.Type != "window_closed" {
+			return errors.New("unexpected terminal-window handoff response")
 		}
 	}
 	return nil
@@ -20157,42 +20054,25 @@ func sendServerShutdown(conn net.Conn, session string) error {
 func sendServerShutdownWithTimeout(conn net.Conn, session string, timeout time.Duration) error {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	if err := enc.Encode(controlMessage{Role: "control", Session: session}); err != nil {
-		return err
-	}
-	if _, err := readControlHello(dec); err != nil {
-		return err
-	}
-	requestID := strconv.FormatInt(time.Now().UnixNano(), 10)
-	if err := enc.Encode(controlMessage{
-		ID:      requestID,
-		Type:    "shutdown",
-		Session: session,
-	}); err != nil {
+	enc, dec, _, err := handshakeControlClient(conn, session)
+	if err != nil {
 		return err
 	}
 	// handleControl sends hello and then a window_list before reading requests.
 	// Closing now can fail that second write, closing the server-side connection
 	// before its scanner consumes shutdown. Drain greetings/events and wait for
 	// our acknowledgement so a buffered write cannot masquerade as a shutdown.
-	for {
-		var response controlResponse
-		if err := dec.Decode(&response); err != nil {
-			return err
-		}
-		if response.ID != requestID {
-			continue
-		}
-		if response.Status == "error" || response.Type == "error" {
-			return errors.New(firstNonEmptyString(response.Error, "server rejected shutdown"))
-		}
-		if response.Type != "shutdown" || response.Status != "ok" {
-			return errors.New("unexpected server shutdown response")
-		}
-		return nil
+	response, err := sendControlRequest(enc, dec, controlMessage{
+		Type:    "shutdown",
+		Session: session,
+	}, "server rejected shutdown")
+	if err != nil {
+		return err
 	}
+	if response.Type != "shutdown" || response.Status != "ok" {
+		return errors.New("unexpected server shutdown response")
+	}
+	return nil
 }
 
 func waitForServerExit(session string, timeout time.Duration) bool {
@@ -20235,14 +20115,8 @@ func waitForServerProcessExit(
 	return hasExited()
 }
 
-func inheritedEnvironment(base []string) []string {
-	result := make([]string, len(base))
-	copy(result, base)
-	return result
-}
-
 func terminalEnvironment(base []string) []string {
-	env := inheritedEnvironment(base)
+	env := slices.Clone(base)
 	env = appendEnvironmentDefault(env, "TERM", "xterm-256color", terminalTermIsUsable)
 	env = appendEnvironmentDefault(env, "COLORTERM", "truecolor", terminalColorTermIsTrueColor)
 	env = appendEnvironmentDefault(env, "TERM_PROGRAM", "kitty", terminalProgramSupportsInlineImages)
@@ -20419,7 +20293,7 @@ func makeTerminalRaw() func() {
 	}
 }
 
-func sendResize(session string, clientID string, width int, height int) {
+func sendOneWayControlMessage(session string, message controlMessage) {
 	conn, err := dialSession(session)
 	if err != nil {
 		return
@@ -20431,16 +20305,20 @@ func sendResize(session string, clientID string, width int, height int) {
 	_ = enc.Encode(controlMessage{Role: "control", Session: session})
 	_ = dec.Decode(&controlResponse{})
 	_ = dec.Decode(&controlResponse{})
+	message.ID = strconv.FormatInt(time.Now().UnixNano(), 10)
+	message.Session = session
+	_ = enc.Encode(message)
+}
+
+func sendResize(session string, clientID string, width int, height int) {
 	cellWidth, cellHeight := terminalCellPixelSize()
-	_ = enc.Encode(controlMessage{
-		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+	sendOneWayControlMessage(session, controlMessage{
 		Type:       "resize",
 		ClientID:   clientID,
 		Width:      width,
 		Height:     height,
 		CellWidth:  cellWidth,
 		CellHeight: cellHeight,
-		Session:    session,
 	})
 }
 
@@ -20453,25 +20331,12 @@ func sendCellSize(
 	width int,
 	height int,
 ) {
-	conn, err := dialSession(session)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	_ = enc.Encode(controlMessage{Role: "control", Session: session})
-	_ = dec.Decode(&controlResponse{})
-	_ = dec.Decode(&controlResponse{})
-	_ = enc.Encode(controlMessage{
-		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+	sendOneWayControlMessage(session, controlMessage{
 		Type:       "cell_size",
 		ClientID:   clientID,
 		CellToken:  token,
 		CellWidth:  width,
 		CellHeight: height,
-		Session:    session,
 	})
 }
 

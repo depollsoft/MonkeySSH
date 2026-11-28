@@ -27,6 +27,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/windows_remote_powershell.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
 const _bridgeId = '0123456789abcdef0123456789abcdef';
@@ -86,7 +87,7 @@ _openHistoryTransport(
       );
     },
   );
-  final client = _MockSshClient();
+  final client = MockSshClient();
   when(() => client.execute(any(), pty: any(named: 'pty')))
       .thenAnswer((_) async => channel.session);
   final transport = _bridgeService(diagnostics: diagnostics).connect(
@@ -108,10 +109,6 @@ String _historyOutput(int sequence, Map<String, Object?> data) => _frame({
   'sequence': sequence,
   'data': data,
 });
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockSshChannel extends MockSessionWithChannel {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
@@ -157,7 +154,7 @@ final class _TestChannel {
     });
   }
 
-  final session = _MockSshChannel();
+  final session = MockSessionWithChannel();
   final stdout = StreamController<Uint8List>();
   final stderr = StreamController<Uint8List>();
   final List<List<int>> writes = [];
@@ -259,7 +256,7 @@ void main() {
     tester,
   ) async {
     final opening = Completer<SSHSession>();
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) => opening.future);
     final session = _sshSession(client);
@@ -292,7 +289,7 @@ void main() {
     await failed;
     expect(activeQueuedSshExecCountForTesting(session.connectionId), 0);
     expect(pendingQueuedSshExecCountForTesting(session.connectionId), 0);
-    final late = _MockSshChannel();
+    final late = MockSessionWithChannel();
     opening.complete(late);
     await tester.pump();
     verify(late.channel.destroy).called(1);
@@ -302,7 +299,7 @@ void main() {
     tester,
   ) async {
     final opening = Completer<SSHSession>();
-    final client = _MockSshClient();
+    final client = MockSshClient();
     late _TestChannel channel;
     channel = _TestChannel(
       onWrite: (value) {
@@ -364,7 +361,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
     expect(calls, 3);
     expect(transport.isConnected, isTrue);
-    final late = _MockSshChannel();
+    final late = MockSessionWithChannel();
     opening.complete(late);
     await tester.pump();
     verify(late.channel.destroy).called(1);
@@ -741,7 +738,7 @@ void main() {
   test(
     'starts every ACP provider through the active MonkeyMux server context',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final session = _sshSession(client)
         ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
         ..remoteMuxSessionName = 'work';
@@ -861,7 +858,7 @@ void main() {
   );
 
   test('maps Cursor keychain lock from active MonkeyMux server', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final session = _sshSession(client)
       ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
       ..remoteMuxSessionName = 'work';
@@ -1251,7 +1248,7 @@ touch "$HOME/installed"
   });
 
   test('starts, lists, statuses, and stops bridges on POSIX', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final commands = <String>[];
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
       invocation,
@@ -1336,7 +1333,7 @@ touch "$HOME/installed"
   });
 
   test('reads request kinds only from bridges that track them', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     Map<String, Object?> bridge(String id, Map<String, Object?> extra) => {
       ..._metadata(id: id),
       ...extra,
@@ -1385,7 +1382,7 @@ touch "$HOME/installed"
   test(
     'refuses custom agent arguments Windows would not pass exactly',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final service = MonkeyMuxAcpBridgeService(
         installer: _FakeInstaller(
           const MonkeyMuxInstallation(
@@ -1470,7 +1467,7 @@ touch "$HOME/installed"
   test(
     'uses encoded PowerShell for Windows helper lifecycle commands',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         invocation,
@@ -1586,7 +1583,7 @@ touch "$HOME/installed"
         }
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final service = _bridgeService();
@@ -1631,7 +1628,7 @@ touch "$HOME/installed"
         );
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -1652,7 +1649,7 @@ touch "$HOME/installed"
       'replay barrier waits through a delayed handshake and status, overflow=$overflow',
       () async {
         final channel = _TestChannel();
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((_) async => channel.session);
         final transport = _bridgeService().connect(
@@ -1732,7 +1729,7 @@ touch "$HOME/installed"
 
   test('closing transport fails a pending replay barrier', () async {
     final channel = _TestChannel();
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -1760,7 +1757,7 @@ touch "$HOME/installed"
         }
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -1830,7 +1827,7 @@ touch "$HOME/installed"
           );
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -1901,7 +1898,7 @@ touch "$HOME/installed"
       final channels = <_TestChannel>[];
       var opens = 0;
       final releaseSecondReplay = Completer<void>();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
         _,
       ) async {
@@ -2014,7 +2011,7 @@ touch "$HOME/installed"
   test('legacy bridge with no pending requests skips queued replay', () async {
     final channels = <_TestChannel>[];
     var opens = 0;
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
       _,
     ) async {
@@ -2139,7 +2136,7 @@ touch "$HOME/installed"
             );
         },
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async => channel.session);
       final transport = _bridgeService().connect(
@@ -2179,7 +2176,7 @@ touch "$HOME/installed"
     () async {
       final channels = <_TestChannel>[];
       var opens = 0;
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async {
             opens += 1;
@@ -2280,7 +2277,7 @@ touch "$HOME/installed"
       () async {
         final channels = <_TestChannel>[];
         var opens = 0;
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((_) async {
               opens += 1;
@@ -2409,7 +2406,7 @@ touch "$HOME/installed"
           );
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -2465,7 +2462,7 @@ touch "$HOME/installed"
             );
         },
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async => channel.session);
       final transport = _bridgeService().connect(
@@ -2766,7 +2763,7 @@ touch "$HOME/installed"
         channel.addText(replay.toString());
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -2858,7 +2855,7 @@ touch "$HOME/installed"
             );
         },
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async => channel.session);
       final transport = _bridgeService().connect(
@@ -2947,7 +2944,7 @@ touch "$HOME/installed"
           );
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -3001,7 +2998,7 @@ touch "$HOME/installed"
           }
         },
       );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((_) async => channel.session);
       final transport = _bridgeService().connect(
@@ -3091,7 +3088,7 @@ touch "$HOME/installed"
         }
       },
     );
-    final client = _MockSshClient();
+    final client = MockSshClient();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async => channel.session);
     final transport = _bridgeService().connect(
@@ -3120,7 +3117,7 @@ touch "$HOME/installed"
   });
 
   test('input written during reconnect flushes after reattach', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final channels = <_TestChannel>[];
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async {
@@ -3176,7 +3173,7 @@ touch "$HOME/installed"
   });
 
   test('explicit close only detaches locally and cancels reconnect', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final commands = <String>[];
     final channel = _TestChannel();
     when(() => client.execute(any(), pty: any(named: 'pty')))
@@ -3202,7 +3199,7 @@ touch "$HOME/installed"
   });
 
   test('surfaces failed helper process and cleans up the channel', () async {
-    final client = _MockSshClient();
+    final client = MockSshClient();
     final channel = _TestChannel();
     when(() => client.execute(any(), pty: any(named: 'pty')))
         .thenAnswer((_) async {

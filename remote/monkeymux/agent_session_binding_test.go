@@ -23,7 +23,7 @@ func bindingTestStore(t *testing.T, tool string) (string, func(string, string, t
 	processTableForMetadata = func() map[int]processInfo { return map[int]processInfo{} }
 	t.Cleanup(func() { processTableForMetadata = originalTable })
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	t.Setenv("USERPROFILE", home)
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(cwd, 0700); err != nil {

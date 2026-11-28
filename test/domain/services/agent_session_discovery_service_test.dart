@@ -15,11 +15,8 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_connection_backend_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockExecSession extends MockSessionWithChannel {}
 
 class _MockTerminalConnectionBackendService extends Mock
     implements TerminalConnectionBackendService {}
@@ -45,7 +42,7 @@ Stream<Uint8List> _utf8Stream(String value) => value.isEmpty
 void _ignoreInvocation(Invocation _) {}
 
 SSHSession _buildExecSession({String stdout = '', String stderr = ''}) {
-  final session = _MockExecSession();
+  final session = MockSessionWithChannel();
   when(() => session.stdout).thenAnswer((_) => _utf8Stream(stdout));
   when(() => session.stderr).thenAnswer((_) => _utf8Stream(stderr));
   when(() => session.write(any())).thenAnswer(_ignoreInvocation);
@@ -54,7 +51,7 @@ SSHSession _buildExecSession({String stdout = '', String stderr = ''}) {
 }
 
 SSHSession _buildOpenMarkerExecSession({String stdout = '', int? chunkSize}) {
-  final session = _MockExecSession();
+  final session = MockSessionWithChannel();
   final stdoutController = StreamController<Uint8List>();
   final stderrController = StreamController<Uint8List>();
 
@@ -89,7 +86,7 @@ SSHSession _buildAcpSessionListExecSession({
   bool repeatedCursor = false,
   List<String?>? requestedCwds,
 }) {
-  final session = _MockExecSession();
+  final session = MockSessionWithChannel();
   final stdoutController = StreamController<Uint8List>();
   final stderrController = StreamController<Uint8List>();
   var listRequestCount = 0;
@@ -167,7 +164,7 @@ void main() {
       tester,
     ) async {
       final opening = Completer<SSHSession>();
-      final client = _MockSshClient();
+      final client = MockSshClient();
       if (kind == 'windows') {
         when(() => client.remoteVersion)
             .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -1649,7 +1646,7 @@ cwd: /tmp/demo
 
   group('discoverSessionsStream caching', () {
     test('discovers sessions via PowerShell on Windows remotes', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
@@ -1734,7 +1731,7 @@ cwd: /tmp/demo
     test(
       'OpenCode discovery reads Windows JSON storage without sqlite3',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.remoteVersion)
             .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
@@ -1788,7 +1785,7 @@ cwd: /tmp/demo
     );
 
     test('Antigravity discovery reads Windows JSON sessions', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
@@ -1832,7 +1829,7 @@ cwd: /tmp/demo
     });
 
     test('Copilot discovery uses ACP session/list when available', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       final requestedCwds = <String?>[];
       _stubDiscoveryExec(client, (command) async {
@@ -1904,7 +1901,7 @@ branch refs/heads/feature
     test(
       'ACP discovery preserves earlier pages when a later page is malformed',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
@@ -1956,7 +1953,7 @@ branch refs/heads/main
     );
 
     test('ACP discovery preserves sessions and stops repeated cursors per directory', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       final requestedCwds = <String?>[];
       _stubDiscoveryExec(client, (command) async {
@@ -2023,7 +2020,7 @@ branch refs/heads/main
 
     for (final windows in [false, true]) {
       test('OpenCode V2 discovers API sessions, windows=$windows', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         if (windows) {
           when(() => client.remoteVersion)
               .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -2086,7 +2083,7 @@ branch refs/heads/main
     }
 
     test('OpenCode discovery uses ACP session/list when available', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -2144,7 +2141,7 @@ branch refs/heads/main
     for (final windows in [false, true]) {
       test('Antigravity snapshots preserve metadata precedence on '
           '${windows ? 'Windows' : 'POSIX'}', () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         if (windows) {
           when(() => client.remoteVersion)
               .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -2305,7 +2302,7 @@ branch refs/heads/main
           () async {
             final readLimit = previewOnly ? 6 : 24;
             final scanLimit = previewOnly ? 24 : 60;
-            final client = _MockSshClient();
+            final client = MockSshClient();
             if (windows) {
               when(() => client.remoteVersion)
                   .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -2412,7 +2409,7 @@ branch refs/heads/main
     test(
       'all-provider discovery skips ACP probes for fast panel loads',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
@@ -2458,7 +2455,7 @@ branch refs/heads/main
     test(
       'MonkeyMux discovery uses control-channel commands and skips ACP exec',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final backendService = _MockTerminalConnectionBackendService();
         final backend = _MockTerminalConnectionBackend();
         final commands = <String>[];
@@ -2516,7 +2513,7 @@ branch refs/heads/main
     );
 
     test('Pi expands a tilde scope before MonkeyMux bucket lookup', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final backendService = _MockTerminalConnectionBackendService();
       final backend = _MockTerminalConnectionBackend();
       final commands = <String>[];
@@ -2590,7 +2587,7 @@ branch refs/heads/main
     });
 
     test('all-provider stream emits lightweight previews before final aggregate', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -2641,7 +2638,7 @@ branch refs/heads/main
     });
 
     test('parses large remote snapshots off the UI isolate', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const metaPath =
           '/Users/demo/.cursor/chats/workspace/'
           '0d8d2b7c-6f1e-4d0f-9c1a-2b3c4d5e6f70/meta.json';
@@ -2681,7 +2678,7 @@ branch refs/heads/main
     });
 
     test('returns when SSH exec stdout stays open after done marker', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const metaPath =
           '/Users/demo/.cursor/chats/workspace/'
           '1e9f3c8d-7a2b-4e1c-8d2b-3c4d5e6f7a81/meta.json';
@@ -2720,7 +2717,7 @@ branch refs/heads/main
     });
 
     test('reads split markers and fragmented large discovery output', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const metaPath =
           '/Users/demo/.cursor/chats/workspace/'
           '1e9f3c8d-7a2b-4e1c-8d2b-3c4d5e6f7a81/meta.json';
@@ -2764,7 +2761,7 @@ branch refs/heads/main
     });
 
     test('global discovery never probes Gemini CLI storage', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -2792,7 +2789,7 @@ branch refs/heads/main
     });
 
     test('scoped discovery never probes Gemini CLI storage', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -2834,7 +2831,7 @@ branch refs/heads/main
     });
 
     test('requesting the Gemini CLI provider yields no sessions', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -2856,7 +2853,7 @@ branch refs/heads/main
     test(
       'Codex discovery uses resumable UUID instead of rollout filename',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         const rolloutPath =
             '/Users/demo/.codex/sessions/2026/04/26/'
             'rollout-2026-04-26T15-44-01-'
@@ -2914,7 +2911,7 @@ branch refs/heads/main
             '{"type":"event_msg","payload":{"type":"user_message",'
             '"message":"beyond the ceiling","images":[]}}\n',
           );
-      final client = _MockSshClient();
+      final client = MockSshClient();
       var snapshotChars = 0;
       _stubDiscoveryExec(client, (command) async {
         if (command.contains('find ~/.codex/sessions')) {
@@ -2953,7 +2950,7 @@ branch refs/heads/main
     }, skip: Platform.isWindows);
 
     test('Codex ranks sessions without an index entry by file mtime', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const root = '/Users/demo/.codex/sessions/2026/04';
       const resumedId = '019dcbf6-c80e-7c30-b7fa-3d352bda8c4d';
       const newerId = '019dcbf6-c80e-7c30-b7fa-3d352bda8c4e';
@@ -3014,7 +3011,7 @@ branch refs/heads/main
       'Claude discovery bounds the transcript search and reads head and tail '
       'in one round trip',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         const sessionId = '0d8d2b7c-6f1e-4d0f-9c1a-2b3c4d5e6f70';
         const transcriptPath =
             '/Users/demo/.claude/projects/-Users-depoll-Code-flutty/'
@@ -3081,7 +3078,7 @@ branch refs/heads/main
     );
 
     test('Cursor discovery resolves chat id, title, and cwd', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const metaPath =
           '/Users/demo/.cursor/chats/7fb0188e9fe01ef050275e8289ce9696/'
           'f21ed2df-500d-46a5-b55f-12b64268491f/meta.json';
@@ -3125,7 +3122,7 @@ branch refs/heads/main
     test(
       'Cursor discovery keeps current metadata-only chats resumable',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         const metaPath =
             '/Users/demo/.cursor/chats/workspace/'
             'bfc1447e-9184-4dcb-ad28-130dd28177d3/meta.json';
@@ -3220,7 +3217,7 @@ branch refs/heads/main
         writeChat(subagent, isSubagent: true, prompts: ['Subagent task']);
 
         final commands = <String>[];
-        final client = _MockSshClient();
+        final client = MockSshClient();
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
           final result = await Process.run(
@@ -3262,7 +3259,7 @@ branch refs/heads/main
     );
 
     test('Cursor reads prompt history for picker loads only, cached by meta mtime', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const chatDirectory =
           '/Users/demo/.cursor/chats/workspace/'
           '66666666-6666-4666-8666-666666666666';
@@ -3332,7 +3329,7 @@ branch refs/heads/main
     });
 
     test('Cursor retries a chat without a prompt label later', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const chatDirectory =
           '/Users/demo/.cursor/chats/workspace/'
           '88888888-8888-4888-8888-888888888888';
@@ -3398,7 +3395,7 @@ branch refs/heads/main
     });
 
     test('Cursor prompt labels are re-read after invalidateSession', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const chatDirectory =
           '/Users/demo/.cursor/chats/workspace/'
           '99999999-9999-4999-8999-999999999999';
@@ -3453,7 +3450,7 @@ branch refs/heads/main
     });
 
     test('Cursor never names a chat with a label the picker drops', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const workspace = '/Users/demo/.cursor/chats/workspace';
       const folder = '/Users/depoll/Code/MonkeySSH';
       // Chat id prefix → (meta.json title, prompts newest first).
@@ -3535,7 +3532,7 @@ branch refs/heads/main
     });
 
     test('Cursor reads the prompt history tail on Windows hosts', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       const chatDirectory =
@@ -3589,7 +3586,7 @@ branch refs/heads/main
     });
 
     test('Cursor names many untitled chats on Windows within cmd.exe limits', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       const workspace =
@@ -3652,7 +3649,7 @@ branch refs/heads/main
       test(
         'Muse discovery reads fresh logs with indexTitle=$indexTitle',
         () async {
-          final client = _MockSshClient();
+          final client = MockSshClient();
           const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
           const path = '/data/muse/sessions/2026/09/16/$id/session.jsonl';
           final commands = <String>[];
@@ -3744,7 +3741,7 @@ branch refs/heads/main
         test(
           'Muse rejects copied log identities: windows=$windows indexed=$indexed',
           () async {
-            final client = _MockSshClient();
+            final client = MockSshClient();
             if (windows) {
               when(() => client.remoteVersion)
                   .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -3830,7 +3827,7 @@ branch refs/heads/main
     }
 
     test('Muse Windows discovery reads root logs under XDG_DATA_HOME', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
       const id = '01a0ac67-804e-7f22-8d0d-9a4e2ea626c9';
@@ -3896,7 +3893,7 @@ branch refs/heads/main
     });
 
     test('Grok Build discovery resolves resumable summary metadata', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       const summaryPath =
           '/Users/demo/.grok/sessions/%2FUsers%2Fdepoll%2FCode%2Fflutty/'
@@ -3971,7 +3968,7 @@ HEAD b
     });
 
     test('Grok Build falls back to an unscoped listing', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const summaryPath =
           '/Users/demo/.grok/sessions/%2FUsers%2Fdepoll%2FCode%2Fother/'
           '019f6cb5-f7e4-7bc1-bb25-9985af59619e/summary.json';
@@ -4015,7 +4012,7 @@ HEAD b
     test(
       'Grok Build Windows discovery lets GROK_HOME override default',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.remoteVersion)
             .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
 
@@ -4076,7 +4073,7 @@ HEAD b
     );
 
     test('Pi discovery resolves session header id and cwd', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const sessionPath =
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
@@ -4133,7 +4130,7 @@ HEAD b
     });
 
     test('Pi publishes header rows first and caches labels by mtime and size', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const sessionPath =
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
@@ -4214,7 +4211,7 @@ HEAD b
         ..writeAsStringSync(transcript('SMALL'));
       final large = File('${bucket.path}/b_LARGE.jsonl')
         ..writeAsStringSync(transcript('LARGE', padding: 'x' * (512 << 10)));
-      final client = _MockSshClient();
+      final client = MockSshClient();
       _stubDiscoveryExec(client, (command) async {
         if (command.contains('-maxdepth 1 -name "*.jsonl"')) {
           return _buildExecSession(
@@ -4250,7 +4247,7 @@ HEAD b
     }, skip: Platform.isWindows);
 
     test('Pi discovery does not guess without a pane cwd', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final result = await AgentSessionDiscoveryService()
           .discoverSessionsStream(
             _buildDiscoverySession(client),
@@ -4263,7 +4260,7 @@ HEAD b
     });
 
     test('Pi discovery keeps a scoped header-only session resumable', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const sessionPath =
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7HEADER.jsonl';
@@ -4298,7 +4295,7 @@ HEAD b
     });
 
     test('Pi provider preview reads the exact pane cwd bucket', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const projectPath =
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-flutty--/'
           '2026-04-12T21-07-44-781Z_01JYX7ABCD.jsonl';
@@ -4337,7 +4334,7 @@ HEAD b
     });
 
     test('Pi discovery follows explicit Git worktree buckets', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       const mainPath =
           '/Users/demo/.pi/agent/sessions/--Users-depoll-Code-MonkeySSH--/'
           '2026-04-12T21-07-44-781Z_MAIN.jsonl';
@@ -4400,7 +4397,7 @@ HEAD b
     test(
       'OpenCode re-queries SQLite unscoped before spawning the CLI',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
@@ -4435,7 +4432,7 @@ HEAD b
     );
 
     test('Hermes discovery reads the state database', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -4503,7 +4500,7 @@ HEAD b
         final chmod = await Process.run('chmod', ['+x', fakeSqlite.path]);
         expect(chmod.exitCode, 0, reason: '${chmod.stderr}');
 
-        final client = _MockSshClient();
+        final client = MockSshClient();
         _stubDiscoveryExec(client, (command) async {
           if (!command.contains('state.db')) return _buildExecSession();
           // Run the query for real; the profile PATH puts $HOME/.local/bin
@@ -4573,7 +4570,7 @@ HEAD b
         ]);
         expect(schema.exitCode, 0, reason: '${schema.stderr}');
 
-        final client = _MockSshClient();
+        final client = MockSshClient();
         _stubDiscoveryExec(client, (command) async {
           if (!command.contains('opencode.db')) return _buildExecSession();
           final result = await Process.run(
@@ -4632,7 +4629,7 @@ HEAD b
       ]);
       expect(schema.exitCode, 0, reason: '${schema.stderr}');
 
-      final client = _MockSshClient();
+      final client = MockSshClient();
       _stubDiscoveryExec(client, (command) async {
         if (!command.contains('state.db')) return _buildExecSession();
         final result = await Process.run(
@@ -4665,7 +4662,7 @@ HEAD b
     }, skip: Platform.isWindows);
 
     test('toolName limits discovery to the requested provider', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -4705,7 +4702,7 @@ HEAD b
     test(
       'prefetchSessions warms the cache for the next visible load',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);
@@ -4732,7 +4729,7 @@ HEAD b
     );
 
     test('reuses fresh results for repeated loads in the same scope', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final commands = <String>[];
       _stubDiscoveryExec(client, (command) async {
         commands.add(command);
@@ -4770,7 +4767,7 @@ HEAD b
     test(
       'invalidateSession forces the next load to re-probe providers',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         when(() => client.execute(any())).thenAnswer((invocation) async {
           commands.add(invocation.positionalArguments.first as String);
@@ -4794,7 +4791,7 @@ HEAD b
     test(
       'invalidating one host preserves another host’s in-flight caches',
       () async {
-        final clients = [_MockSshClient(), _MockSshClient()];
+        final clients = [MockSshClient(), MockSshClient()];
         final probeStarted = [Completer<void>(), Completer<void>()];
         final finishProbes = Completer<void>();
         final commandCounts = [0, 0];
@@ -4870,7 +4867,7 @@ HEAD b
     );
 
     test('invalidated discoveries cannot republish stale snapshots', () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final oldProbeStarted = Completer<void>();
       final finishOldProbe = Completer<void>();
       var probes = 0;
@@ -4919,7 +4916,7 @@ HEAD b
     test(
       'reuses related worktree lookups across max-per-tool refreshes',
       () async {
-        final client = _MockSshClient();
+        final client = MockSshClient();
         final commands = <String>[];
         _stubDiscoveryExec(client, (command) async {
           commands.add(command);

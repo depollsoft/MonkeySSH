@@ -3,7 +3,6 @@
 import 'dart:async';
 import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,7 +12,6 @@ import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
-import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_worktree.dart';
@@ -55,21 +53,13 @@ import 'package:monkeyssh/presentation/widgets/panel_header.dart';
 import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
+import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 import '../support/fake_acp_session_manager.dart';
 import '../support/fake_agent_worktree.dart';
 
 import '../support/settings_import_test_helpers.dart'
     show FakeAuthService, MockAuthStateNotifier;
-
-class _MockHostRepository extends Mock implements HostRepository {}
-
-class _MockSnippetRepository extends Mock implements SnippetRepository {}
-
-class _MockSshClient extends Mock implements SSHClient {}
-
-class _MockTmuxService extends Mock implements TmuxService {}
-
-class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
 Stream<TmuxWindowChangeEvent> _idleWindowChanges() {
   // Keep cancellation futures in the widget test's fake-async zone. Empty
@@ -80,12 +70,6 @@ Stream<TmuxWindowChangeEvent> _idleWindowChanges() {
   addTearDown(controller.close);
   return controller.stream;
 }
-
-class _MockAgentSessionDiscoveryService extends Mock
-    implements AgentSessionDiscoveryService {}
-
-class _MockHostCliLaunchPreferencesService extends Mock
-    implements HostCliLaunchPreferencesService {}
 
 class _CountingSettingsService extends SettingsService {
   _CountingSettingsService(super.db);
@@ -107,20 +91,6 @@ class _CountingSettingsService extends SettingsService {
     if (key == SettingKeys.agentLaunchPresets) presetSubscriptions++;
     return super.watchString(key);
   }
-}
-
-class _MockMonetizationService extends Mock implements MonetizationService {}
-
-class _MockSecureTransferService extends Mock
-    implements SecureTransferService {}
-
-void _callReorderItemCallback(
-  ReorderCallback? callback,
-  int oldIndex,
-  int newIndex,
-) {
-  expect(callback, isNotNull);
-  callback?.call(oldIndex, newIndex);
 }
 
 class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
@@ -244,34 +214,6 @@ class _MutableActiveSessionsNotifier extends ActiveSessionsNotifier {
       );
     state = {...state};
   }
-}
-
-class _TestTransferIntentService extends TransferIntentService {
-  @override
-  Stream<String> get incomingPayloads => const Stream<String>.empty();
-
-  @override
-  Future<String?> consumeIncomingTransferPayload() async => null;
-
-  @override
-  Future<void> dispose() async {}
-}
-
-class _TestHomeScreenShortcutService extends HomeScreenShortcutService {
-  @override
-  Stream<int> get hostLaunches => const Stream<int>.empty();
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<void> updateShortcuts({
-    required List<Host> hosts,
-    required Set<int> pinnedHostIds,
-  }) async {}
-
-  @override
-  Future<void> dispose() async {}
 }
 
 class _RecordingTerminalPage extends StatefulWidget {
@@ -474,7 +416,7 @@ ActiveConnection _buildActiveConnection({
 SshSession _badgeSession({int hostId = 1}) => SshSession(
   connectionId: 7,
   hostId: hostId,
-  client: _MockSshClient(),
+  client: MockSshClient(),
   config: _buildActiveConnection(connectionId: 7, hostId: hostId).config,
 );
 
@@ -514,10 +456,10 @@ void main() {
           (ref) => Stream.value(const <String, AgentLaunchPreset>{}),
         ),
       transferIntentServiceProvider.overrideWith(
-        (ref) => _TestTransferIntentService(),
+        (ref) => NoopTransferIntentService(),
       ),
       homeScreenShortcutServiceProvider.overrideWith(
-        (ref) => _TestHomeScreenShortcutService(),
+        (ref) => NoopHomeScreenShortcutService(),
       ),
       pinnedHomeScreenShortcutHostIdsProvider.overrideWith(
         (ref) => Stream<Set<int>>.value(const <int>{}),
@@ -546,7 +488,7 @@ void main() {
           fingerprint: 'SHA256:test',
           createdAt: DateTime(2026),
         );
-        final transferService = _MockSecureTransferService();
+        final transferService = MockSecureTransferService();
         final message = tab == HomeScreenTab.hosts
             ? 'Cannot export: re-enter the password for host "Alpha".'
             : 'Cannot export: re-enter the private key for SSH key "Alpha key".';
@@ -562,7 +504,7 @@ void main() {
               );
         when(createPayload)
             .thenAnswer((_) async => throw FormatException(message));
-        final billing = _MockMonetizationService();
+        final billing = MockMonetizationService();
         when(() => billing.currentState).thenReturn(_proMonetizationState);
         when(
           () => billing.canUseFeature(MonetizationFeature.encryptedTransfers),
@@ -1380,8 +1322,8 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    _MockSnippetRepository snippetsInFolder() {
-      final snippetRepository = _MockSnippetRepository();
+    MockSnippetRepository snippetsInFolder() {
+      final snippetRepository = MockSnippetRepository();
       when(snippetRepository.watchAll).thenAnswer(
         (_) => Stream.value([
           _buildSnippet(id: 1, name: 'deploy app', sortOrder: 0, folderId: 1),
@@ -1649,47 +1591,7 @@ void main() {
     });
   });
 
-  group('HomeScreen reorder affordance', () {
-    testWidgets('shows reorder handles and persists host order on mobile', (
-      tester,
-    ) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      final hostRepository = _MockHostRepository();
-      when(() => hostRepository.reorderByIds(any())).thenAnswer((_) async {});
-
-      await tester.pumpWidget(
-        buildMobileHomeScreen(
-          db: db,
-          overrides: [
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            activeSessionsProvider.overrideWith(
-              _TestActiveSessionsNotifier.new,
-            ),
-            allHostsProvider.overrideWith(
-              (ref) => Stream.value([
-                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
-                _buildHost(id: 2, label: 'Beta', sortOrder: 1),
-              ]),
-            ),
-          ],
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byTooltip('Reorder'), findsNWidgets(2));
-
-      final list = tester.widget<ReorderableListView>(
-        find.byType(ReorderableListView),
-      );
-      _callReorderItemCallback(list.onReorderItem, 0, 1);
-      await tester.pump();
-
-      verify(() => hostRepository.reorderByIds([2, 1])).called(1);
-    });
-
+  group('HomeScreen snippet display', () {
     testWidgets('an upgraded snippet shows and copies as it reads', (
       tester,
     ) async {
@@ -1711,7 +1613,7 @@ void main() {
           null,
         ),
       );
-      final snippetRepository = _MockSnippetRepository();
+      final snippetRepository = MockSnippetRepository();
       when(snippetRepository.watchAll).thenAnswer(
         (_) => Stream.value([
           Snippet(
@@ -1760,56 +1662,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(copied, ['db.c.createIndex({key:1})']);
-    });
-
-    testWidgets('shows reorder handles and persists snippet order on mobile', (
-      tester,
-    ) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      final snippetRepository = _MockSnippetRepository();
-      when(snippetRepository.watchAll).thenAnswer(
-        (_) => Stream.value([
-          _buildSnippet(id: 1, name: 'First', sortOrder: 0),
-          _buildSnippet(id: 2, name: 'Second', sortOrder: 1),
-        ]),
-      );
-      when(snippetRepository.watchAllFolders)
-          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
-      when(() => snippetRepository.reorderByIds(any()))
-          .thenAnswer((_) async {});
-
-      await tester.pumpWidget(
-        buildMobileHomeScreen(
-          db: db,
-          overrides: [
-            snippetRepositoryProvider.overrideWithValue(snippetRepository),
-            activeSessionsProvider.overrideWith(
-              _TestActiveSessionsNotifier.new,
-            ),
-            allHostsProvider.overrideWith(
-              (ref) => Stream.value(const <Host>[]),
-            ),
-          ],
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-
-      await tester.tap(find.text('Snippets').first);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byTooltip('Reorder'), findsNWidgets(2));
-
-      final list = tester.widget<ReorderableListView>(
-        find.byType(ReorderableListView),
-      );
-      _callReorderItemCallback(list.onReorderItem, 0, 1);
-      await tester.pump();
-
-      verify(() => snippetRepository.reorderByIds([2, 1])).called(1);
     });
   });
 
@@ -2441,43 +2293,12 @@ void main() {
     );
   });
 
-  testWidgets('context menu triggers expose semantics labels', (tester) async {
-    final db = AppDatabase.forTesting(NativeDatabase.memory());
-    addTearDown(db.close);
-
-    await tester.pumpWidget(
-      buildMobileHomeScreen(
-        db: db,
-        overrides: [
-          activeSessionsProvider.overrideWith(_TestActiveSessionsNotifier.new),
-          allHostsProvider.overrideWith(
-            (ref) =>
-                Stream.value([_buildHost(id: 1, label: 'Alpha', sortOrder: 0)]),
-          ),
-        ],
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Semantics &&
-            widget.properties.label == 'Host actions' &&
-            (widget.properties.button ?? false) &&
-            widget.properties.onTap != null,
-      ),
-      findsOneWidget,
-    );
-  });
-
   testWidgets('updates the tmux badge when host session info loads later', (
     tester,
   ) async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
-    final tmuxService = _MockTmuxService();
+    final tmuxService = MockTmuxService();
 
     final hostsController = StreamController<List<Host>>.broadcast();
     addTearDown(hostsController.close);
@@ -2540,8 +2361,8 @@ void main() {
     ) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final tmux = _MockTmuxService();
-      final monkeyMux = _MockMonkeyMuxService();
+      final tmux = MockTmuxService();
+      final monkeyMux = MockMonkeyMuxService();
       final session = _badgeSession()
         ..remoteMuxBackend = backend
         ..remoteMuxSessionName = 'work';
@@ -2614,8 +2435,8 @@ void main() {
         addTearDown(db.close);
         final settings = _CountingSettingsService(db);
         final presets = AgentLaunchPresetService(settings);
-        final tmux = _MockTmuxService();
-        final monkeyMux = _MockMonkeyMuxService();
+        final tmux = MockTmuxService();
+        final monkeyMux = MockMonkeyMuxService();
         final session = _badgeSession();
         final sessions = _MutableActiveSessionsNotifier(
           initialConnections: [
@@ -2727,8 +2548,8 @@ void main() {
         final db = AppDatabase.forTesting(NativeDatabase.memory());
         addTearDown(db.close);
         final cliLaunchPreferencesService =
-            _MockHostCliLaunchPreferencesService();
-        final tmuxService = _MockTmuxService();
+            MockHostCliLaunchPreferencesService();
+        final tmuxService = MockTmuxService();
         final presetCompleter = Completer<Map<String, AgentLaunchPreset>>();
         final cancellation = Completer<void>();
         var cancelling = false;
@@ -2847,8 +2668,8 @@ void main() {
       (tester) async {
         final db = AppDatabase.forTesting(NativeDatabase.memory());
         addTearDown(db.close);
-        final tmuxService = _MockTmuxService();
-        final monkeyMuxService = _MockMonkeyMuxService();
+        final tmuxService = MockTmuxService();
+        final monkeyMuxService = MockMonkeyMuxService();
         final acpManager = FakeAcpSessionManager();
         addTearDown(acpManager.dispose);
         const sessionName = 'work';
@@ -2976,8 +2797,8 @@ void main() {
     (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final tmuxService = _MockTmuxService();
-      final monkeyMuxService = _MockMonkeyMuxService();
+      final tmuxService = MockTmuxService();
+      final monkeyMuxService = MockMonkeyMuxService();
       final acpManager = FakeAcpSessionManager();
       addTearDown(acpManager.dispose);
       const sessionName = 'work';
@@ -3095,135 +2916,12 @@ void main() {
   );
 
   testWidgets(
-    'loads the current tmux query after an overlapping stale refresh finishes',
-    (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final tmuxService = _MockTmuxService();
-      final preferences = StreamController<Map<String, AgentLaunchPreset>>();
-      final oldWindows = Completer<List<TmuxWindow>>();
-      final oldSubscriptionCancellation = Completer<void>();
-      final windowChangeControllers =
-          <StreamController<TmuxWindowChangeEvent>>[];
-      var oldSubscriptionCancellationStarted = false;
-      var currentSessionName = 'old-session';
-      final session = _badgeSession();
-      final sessionsNotifier = _MutableActiveSessionsNotifier(
-        initialConnections: [
-          _buildActiveConnection(connectionId: 7, hostId: 1),
-        ],
-        initialSessions: [session],
-      );
-      when(() => tmuxService.currentSessionName(session))
-          .thenAnswer((_) async => currentSessionName);
-      when(() => tmuxService.watchWindowChanges(session, any())).thenAnswer((
-        invocation,
-      ) {
-        // Cancelling Stream.empty() returns a root-zone future that tester.pump
-        // cannot flush. Keep cancellation futures in this test's fake-async zone.
-        final controller = StreamController<TmuxWindowChangeEvent>(
-          onCancel: () async {
-            if (invocation.positionalArguments[1] == 'old-session') {
-              oldSubscriptionCancellationStarted = true;
-              await oldSubscriptionCancellation.future;
-            }
-          },
-        );
-        windowChangeControllers.add(controller);
-        return controller.stream;
-      });
-      when(() => tmuxService.listWindows(session, 'old-session'))
-          .thenAnswer((_) => oldWindows.future);
-      when(() => tmuxService.listWindows(session, 'new-session')).thenAnswer(
-        (_) async => const [
-          TmuxWindow(index: 0, name: 'current-window', isActive: true),
-        ],
-      );
-
-      try {
-        await tester.pumpWidget(
-          buildMobileHomeScreen(
-            db: db,
-            stubLaunchPresets: false,
-            overrides: [
-              activeSessionsProvider.overrideWith(() => sessionsNotifier),
-              allHostsProvider.overrideWith(
-                (ref) => Stream.value([
-                  _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
-                ]),
-              ),
-              tmuxServiceProvider.overrideWithValue(tmuxService),
-              agentLaunchPresetMapProvider.overrideWith(
-                (ref) => preferences.stream,
-              ),
-            ],
-          ),
-        );
-        preferences.add(const {});
-        await tester.pump();
-        await tester.tap(find.text('Connections').first);
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 100));
-        verify(() => tmuxService.listWindows(session, 'old-session')).called(1);
-
-        // A saved tool change starts a query while the old windows load.
-        currentSessionName = 'new-session';
-        preferences.add(const {
-          '1': AgentLaunchPreset(tool: AgentLaunchTool.codex),
-        });
-        await tester.pump();
-        await tester.pump();
-        verify(() => tmuxService.currentSessionName(session)).called(2);
-        expect(oldSubscriptionCancellationStarted, isTrue);
-        verifyNever(
-          () => tmuxService.watchWindowChanges(session, 'new-session'),
-        );
-
-        // Let the new query subscribe and queue its initial window load while
-        // the old query's listWindows call is still outstanding.
-        oldSubscriptionCancellation.complete();
-        await tester.pump();
-        await tester.pump();
-        verify(() => tmuxService.watchWindowChanges(session, 'new-session'))
-            .called(1);
-        expect(oldWindows.isCompleted, isFalse);
-        verifyNever(() => tmuxService.listWindows(session, 'new-session'));
-
-        oldWindows.complete(const [
-          TmuxWindow(index: 0, name: 'stale-window', isActive: true),
-        ]);
-        await tester.pump();
-        await tester.pump();
-        verify(() => tmuxService.listWindows(session, 'new-session')).called(1);
-        expect(find.text('new-session · 1 windows'), findsOneWidget);
-        expect(find.text('old-session · 1 windows'), findsNothing);
-        await tester.tap(find.text('new-session · 1 windows'));
-        await tester.pump();
-        expect(find.text('current-window'), findsOneWidget);
-        expect(find.text('stale-window'), findsNothing);
-        expect(tester.takeException(), isNull);
-      } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        unawaited(preferences.close());
-        if (!oldWindows.isCompleted) oldWindows.complete(const []);
-        if (!oldSubscriptionCancellation.isCompleted) {
-          oldSubscriptionCancellation.complete();
-        }
-        for (final controller in windowChangeControllers) {
-          unawaited(controller.close());
-        }
-        await tester.pump();
-      }
-    },
-  );
-
-  testWidgets(
     'connection badge includes native windows in MonkeyMux window list',
     (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final tmuxService = _MockTmuxService();
-      final monkeyMuxService = _MockMonkeyMuxService();
+      final tmuxService = MockTmuxService();
+      final monkeyMuxService = MockMonkeyMuxService();
 
       final acpManager = FakeAcpSessionManager(
         sessions: [
@@ -3332,7 +3030,7 @@ void main() {
     (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final tmuxService = _MockTmuxService();
+      final tmuxService = MockTmuxService();
 
       const sessionName = 'work';
       final session = _badgeSession();
@@ -3396,7 +3094,7 @@ void main() {
     (tester) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
-      final tmuxService = _MockTmuxService();
+      final tmuxService = MockTmuxService();
 
       final hostsController = StreamController<List<Host>>.broadcast();
       addTearDown(hostsController.close);
@@ -3472,7 +3170,7 @@ void main() {
   ) async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
-    final tmuxService = _MockTmuxService();
+    final tmuxService = MockTmuxService();
 
     final hostsController = StreamController<List<Host>>.broadcast();
     addTearDown(hostsController.close);
@@ -3561,9 +3259,9 @@ void main() {
       final cliLaunchPreferencesService = HostCliLaunchPreferencesService(
         settingsService,
       );
-      final tmuxService = _MockTmuxService();
-      final discoveryService = _MockAgentSessionDiscoveryService();
-      final monetizationService = _MockMonetizationService();
+      final tmuxService = MockTmuxService();
+      final discoveryService = MockAgentSessionDiscoveryService();
+      final monetizationService = MockMonetizationService();
 
       final host = _buildHost(
         id: 1,

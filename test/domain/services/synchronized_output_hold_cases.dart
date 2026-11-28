@@ -11,8 +11,6 @@ import 'package:xterm/xterm.dart';
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 
-class _MockExecSession extends MockSessionWithChannel {}
-
 const _begin = '\x1b[?2026h';
 const _end = '\x1b[?2026l';
 
@@ -206,7 +204,7 @@ void registerDomainServicesSynchronizedOutputHoldTests() {
 
     group('session runtime synchronized output', () {
       late MockSshClient client;
-      late _MockExecSession shell;
+      late MockSessionWithChannel shell;
       late StreamController<Uint8List> stdout;
       late SshSession session;
       late Terminal terminal;
@@ -219,7 +217,7 @@ void registerDomainServicesSynchronizedOutputHoldTests() {
 
       Future<void> start() async {
         client = MockSshClient();
-        shell = _MockExecSession();
+        shell = MockSessionWithChannel();
         stdout = StreamController<Uint8List>();
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
         when(() => client.execute(any(), pty: any(named: 'pty')))

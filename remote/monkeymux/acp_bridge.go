@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -353,7 +353,7 @@ func acpStartCommand(args []string) {
 		}
 		cmd.Stdout = nil
 		cmd.Stderr = nil
-		cmd.Env = inheritedEnvironment(os.Environ())
+		cmd.Env = slices.Clone(os.Environ())
 		return cmd, stdin, nil
 	}
 	var started *exec.Cmd
@@ -762,7 +762,7 @@ var cursorAgentKeychainProbe = func() int {
 		"-s", "cursor-access-token",
 		"-g",
 	)
-	command.Env = inheritedEnvironment(os.Environ())
+	command.Env = slices.Clone(os.Environ())
 	if err := command.Run(); err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			return exitError.ExitCode()
@@ -807,7 +807,7 @@ func newAcpBridge(
 	}
 	cmd := newAcpProviderCommand(command)
 	cmd.Dir = expandedCwd
-	cmd.Env = withForwardedAgentSocket(inheritedEnvironment(os.Environ()))
+	cmd.Env = withForwardedAgentSocket(slices.Clone(os.Environ()))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -2308,7 +2308,7 @@ func listAcpBridgeIDs() ([]string, error) {
 			ids = append(ids, id)
 		}
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids, nil
 }
 
@@ -2357,14 +2357,14 @@ func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (sock
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "monkeymux-acp-") {
+		rest, ok := strings.CutPrefix(name, "monkeymux-acp-")
+		if !ok {
 			continue
 		}
-		if strings.HasSuffix(name, acpBridgeLifetimeSuffix) {
+		if id, ok := strings.CutSuffix(rest, acpBridgeLifetimeSuffix); ok {
 			// A lifetime file nobody holds, without its socket, is what a
 			// bridge that crashed left once its socket went. One beside a
 			// socket is judged with that socket below.
-			id := strings.TrimSuffix(strings.TrimPrefix(name, "monkeymux-acp-"), acpBridgeLifetimeSuffix)
 			socket := filepath.Join(runDir, "monkeymux-acp-"+id+".sock")
 			if _, err := os.Lstat(socket); validAcpBridgeID(id) &&
 				errors.Is(err, os.ErrNotExist) &&
@@ -2373,10 +2373,10 @@ func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (sock
 			}
 			continue
 		}
-		if !strings.HasSuffix(name, ".sock") {
+		id, ok := strings.CutSuffix(rest, ".sock")
+		if !ok {
 			continue
 		}
-		id := strings.TrimSuffix(strings.TrimPrefix(name, "monkeymux-acp-"), ".sock")
 		path := filepath.Join(runDir, name)
 		if !validAcpBridgeID(id) {
 			_ = os.Remove(path)

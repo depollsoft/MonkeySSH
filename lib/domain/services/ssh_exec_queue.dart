@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
@@ -82,6 +84,77 @@ Future<SSHSession> openSshExec(
     throw TimeoutException('Timed out opening SSH exec channel', timeout);
   },
 );
+
+/// Bounded UTF-8 output captured from a short-lived SSH exec channel.
+typedef CappedSshExecOutput = ({String stdout, bool truncated, int? exitCode});
+
+/// Optionally writes [stdin] to [exec] and closes it, then reads at most
+/// [maxBytes] of stdout while discarding stderr.
+///
+/// Reaching [maxBytes] or [timeout] destroys the channel rather than draining
+/// it, so large outputs or hung commands cannot tie up the connection. Throws
+/// [TimeoutException] when the command does not finish within [timeout].
+Future<CappedSshExecOutput> readCappedSshExecOutput(
+  SSHSession exec, {
+  required int maxBytes,
+  required Duration timeout,
+  List<int>? stdin,
+}) async {
+  final bytes = BytesBuilder(copy: false);
+  var truncated = false;
+  var finished = false;
+  final capReached = Completer<void>();
+  final stdoutDone = Completer<void>();
+  final stdout = exec.stdout.listen(null, cancelOnError: true)
+    ..onData((chunk) {
+      if (truncated) return;
+      final remaining = maxBytes - bytes.length;
+      if (chunk.length <= remaining) {
+        bytes.add(chunk);
+        return;
+      }
+      if (remaining > 0) {
+        bytes.add(Uint8List.sublistView(chunk, 0, remaining));
+      }
+      truncated = true;
+      if (!capReached.isCompleted) capReached.complete();
+    })
+    ..onDone(() {
+      if (!stdoutDone.isCompleted) stdoutDone.complete();
+    })
+    ..onError((Object error, StackTrace stackTrace) {
+      if (!stdoutDone.isCompleted) stdoutDone.completeError(error, stackTrace);
+    });
+  final stderr = exec.stderr.listen(
+    (_) {},
+    onError: (Object _) {},
+    cancelOnError: true,
+  );
+  if (stdin != null) {
+    exec.stdin.add(Uint8List.fromList(stdin));
+    unawaited(exec.stdin.close().then<void>((_) {}, onError: (Object _) {}));
+  }
+  try {
+    await Future.any<void>([
+      Future.wait<void>([stdoutDone.future, exec.done]),
+      capReached.future,
+    ]).timeout(timeout);
+    finished = !truncated;
+  } finally {
+    await stdout.cancel();
+    await stderr.cancel();
+    if (finished) {
+      exec.close();
+    } else {
+      await closeAbandonedSshExec(exec, grace: Duration.zero);
+    }
+  }
+  return (
+    stdout: const Utf8Decoder(allowMalformed: true).convert(bytes.takeBytes()),
+    truncated: truncated,
+    exitCode: finished ? exec.exitCode : null,
+  );
+}
 
 /// Clears queued exec state for tests.
 @visibleForTesting

@@ -18,8 +18,6 @@ import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
-class _MockSshSession extends MockSessionWithChannel {}
-
 class _FakeAssetBundle extends CachingAssetBundle {
   _FakeAssetBundle(this.assets);
 
@@ -104,7 +102,7 @@ void main() {
             windows ? 'SSH-2.0-OpenSSH_for_Windows_9.5' : 'SSH-2.0-OpenSSH_9.6',
           );
           final opening = Completer<SSHSession>();
-          final channel = _MockSshSession();
+          final channel = MockSessionWithChannel();
           final stdout = StreamController<Uint8List>();
           when(() => channel.stdout).thenAnswer((_) => stdout.stream);
           when(() => channel.stderr).thenAnswer((_) => const Stream.empty());
@@ -1119,7 +1117,7 @@ String _outputForCommand(
 String _markedOutput(String output) => '$output\n__monkeymux_exec_done__:0\n';
 
 SSHSession _execSession(String stdoutText) {
-  final session = _MockSshSession();
+  final session = MockSessionWithChannel();
   when(() => session.stdout).thenAnswer(
     (_) => Stream<Uint8List>.value(Uint8List.fromList(utf8.encode(stdoutText))),
   );

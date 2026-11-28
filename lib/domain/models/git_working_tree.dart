@@ -209,19 +209,6 @@ class GitWorkingTreeSnapshot {
   /// Files in [group], in display order.
   List<GitChangedFile> filesIn(GitChangeGroup group) =>
       files.where((file) => file.group == group).toList(growable: false);
-
-  /// Returns a copy with [files] replaced.
-  GitWorkingTreeSnapshot withFiles(List<GitChangedFile> files) =>
-      GitWorkingTreeSnapshot(
-        state: state,
-        refreshedAt: refreshedAt,
-        files: files,
-        repositoryRoot: repositoryRoot,
-        branch: branch,
-        detached: detached,
-        truncated: truncated,
-        exitCode: exitCode,
-      );
 }
 
 /// One `@@` hunk of a unified diff.

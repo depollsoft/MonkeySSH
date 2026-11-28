@@ -19,12 +19,12 @@ import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mocks.dart';
+
 const _bridgeId = '0123456789abcdef0123456789abcdef';
 const _clientId = 'fedcba9876543210fedcba9876543210';
 const _token = 'test-process-token-0001';
 final _now = DateTime(2026, 10, 9, 12);
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 final class _FakeInstaller extends MonkeyMuxInstallerService {
   _FakeInstaller()
@@ -122,7 +122,7 @@ Map<String, Object?> _hello({
   int lastAcknowledgedSequence = 0,
 }) {
   final channels = <_Channel>[];
-  final client = _MockSshClient();
+  final client = MockSshClient();
   when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
   when(() => client.execute(any(), pty: any(named: 'pty')))
       .thenAnswer((_) async {

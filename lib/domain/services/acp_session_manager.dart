@@ -37,6 +37,7 @@ import 'diagnostics_log_service.dart';
 import 'monetization_service.dart';
 import 'monkeymux_acp_bridge_service.dart';
 import 'monkeymux_installer_service.dart';
+import 'serial_task_queue.dart';
 import 'ssh_service.dart';
 import 'telemetry_service.dart';
 
@@ -200,7 +201,7 @@ class AcpSessionManager {
 
   // Serializes lifecycle mutations so concurrency decisions always observe a
   // consistent live-session set.
-  Future<void> _mutationQueue = Future<void>.value();
+  final _mutationQueue = SerialTaskQueue();
 
   String? _selectedKeyValue;
   AcpSessionManagerState _state = AcpSessionManagerState();
@@ -1027,7 +1028,7 @@ class AcpSessionManager {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    await _mutationQueue;
+    await _mutationQueue.pending;
     final controllers = _controllers.values.toList(growable: false);
     _controllers.clear();
     for (final controller in controllers) {
@@ -1752,14 +1753,11 @@ class AcpSessionManager {
     if (!_stateController.isClosed) _stateController.add(_state);
   }
 
-  Future<T> _serialize<T>(Future<T> Function() action) {
-    final operation = _mutationQueue.then((_) {
-      if (_disposed) throw const AcpConnectionClosedException();
-      return action();
-    });
-    _mutationQueue = operation.then<void>((_) {}, onError: (_) {});
-    return operation;
-  }
+  Future<T> _serialize<T>(Future<T> Function() action) =>
+      _mutationQueue.run(() {
+        if (_disposed) throw const AcpConnectionClosedException();
+        return action();
+      });
 
   AcpSessionError _mapBridgeError(Object error) {
     if (error is MonkeyMuxInstallConfirmationRequiredException) {

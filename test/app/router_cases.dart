@@ -245,11 +245,6 @@ void registerRouterTests() {
 
       tearDown(() => container.dispose());
 
-      test('returns a GoRouter instance', () {
-        final router = container.read(routerProvider);
-        expect(router, isA<GoRouter>());
-      });
-
       test('terminal route animates the live page during transitions', () {
         final router = container.read(routerProvider);
         final terminalRoute = router.configuration.routes

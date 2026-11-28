@@ -14,7 +14,7 @@ import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/presentation/screens/snippet_edit_screen.dart';
 import 'package:monkeyssh/presentation/screens/snippets_screen.dart';
 
-class _MockSnippetRepository extends Mock implements SnippetRepository {}
+import '../helpers/mocks.dart';
 
 void _callReorderItemCallback(
   ReorderCallback? callback,
@@ -64,7 +64,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('shows imported snippets after the stream updates', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         final snippetsController = StreamController<List<Snippet>>();
         addTearDown(snippetsController.close);
 
@@ -99,7 +99,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets(
         'snippet actions are exposed through the context menu trigger',
         (tester) async {
-          final snippetRepository = _MockSnippetRepository();
+          final snippetRepository = MockSnippetRepository();
           when(snippetRepository.watchAll).thenAnswer(
             (_) => Stream.value([
               _buildSnippet(id: 1, name: 'Restart API', sortOrder: 0),
@@ -135,7 +135,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('routes empty-state creation to the full snippet editor', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.watchAll)
             .thenAnswer((_) => Stream.value(const <Snippet>[]));
         when(snippetRepository.watchAllFolders)
@@ -178,7 +178,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('creates folders from the snippets screen header', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         final snippetsController = StreamController<List<Snippet>>();
         final foldersController = StreamController<List<SnippetFolder>>();
         addTearDown(snippetsController.close);
@@ -220,7 +220,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('long-pressing a folder chip opens delete action', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         final snippetsController = StreamController<List<Snippet>>();
         final foldersController = StreamController<List<SnippetFolder>>();
         addTearDown(snippetsController.close);
@@ -277,7 +277,7 @@ void registerWidgetSnippetsScreenTests() {
         testWidgets(
           'full editor handles ${fails ? 'failed' : 'missing'} snippet',
           (tester) async {
-            final repository = _MockSnippetRepository();
+            final repository = MockSnippetRepository();
             when(repository.getAllFolders).thenAnswer((_) async => []);
             when(() => repository.getById(99)).thenAnswer((_) async {
               if (fails) throw StateError('load failed');
@@ -313,7 +313,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('full editor updates variable preview as command changes', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -344,7 +344,7 @@ void registerWidgetSnippetsScreenTests() {
         registerFallbackValue(
           SnippetsCompanion.insert(name: 'fallback', command: 'fallback'),
         );
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -377,7 +377,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('full editor warns about a key token after a dollar sign', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -414,7 +414,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('full editor notes dropped modifiers and escaped tokens', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -555,7 +555,7 @@ void registerWidgetSnippetsScreenTests() {
         registerFallbackValue(
           SnippetsCompanion.insert(name: 'fallback', command: 'fallback'),
         );
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
         when(snippetRepository.keyTokensReady).thenAnswer((_) async => false);
@@ -593,7 +593,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('full editor checks key tokens as the command is typed', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -628,7 +628,7 @@ void registerWidgetSnippetsScreenTests() {
       });
 
       testWidgets('full editor uses snippet prefill values', (tester) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.getAllFolders)
             .thenAnswer((_) async => const <SnippetFolder>[]);
 
@@ -668,7 +668,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('full editor creates and selects a folder from the picker', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         var getFoldersCallCount = 0;
         when(snippetRepository.getAllFolders).thenAnswer((_) async {
           getFoldersCallCount += 1;
@@ -718,7 +718,7 @@ void registerWidgetSnippetsScreenTests() {
       });
 
       testWidgets('reordering snippets persists the new order', (tester) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.watchAll).thenAnswer(
           (_) => Stream.value([
             _buildSnippet(id: 1, name: 'First', sortOrder: 0),
@@ -754,7 +754,7 @@ void registerWidgetSnippetsScreenTests() {
       testWidgets('folder filter shows and reorders snippets in that folder', (
         tester,
       ) async {
-        final snippetRepository = _MockSnippetRepository();
+        final snippetRepository = MockSnippetRepository();
         when(snippetRepository.watchAll).thenAnswer(
           (_) => Stream.value([
             _buildSnippet(id: 1, name: 'Unfiled', sortOrder: 0),

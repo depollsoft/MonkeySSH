@@ -23,6 +23,9 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+
+import '../helpers/mocks.dart';
 
 class _Notifications extends Mock implements LocalNotificationService {}
 
@@ -30,8 +33,6 @@ class _Shortcuts extends Mock implements HomeScreenShortcutService {}
 
 class _ShortcutPreferences extends Mock
     implements HomeScreenShortcutPreferencesService {}
-
-class _Hosts extends Mock implements HostRepository {}
 
 class _Monetization extends Mock implements MonetizationService {}
 
@@ -71,7 +72,7 @@ void registerAppTests() {
           final notifications = _Notifications();
           final shortcuts = _Shortcuts();
           final preferences = _ShortcutPreferences();
-          final hosts = _Hosts();
+          final hosts = MockHostRepository();
           final monetization = _Monetization();
           final auth = _AuthLifecycle();
           final acp = _AcpLifecycle();
@@ -193,5 +194,23 @@ void registerAppTests() {
         }
       });
     }
+    test('appMetadataProvider exposes the platform app name', () async {
+      PackageInfo.setMockInitialValues(
+        appName: 'MonkeySSH β',
+        packageName: 'xyz.depollsoft.monkeyssh.private',
+        version: '1.2.3',
+        buildNumber: '456',
+        buildSignature: '',
+      );
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      final metadata = await container.read(appMetadataProvider.future);
+
+      expect(metadata.appName, 'MonkeySSH β');
+      expect(metadata.versionCodename, 'Baboon');
+      expect(metadata.versionLabel, '1.2.3 "Baboon" (456)');
+    });
   });
 }

@@ -42,7 +42,6 @@ type terminalScreen struct {
 	originMode bool
 	autowrap   bool
 	insertMode bool
-	cursorOn   bool
 	tabs       []bool
 	g0Graphics bool
 	g1Graphics bool
@@ -446,23 +445,12 @@ func newVTRow(width int) []vtCell {
 }
 
 func (s *terminalScreen) resetState() {
-	s.attrs = vtAttrs{}
-	s.top = 0
-	s.bottom = s.height - 1
-	s.originMode = false
-	s.autowrap = true
-	s.insertMode = false
-	s.cursorOn = true
+	s.softReset()
 	s.setGraphemeCluster(true)
 	s.tabs = make([]bool, s.width)
 	for i := 8; i < s.width; i += 8 {
 		s.tabs[i] = true
 	}
-	s.g0Graphics = false
-	s.g1Graphics = false
-	s.shiftOut = false
-	s.savedMain = vtSavedCursor{}
-	s.savedAlt = vtSavedCursor{}
 	s.parser = vtParser{}
 }
 
@@ -2465,10 +2453,6 @@ func (s *terminalScreen) setPrivateMode(mode int, on bool) {
 		s.autowrap = on
 	case 2027:
 		s.setGraphemeCluster(on)
-	case 12, 25:
-		if mode == 25 {
-			s.cursorOn = on
-		}
 	case 47:
 		s.switchScreen(on, false)
 	case 1048:
@@ -2506,7 +2490,6 @@ func (s *terminalScreen) softReset() {
 	s.originMode = false
 	s.autowrap = true
 	s.insertMode = false
-	s.cursorOn = true
 	s.g0Graphics = false
 	s.g1Graphics = false
 	s.shiftOut = false

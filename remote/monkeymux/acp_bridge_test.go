@@ -689,30 +689,7 @@ func TestAcpCachedInitializeResponseAvoidsDuplicateProviderRequest(t *testing.T)
 		nil,
 	)
 
-	server, peer := net.Pipe()
-	attachDone := make(chan struct{})
-	go func() {
-		defer close(attachDone)
-		bridge.handleAttach(
-			server,
-			bufio.NewReader(server),
-			acpWireMessage{
-				Version: acpBridgeProtocolVersion,
-				Type:    "hello",
-				LastAck: 1,
-			},
-		)
-	}()
-	defer func() {
-		_ = peer.Close()
-		select {
-		case <-attachDone:
-		case <-time.After(time.Second):
-			t.Error("cached initialize attach did not stop")
-		}
-	}()
-
-	reader := bufio.NewReader(peer)
+	peer, reader := attachTestClient(t, bridge, acpWireMessage{LastAck: 1})
 	if hello := readTestAcpFrame(t, reader, peer); hello.Type != "hello" {
 		t.Fatalf("first attach frame = %#v, want hello", hello)
 	}
@@ -826,30 +803,7 @@ func TestAcpAdaptiveAttachEchoesDirectForSafeShortReplay(t *testing.T) {
 		"",
 		nil,
 	)
-	server, peer := net.Pipe()
-	attachDone := make(chan struct{})
-	go func() {
-		defer close(attachDone)
-		bridge.handleAttach(
-			server,
-			bufio.NewReader(server),
-			acpWireMessage{
-				Version:    acpBridgeProtocolVersion,
-				Type:       "hello",
-				ReplayMode: "adaptive",
-			},
-		)
-	}()
-	defer func() {
-		_ = peer.Close()
-		select {
-		case <-attachDone:
-		case <-time.After(time.Second):
-			t.Error("adaptive direct attach did not stop")
-		}
-	}()
-
-	reader := bufio.NewReader(peer)
+	peer, reader := attachTestClient(t, bridge, acpWireMessage{ReplayMode: "adaptive"})
 	hello := readTestAcpFrame(t, reader, peer)
 	replayed := readTestAcpFrame(t, reader, peer)
 	if hello.Type != "hello" || hello.ReplayMode != "direct" {
@@ -945,31 +899,10 @@ func TestAcpPendingReplayModeRequiresFreshAck(t *testing.T) {
 		nil,
 	)
 
-	server, peer := net.Pipe()
-	attachDone := make(chan struct{})
-	go func() {
-		defer close(attachDone)
-		bridge.handleAttach(
-			server,
-			bufio.NewReader(server),
-			acpWireMessage{
-				Version:    acpBridgeProtocolVersion,
-				Type:       "hello",
-				LastAck:    1,
-				ReplayMode: "pending",
-			},
-		)
-	}()
-	defer func() {
-		_ = peer.Close()
-		select {
-		case <-attachDone:
-		case <-time.After(time.Second):
-			t.Error("non-fresh attach did not stop")
-		}
-	}()
-
-	reader := bufio.NewReader(peer)
+	peer, reader := attachTestClient(t, bridge, acpWireMessage{
+		LastAck:    1,
+		ReplayMode: "pending",
+	})
 	hello := readTestAcpFrame(t, reader, peer)
 	replayed := readTestAcpFrame(t, reader, peer)
 	if hello.Type != "hello" || hello.ReplayMode != "" {
@@ -2235,25 +2168,8 @@ func TestAcpAttachWithoutReplayTakesNoReaderHold(t *testing.T) {
 	// An attach before any provider output has no snapshot to drain, so it
 	// must not leave replayReaders raised for the bridge's lifetime.
 	bridge := newTestAcpBridge()
-	server, peer := net.Pipe()
-	attachDone := make(chan struct{})
-	go func() {
-		defer close(attachDone)
-		bridge.handleAttach(
-			server,
-			bufio.NewReader(server),
-			acpWireMessage{Version: acpBridgeProtocolVersion, Type: "hello"},
-		)
-	}()
-	defer func() {
-		_ = peer.Close()
-		select {
-		case <-attachDone:
-		case <-time.After(time.Second):
-			t.Error("attach did not stop")
-		}
-	}()
-	if hello := readTestAcpFrame(t, bufio.NewReader(peer), peer); hello.Type != "hello" {
+	peer, reader := attachTestClient(t, bridge, acpWireMessage{})
+	if hello := readTestAcpFrame(t, reader, peer); hello.Type != "hello" {
 		t.Fatalf("first attach frame = %#v, want hello", hello)
 	}
 	bridge.mu.Lock()

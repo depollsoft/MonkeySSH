@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,17 +17,10 @@ type recordedTerminalSize struct {
 }
 
 type resizeRecordingPty struct {
+	recordingPty
 	mu    sync.Mutex
 	sizes []recordedTerminalSize
 }
-
-func (p *resizeRecordingPty) Read([]byte) (int, error) { return 0, io.EOF }
-
-func (p *resizeRecordingPty) Write(data []byte) (int, error) {
-	return len(data), nil
-}
-
-func (p *resizeRecordingPty) Close() error { return nil }
 
 func (p *resizeRecordingPty) Resize(width int, height int) error {
 	p.mu.Lock()
@@ -39,8 +31,6 @@ func (p *resizeRecordingPty) Resize(width int, height int) error {
 	p.mu.Unlock()
 	return nil
 }
-
-func (p *resizeRecordingPty) Fd() uintptr { return 0 }
 
 func (p *resizeRecordingPty) snapshot() []recordedTerminalSize {
 	p.mu.Lock()

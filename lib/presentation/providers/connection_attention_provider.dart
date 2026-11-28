@@ -624,54 +624,77 @@ bool _waitsOnHostRequest(AcpSessionState session, AttentionReason reason) =>
       _ => false,
     };
 
-/// Value-equal projection of the ACP session fields that affect
-/// [waitingOnYouProvider], intentionally excluding streaming timeline content
-/// so streamed text chunks never rebuild waiting-on-you consumers.
+/// Value-equal digest over a projected list of ACP sessions, used with
+/// Riverpod `.select` so streamed timeline chunks never rebuild consumers that
+/// only inspect session metadata or status.
 @immutable
-final class _WaitingOnYouSessionsDigest {
-  const _WaitingOnYouSessionsDigest(this.entries);
+final class AcpSessionsDigest {
+  /// Creates a digest from pre-projected [entries].
+  const AcpSessionsDigest(this.entries);
 
-  factory _WaitingOnYouSessionsDigest.fromSessions(
-    List<AcpSessionState> sessions,
-  ) => _WaitingOnYouSessionsDigest([
+  /// Digest of the fields that affect [waitingOnYouProvider].
+  factory AcpSessionsDigest.forWaitingOnYou(List<AcpSessionState> sessions) =>
+      AcpSessionsDigest([
+        for (final session in sessions)
+          (
+            coreFields(session),
+            // Include lastActivityAt only when a session might be waiting, so
+            // ordinary live streaming ticks keep the digest unchanged.
+            (!session.isLive ||
+                    session.pendingPermissions.isNotEmpty ||
+                    session.pendingWrites.isNotEmpty ||
+                    session.pendingElicitations.isNotEmpty ||
+                    session.pendingAuthentication ||
+                    session.error != null)
+                ? session.lastActivityAt
+                : null,
+          ),
+      ]);
+
+  /// Digest of open MonkeyMux native windows on [hostId] for home connection
+  /// badges.
+  factory AcpSessionsDigest.forHostMuxWindows(
+    List<AcpSessionState> sessions, {
+    required int? hostId,
+  }) => AcpSessionsDigest([
     for (final session in sessions)
-      (
-        session.key,
-        session.status,
-        session.attached,
-        session.promptStatus,
-        session.title,
-        session.providerLabel,
-        session.cwd,
-        session.pendingAuthentication,
-        session.error,
-        session.pendingPermissions.length,
-        session.pendingPermissions.firstOrNull?.requestKey,
-        session.pendingWrites.length,
-        session.pendingWrites.firstOrNull?.requestKey,
-        session.pendingElicitations.length,
-        session.pendingElicitations.firstOrNull?.requestKey,
-        session.awaitingElicitations.length,
-        // Include lastActivityAt only when a session might be waiting, so
-        // ordinary live streaming ticks keep the digest unchanged.
-        (!session.isLive ||
-                session.pendingPermissions.isNotEmpty ||
-                session.pendingWrites.isNotEmpty ||
-                session.pendingElicitations.isNotEmpty ||
-                session.pendingAuthentication ||
-                session.error != null)
-            ? session.lastActivityAt
-            : null,
-      ),
+      if (session.key.hostId == hostId && session.isOpenMuxWindow)
+        (
+          coreFields(session),
+          AcpActivitySnapshot.fromSession(session),
+          session.remoteWriter != null,
+          session.usage,
+        ),
   ]);
 
+  /// Projects the core non-timeline fields of [session] shared across attention
+  /// and home-badge selectors.
+  static Object coreFields(AcpSessionState session) => (
+    session.key,
+    session.status,
+    session.attached,
+    session.promptStatus,
+    session.title,
+    session.providerLabel,
+    session.cwd,
+    session.pendingAuthentication,
+    session.error,
+    session.pendingPermissions.length,
+    session.pendingPermissions.firstOrNull?.requestKey,
+    session.pendingWrites.length,
+    session.pendingWrites.firstOrNull?.requestKey,
+    session.pendingElicitations.length,
+    session.pendingElicitations.firstOrNull?.requestKey,
+    session.awaitingElicitations.length,
+  );
+
+  /// Projected per-session tuples compared by value.
   final List<Object?> entries;
 
   @override
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
-    if (other is! _WaitingOnYouSessionsDigest ||
-        entries.length != other.entries.length) {
+    if (other is! AcpSessionsDigest || entries.length != other.entries.length) {
       return false;
     }
     for (var i = 0; i < entries.length; i++) {
@@ -691,7 +714,7 @@ final waitingOnYouProvider = Provider.autoDispose<WaitingOnYouSnapshot>((ref) {
   final manager = ref.watch(acpSessionManagerProvider);
   ref.watch(
     acpSessionManagerStateProvider.select(
-      (asyncState) => _WaitingOnYouSessionsDigest.fromSessions(
+      (asyncState) => AcpSessionsDigest.forWaitingOnYou(
         asyncState.asData?.value.sessions ?? manager.state.sessions,
       ),
     ),

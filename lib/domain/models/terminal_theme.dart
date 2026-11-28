@@ -188,15 +188,6 @@ String _formatOscRgbComponent(int value) {
 
 String _formatTwoDigitHex(int value) => value.toRadixString(16).padLeft(2, '0');
 
-/// Returns whether two terminal themes resolve to the same rendered colors.
-///
-/// [TerminalThemeData] compares by value, so this is plain equality; it is
-/// kept as a named entry point for call sites that document the intent.
-bool terminalThemesMatchForColors(
-  TerminalThemeData previous,
-  TerminalThemeData next,
-) => previous == next;
-
 const _minimumSelectionBackgroundContrast = 1.04;
 const _minimumSelectionTextContrast = 3.5;
 const _selectionAlphaCandidates = <int>[
