@@ -9,6 +9,7 @@ import (
 )
 
 func TestHermesAgentToolMapping(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"hermes", "hermes-agent", "/home/demo/.local/bin/hermes"} {
 		if got := agentToolFromCommandName(name); got != "hermes" {
 			t.Fatalf("agentToolFromCommandName(%q) = %q, want hermes", name, got)
@@ -31,6 +32,7 @@ func TestHermesAgentToolMapping(t *testing.T) {
 }
 
 func TestOpenClawAgentToolMapping(t *testing.T) {
+	t.Parallel()
 	if got := agentToolFromCommandText("openclaw tui --session main"); got != "openclaw" {
 		t.Fatalf("agentToolFromCommandText(launch) = %q, want openclaw", got)
 	}
@@ -65,6 +67,7 @@ func inlineTUIHistory(width int) []byte {
 // replay tail within a minute or two, and replaying those relative moves onto
 // a cleared client paints nothing but the status line.
 func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
+	t.Parallel()
 	// The last one is a program the helper does not know by name.
 	for _, tool := range []string{"hermes", "openclaw", "some-inline-tui"} {
 		t.Run(tool, func(t *testing.T) {
@@ -114,6 +117,7 @@ func TestInlineAgentWindowSwitchKeepsTranscript(t *testing.T) {
 // comes back as a plain shell and stays one, even when a snapshot from a helper
 // that did not know the agent still names the window after it.
 func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
+	t.Parallel()
 	history := base64.StdEncoding.EncodeToString([]byte("agent screen"))
 	for _, tool := range []string{"hermes", "openclaw"} {
 		for name, state := range map[string]restoreWindowState{
@@ -154,6 +158,7 @@ func TestUnrelaunchableAgentWindowRestoresAsConfirmedShell(t *testing.T) {
 // it, even when the process table names only the shell or a runtime; where it
 // can outlive the program, a shell in the foreground means the agent is gone.
 func TestLaunchedWindowWithShellForeground(t *testing.T) {
+	t.Parallel()
 	state := restoreWindowState{
 		CurrentCommand: "pwsh", AgentTool: "openclaw", AgentToolConfirmed: true,
 		LaunchCommand: "openclaw tui",

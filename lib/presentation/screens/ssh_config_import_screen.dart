@@ -25,20 +25,23 @@ const _backgroundParseBytes = 32 * 1024;
 SshConfigImportPlan _planFromText(String text) =>
     buildSshConfigImportPlan(parseSshConfig(text));
 
-/// Whether [text] is over [sshConfigImportMaxBytes] once encoded.
-bool _exceedsImportLimit(String text) =>
+/// Whether [text] is over [maxBytes] once encoded.
+bool _exceedsImportLimit(
+  String text, {
+  int maxBytes = sshConfigImportMaxBytes,
+}) =>
     // UTF-8 never takes fewer bytes than UTF-16 code units, so the length
     // alone settles most cases without encoding.
-    text.length > sshConfigImportMaxBytes ||
-    (text.length * 3 > sshConfigImportMaxBytes &&
-        utf8.encode(text).length > sshConfigImportMaxBytes);
+    text.length > maxBytes ||
+    (text.length * 3 > maxBytes && utf8.encode(text).length > maxBytes);
 
 /// Rejects an edit (usually a paste from the text menu) that would make the
 /// config larger than the importer reads, rather than truncating it.
 class _ImportSizeLimitFormatter extends TextInputFormatter {
-  _ImportSizeLimitFormatter(this.onRejected);
+  _ImportSizeLimitFormatter(this.onRejected, {required this.maxBytes});
 
   final VoidCallback onRejected;
+  final int maxBytes;
 
   @override
   TextEditingValue formatEditUpdate(
@@ -46,7 +49,7 @@ class _ImportSizeLimitFormatter extends TextInputFormatter {
     TextEditingValue newValue,
   ) {
     if (newValue.text.length <= oldValue.text.length ||
-        !_exceedsImportLimit(newValue.text)) {
+        !_exceedsImportLimit(newValue.text, maxBytes: maxBytes)) {
       return newValue;
     }
     onRejected();
@@ -59,10 +62,17 @@ class _ImportSizeLimitFormatter extends TextInputFormatter {
 /// before anything is saved.
 class SshConfigImportScreen extends ConsumerStatefulWidget {
   /// Creates the screen.
-  const SshConfigImportScreen({super.key, this.initialText});
+  const SshConfigImportScreen({
+    super.key,
+    this.initialText,
+    this.maxBytes = sshConfigImportMaxBytes,
+  });
 
   /// Config text to start with, for tests and deep links.
   final String? initialText;
+
+  /// Maximum accepted config size in UTF-8 bytes.
+  final int maxBytes;
 
   @override
   ConsumerState<SshConfigImportScreen> createState() =>
@@ -86,6 +96,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     () => WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _tooLarge('text');
     }),
+    maxBytes: widget.maxBytes,
   );
 
   @override
@@ -136,7 +147,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     }
     // Check before the text reaches the editor; laying out megabytes of
     // text is the freeze the cap exists to prevent.
-    if (_exceedsImportLimit(text)) {
+    if (_exceedsImportLimit(text, maxBytes: widget.maxBytes)) {
       _tooLarge('text');
       return;
     }
@@ -156,7 +167,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
       if (!mounted || file == null) return;
       // Reject a known-large file before reading it into memory.
       final knownLength = file.lengthSync();
-      if (knownLength != null && knownLength > sshConfigImportMaxBytes) {
+      if (knownLength != null && knownLength > widget.maxBytes) {
         _tooLarge('file');
         return;
       }
@@ -170,7 +181,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
       return;
     }
     if (!mounted) return;
-    if (bytes.length > sshConfigImportMaxBytes) {
+    if (bytes.length > widget.maxBytes) {
       _tooLarge('file');
       return;
     }
@@ -179,7 +190,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
 
   Future<void> _preview(List<Host> savedHosts) async {
     final text = _source.text;
-    if (_exceedsImportLimit(text)) {
+    if (_exceedsImportLimit(text, maxBytes: widget.maxBytes)) {
       _tooLarge('text');
       return;
     }

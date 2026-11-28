@@ -11,6 +11,7 @@ import (
 // the real server: a window created with the production starter and closed
 // through muxServer.close, which is what a helper replacement runs.
 func TestServerCloseKillsForegroundGroupThatIgnoresHangup(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("shutdown-fg-group")
 	window, err := server.createWindowWithStarter(
 		createWindowOptions{args: []string{"/bin/sh", "-c", `set -m; trap "" HUP; sleep 30`}},

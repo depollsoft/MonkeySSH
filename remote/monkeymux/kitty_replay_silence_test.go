@@ -8,6 +8,7 @@ import (
 )
 
 func TestReplayedGraphicsCommandsAreSilenced(t *testing.T) {
+	t.Parallel()
 	replay := string(stripTerminalQueriesFromReplay([]byte(
 		"a\x1b_Ga=T,I=1,f=100;AAAA\x1b\\b" +
 			"\x1b_Ga=f,i=1,q=1;AAAA\x1b\\" +

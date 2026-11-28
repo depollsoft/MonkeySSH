@@ -16,6 +16,7 @@ import (
 // child, so the child's environment can hold a speed the group leader's
 // never did.
 func TestHermesTUIEnvironmentReadsNodeChild(t *testing.T) {
+	t.Parallel()
 	self, err := os.Executable()
 	if err != nil {
 		t.Skipf("cannot find the test binary: %v", err)

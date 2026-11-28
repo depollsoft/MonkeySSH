@@ -217,6 +217,7 @@ func TestEnrichRestoreCopilotSharedDirectoryDedups(t *testing.T) {
 }
 
 func TestUniqueAssignmentsRejectPartialOverlap(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	a := recentAgentSession{id: "a", updatedAt: now}
 	b := recentAgentSession{id: "b", updatedAt: now.Add(10 * time.Second)}

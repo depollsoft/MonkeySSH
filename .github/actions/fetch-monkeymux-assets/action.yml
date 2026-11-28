@@ -1,0 +1,49 @@
+name: Fetch MonkeyMux assets
+description: >-
+  Restore verified MonkeyMux payloads from the Ubicloud Actions cache when
+  already warm, or download the workflow artifact produced by monkeymux-assets.
+
+inputs:
+  source:
+    description: "'cache' to restore directly from Actions cache, or 'artifact' to download the workflow artifact."
+    required: true
+  fingerprint:
+    description: MonkeyMux input fingerprint from Detect Changes (required when source == 'cache').
+    required: false
+    default: ''
+  artifact-name:
+    description: Artifact name to download when source != 'cache'.
+    required: false
+    default: monkeymux-assets
+
+runs:
+  using: composite
+  steps:
+    - name: Restore MonkeyMux assets from cache
+      if: inputs.source == 'cache'
+      uses: actions/cache/restore@v6.1.0
+      with:
+        path: assets/monkeymux/
+        key: monkeymux-assets-v1-Linux-${{ inputs.fingerprint }}
+        fail-on-cache-miss: true
+
+    - name: Verify restored MonkeyMux assets
+      if: inputs.source == 'cache'
+      shell: bash
+      env:
+        EXPECTED_FINGERPRINT: ${{ inputs.fingerprint }}
+      run: |
+        set -euo pipefail
+        if [ ! -f assets/monkeymux/.build-inputs.sha256 ] ||
+           [ "$(cat assets/monkeymux/.build-inputs.sha256)" != "$EXPECTED_FINGERPRINT" ]; then
+          echo "::error::Cached MonkeyMux asset stamp did not match expected fingerprint."
+          exit 1
+        fi
+        python3 scripts/verify_monkeymux_assets.py assets/monkeymux "$(sh remote/monkeymux/monkeymux-version.sh)"
+
+    - name: Download MonkeyMux assets artifact
+      if: inputs.source != 'cache'
+      uses: actions/download-artifact@v8.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: assets/monkeymux/

@@ -90,6 +90,7 @@ func (p windowStartPty) Read([]byte) (int, error) { p.read.pass(); return 0, io.
 func (p windowStartPty) Fd() uintptr              { return ^uintptr(0) }
 
 func TestPendingWindowStartShutdownOwnership(t *testing.T) {
+	t.Parallel()
 	for _, failStart := range []bool{false, true} {
 		name := "rejected-cleanup"
 		if failStart {
@@ -170,6 +171,7 @@ func TestPendingWindowStartShutdownOwnership(t *testing.T) {
 }
 
 func TestPendingWindowStartAlreadyClosedNeverLaunches(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("closed")
 	server.close()
 	launched := false
@@ -189,6 +191,7 @@ func TestPendingWindowStartAlreadyClosedNeverLaunches(t *testing.T) {
 }
 
 func TestPendingWindowStartWatcherHandoff(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("handoff")
 	var callers []<-chan struct{}
 	t.Cleanup(func() {
@@ -279,6 +282,7 @@ func startLifecycleWindow(*exec.Cmd, int, int) (muxPty, muxProcess, error) {
 // window is already starting; if that start then fails, the deferred idle
 // shutdown runs after all.
 func TestLastWindowExitDefersToPendingStart(t *testing.T) {
+	t.Parallel()
 	for _, failStart := range []bool{false, true} {
 		name := "start-succeeds"
 		if failStart {
@@ -336,6 +340,7 @@ func TestLastWindowExitDefersToPendingStart(t *testing.T) {
 // selectWindowWithSkip does, so a concurrent selection cannot slip between
 // the activation and the replay and leave the screen showing another window.
 func TestCreateWindowActivatesUnderAttachLock(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("create-attach-lock")
 	t.Cleanup(server.close)
 	server.windows = []*muxWindow{{id: "@1", lastActivity: time.Now()}}

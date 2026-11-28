@@ -70,6 +70,7 @@ func TestKittyRetentionAcceptsMultipartImageLargerThanLegacyPendingCap(
 }
 
 func TestKittyPendingMultipartSurvivesArbitraryPTYReadBoundaries(t *testing.T) {
+	t.Parallel()
 	const (
 		imageID          = "11532700"
 		payloadBytes     = 3 * 1024 * 1024
@@ -126,6 +127,7 @@ func TestKittyPendingMultipartSurvivesArbitraryPTYReadBoundaries(t *testing.T) {
 }
 
 func TestClearKittyGraphicsPendingReleasesIncompleteImage(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeKittyGraphicsLocked(
 		[]byte("\x1b_Ga=t,U=1,i=9,f=100,m=1;PARTIAL\x1b\\"),
@@ -149,6 +151,7 @@ func TestClearKittyGraphicsPendingReleasesIncompleteImage(t *testing.T) {
 }
 
 func TestKittyPendingMalformedRootResyncsToLaterImage(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	stream := []byte(
 		"\x1b_Ga=t,U=1,i=1,f=100,m=1;ABCD\x1b\\" +
@@ -167,6 +170,7 @@ func TestKittyPendingMalformedRootResyncsToLaterImage(t *testing.T) {
 }
 
 func TestKittyPendingUnterminatedAPCAdvancesTerminatorScan(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	const readSize = 32 * 1024
 	stream := append(

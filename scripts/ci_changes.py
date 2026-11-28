@@ -177,7 +177,12 @@ def classify(paths):
         result['run_check'] |= (
             global_build or native or payload or windows_test_input or firebase
             or path.endswith('.dart')
-            or path == 'analysis_options.yaml' or path.startswith('web/')
+            or path in {
+                'analysis_options.yaml',
+                'scripts/ci_test_shard.py',
+                '.github/actions/fetch-monkeymux-assets/action.yml',
+            }
+            or path.startswith('web/')
         )
     return result
 

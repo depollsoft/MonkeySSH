@@ -35,6 +35,7 @@ func TestPushLocalCoverageIsPerDeviceBridgeAndAlertListener(t *testing.T) {
 
 	h.raise("@2", pushKindAlert)
 	h.server.raisePushEvent("@3", pushKindFinished, pushTestBridgeID)
+	h.notifier.inflight.Wait()
 	h.server.raisePushAttention("@3", pushTestBridgeID, pushKindPermission, 1, nil)
 	h.notifier.inflight.Wait()
 	if got := h.kinds(); got != "alert,finished,permission" {
@@ -199,6 +200,7 @@ func TestPushDeliveryRecordInTheBridgeSurvivesTheServer(t *testing.T) {
 }
 
 func TestAcpBridgeStoresPushDeliveryRecords(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	send := func(record any) acpWireMessage {
 		t.Helper()

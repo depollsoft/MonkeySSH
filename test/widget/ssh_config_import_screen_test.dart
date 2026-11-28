@@ -29,14 +29,20 @@ Match host app
   User root
 ''';
 
-Widget _app(AppDatabase db, {String? text = _config}) => ProviderScope(
+Widget _app(
+  AppDatabase db, {
+  String? text = _config,
+  int maxBytes = sshConfigImportMaxBytes,
+}) => ProviderScope(
   overrides: [
     databaseProvider.overrideWithValue(db),
     hostRepositoryProvider.overrideWithValue(
       HostRepository(db, SecretEncryptionService.forTesting()),
     ),
   ],
-  child: MaterialApp(home: SshConfigImportScreen(initialText: text)),
+  child: MaterialApp(
+    home: SshConfigImportScreen(initialText: text, maxBytes: maxBytes),
+  ),
 );
 
 /// Unmounts the screen so drift can close its watched queries, whose close
@@ -162,11 +168,17 @@ void main() {
     await _unmount(tester);
   });
 
+  test('uses 512 KiB as the default config import limit', () {
+    expect(sshConfigImportMaxBytes, 512 * 1024);
+    expect(const SshConfigImportScreen().maxBytes, sshConfigImportMaxBytes);
+  });
+
   testWidgets('oversized pasted text is refused before parsing', (
     tester,
   ) async {
+    const testLimit = 1024;
     await tester.pumpWidget(
-      _app(db, text: 'Host a\n${'#' * sshConfigImportMaxBytes}\n'),
+      _app(db, text: 'Host a\n${'#' * testLimit}\n', maxBytes: testLimit),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Preview'));
@@ -182,7 +194,8 @@ void main() {
   testWidgets('an oversized clipboard never reaches the editor', (
     tester,
   ) async {
-    final big = 'Host a\n${'#' * sshConfigImportMaxBytes}\n';
+    const testLimit = 1024;
+    final big = 'Host a\n${'#' * testLimit}\n';
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
       (call) async => call.method == 'Clipboard.getData' ? {'text': big} : null,
@@ -193,7 +206,7 @@ void main() {
         null,
       ),
     );
-    await tester.pumpWidget(_app(db, text: null));
+    await tester.pumpWidget(_app(db, text: null, maxBytes: testLimit));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Paste'));
@@ -213,12 +226,13 @@ void main() {
   testWidgets('an oversized edit in the field is refused, not truncated', (
     tester,
   ) async {
-    await tester.pumpWidget(_app(db, text: null));
+    const testLimit = 1024;
+    await tester.pumpWidget(_app(db, text: null, maxBytes: testLimit));
     await tester.pumpAndSettle();
 
     await tester.enterText(
       find.byKey(const ValueKey('ssh-config-source')),
-      'Host a\n${'#' * sshConfigImportMaxBytes}\n',
+      'Host a\n${'#' * testLimit}\n',
     );
     await tester.pumpAndSettle();
 

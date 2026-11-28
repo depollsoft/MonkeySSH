@@ -3,6 +3,7 @@ package main
 import "testing"
 
 func TestAgentRegistryKeysAreDistinct(t *testing.T) {
+	t.Parallel()
 	if len(agentTools) != len(agentRegistry) {
 		t.Fatalf("agentTools lists %d tools, registry has %d", len(agentTools), len(agentRegistry))
 	}

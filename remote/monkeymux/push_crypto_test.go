@@ -104,6 +104,7 @@ func openPushPayloadForTest(t *testing.T, devicePrivate *ecdh.PrivateKey, payloa
 }
 
 func TestPushPayloadMatchesSharedVector(t *testing.T) {
+	t.Parallel()
 	vector := loadPushVectors(t).Payload
 	if vector.Info != pushPayloadInfo {
 		t.Fatalf("info = %q, want %q", vector.Info, pushPayloadInfo)
@@ -159,6 +160,7 @@ func TestPushPayloadMatchesSharedVector(t *testing.T) {
 }
 
 func TestPushPayloadRandomizedRoundTripAndRejections(t *testing.T) {
+	t.Parallel()
 	vectors := loadPushVectors(t)
 	device, err := ecdh.X25519().NewPrivateKey(pushVectorBytes(vectors.Payload.DeviceLabel, 32))
 	if err != nil {
@@ -202,6 +204,7 @@ func TestPushPayloadRandomizedRoundTripAndRejections(t *testing.T) {
 }
 
 func TestPushPublicKeyValidation(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{
 		"",
 		"short",
@@ -222,6 +225,7 @@ func TestPushPublicKeyValidation(t *testing.T) {
 }
 
 func TestPushCollapseKeyIsStableAndOpaque(t *testing.T) {
+	t.Parallel()
 	salt := make([]byte, 32)
 	first := pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission)
 	if first != pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission) {

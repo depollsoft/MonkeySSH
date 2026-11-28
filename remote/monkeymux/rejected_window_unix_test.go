@@ -11,6 +11,7 @@ import (
 )
 
 func TestRejectedWindowReapsStartedProcess(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"sleep 30", "exit 0"} {
 		t.Run(command, func(t *testing.T) { testRejectedWindowReapsStartedProcess(t, command) })
 	}

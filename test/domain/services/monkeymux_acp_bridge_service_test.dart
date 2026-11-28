@@ -66,7 +66,10 @@ MonkeyMuxAcpBridgeService _bridgeService({DiagnosticsLogger? diagnostics}) =>
     );
 
 Future<({MonkeyMuxAcpTransport transport, _TestChannel channel})>
-_openHistoryTransport(_DecodeDiagnostics diagnostics) async {
+_openHistoryTransport(
+  _DecodeDiagnostics diagnostics, {
+  int maxFrameBytes = monkeyMuxAcpBridgeMaxFrameBytes,
+}) async {
   late _TestChannel channel;
   channel = _TestChannel(
     onWrite: (value) {
@@ -91,6 +94,7 @@ _openHistoryTransport(_DecodeDiagnostics diagnostics) async {
     bridgeId: _bridgeId,
     providerId: 'pi',
     reconnectBackoff: const [],
+    maxFrameBytes: maxFrameBytes,
   );
   addTearDown(transport.close);
   await _waitUntil(() => transport.isConnected);
@@ -3023,8 +3027,11 @@ touch "$HOME/installed"
   test(
     'rejects an oversized input envelope without losing the channel',
     () async {
+      expect(monkeyMuxAcpBridgeMaxFrameBytes, 20 * 1024 * 1024);
+      const testMaxFrameBytes = 4096;
       final (:transport, :channel) = await _openHistoryTransport(
         _DecodeDiagnostics(),
+        maxFrameBytes: testMaxFrameBytes,
       );
       final errors = <MonkeyMuxAcpBridgeException>[];
       final subscription = transport.errors.listen(errors.add);
@@ -3038,13 +3045,12 @@ touch "$HOME/installed"
       final envelopeBytes = utf8
           .encode(_frame({'version': 1, 'type': 'input', 'data': payload}))
           .length;
-      payload['params'] =
-          'x' * (monkeyMuxAcpBridgeMaxFrameBytes - envelopeBytes);
+      payload['params'] = 'x' * (testMaxFrameBytes - envelopeBytes);
       await transport.write(utf8.encode(_frame(payload)));
-      expect(channel.writes.last.length, monkeyMuxAcpBridgeMaxFrameBytes);
+      expect(channel.writes.last.length, testMaxFrameBytes);
       payload['params'] = '${payload['params']}x';
       final oversized = utf8.encode(_frame(payload));
-      expect(oversized.length, lessThan(monkeyMuxAcpBridgeMaxFrameBytes));
+      expect(oversized.length, lessThan(testMaxFrameBytes));
       await expectLater(
         transport.write(oversized),
         throwsA(

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pre-commit hook for Flutty
-# Install via scripts/setup.sh or copy into "$(git rev-parse --git-path hooks)".
+# Install via scripts/setup.sh (installs a delegating wrapper into git hooks).
 
 set -euo pipefail
 
@@ -15,6 +15,7 @@ echo 'Running pre-commit checks...'
 # Dart sources becomes uncommittable.
 staged_dart_files=()
 while IFS= read -r file; do
+    [ -z "$file" ] && continue
     staged_dart_files+=("$file")
 done < <(git diff --cached --name-only --diff-filter=ACM -- '*.dart' ':(exclude)third_party/')
 
@@ -24,11 +25,42 @@ if [ "${#staged_dart_files[@]}" -eq 0 ]; then
     exit 0
 fi
 
-echo 'Checking formatting...'
-dart format --output=none --set-exit-if-changed -- "${staged_dart_files[@]}"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo 'Running analyzer on staged Dart files...'
-flutter analyze --fatal-warnings --fatal-infos --no-pub -- "${staged_dart_files[@]}"
+echo "Checking formatting and analyzing ${#staged_dart_files[@]} staged Dart file(s) in parallel..."
 
+dart format --output=none --set-exit-if-changed -- "${staged_dart_files[@]}" \
+    >"$TMP_DIR/format.out" 2>&1 &
+fmt_pid=$!
+
+if command -v python3 >/dev/null 2>&1 && [ -f "$REPO_ROOT/scripts/dart_analyze_fast.py" ]; then
+    python3 "$REPO_ROOT/scripts/dart_analyze_fast.py" \
+        --fatal-warnings --fatal-infos -- "${staged_dart_files[@]}" \
+        >"$TMP_DIR/analyze.out" 2>&1 &
+else
+    dart analyze --fatal-warnings --fatal-infos -- "${staged_dart_files[@]}" \
+        >"$TMP_DIR/analyze.out" 2>&1 &
+fi
+analyze_pid=$!
+
+fmt_rc=0
+wait "$fmt_pid" || fmt_rc=$?
+analyze_rc=0
+wait "$analyze_pid" || analyze_rc=$?
+
+if [ "$fmt_rc" -ne 0 ]; then
+    echo 'Formatting check failed:' >&2
+    cat "$TMP_DIR/format.out" >&2
+fi
+if [ "$analyze_rc" -ne 0 ]; then
+    echo 'Analyzer check failed:' >&2
+    cat "$TMP_DIR/analyze.out" >&2
+fi
+if [ "$fmt_rc" -ne 0 ] || [ "$analyze_rc" -ne 0 ]; then
+    exit 1
+fi
+
+cat "$TMP_DIR/analyze.out"
 echo 'Skipping tests in pre-commit; run targeted tests for changed behavior before pushing.'
 echo 'Pre-commit checks passed!'

@@ -18,6 +18,7 @@ import (
 // started with, so a profile and every other flag survive. Hermes continues the
 // session it last used in the window's workspace, or starts afresh.
 func TestAgentWindowWithoutLaunchEntryRestartsFromItsCommandLine(t *testing.T) {
+	t.Parallel()
 	hermes := []string{"/home/demo/.hermes/venv/bin/python3", "/home/demo/.local/bin/hermes", "-p", "alfred"}
 	for _, tc := range []struct {
 		name    string
@@ -111,6 +112,7 @@ func TestRestoreRecordsCommandLinesOfAgentsWithoutLaunchEntry(t *testing.T) {
 }
 
 func TestCommandLineRunsAgent(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		argv []string
 		runs bool
@@ -131,6 +133,7 @@ func TestCommandLineRunsAgent(t *testing.T) {
 }
 
 func TestProcessTitleOnly(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		argv  []string
 		title bool
@@ -151,6 +154,7 @@ func TestProcessTitleOnly(t *testing.T) {
 // The command line comes back with its argument boundaries, so an argument
 // with spaces or an empty one is passed on unchanged.
 func TestProcessCommandLineKeepsArgumentBoundaries(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("argv is not read on " + runtime.GOOS)
 	}
@@ -180,6 +184,7 @@ func TestProcessCommandLineKeepsArgumentBoundaries(t *testing.T) {
 // restore command continues the latest session, falling back to the launch
 // command.
 func TestLaunchedWindowRestartsFromItsLaunchCommand(t *testing.T) {
+	t.Parallel()
 	history := base64.StdEncoding.EncodeToString([]byte("agent screen"))
 	for _, tc := range []struct {
 		name    string
@@ -246,6 +251,7 @@ func TestLaunchedWindowRestartsFromItsLaunchCommand(t *testing.T) {
 // Once the launched program is no longer in the foreground, the window
 // restores as the shell it now is.
 func TestLaunchedWindowRunningSomethingElseRestoresAsShell(t *testing.T) {
+	t.Parallel()
 	history := base64.StdEncoding.EncodeToString([]byte("$ "))
 	for name, state := range map[string]restoreWindowState{
 		"grok exited":         {CurrentCommand: "-zsh", LaunchCommand: "grok --yolo", RestoreCommand: "grok --yolo --resume"},
@@ -283,6 +289,7 @@ func TestLaunchedWindowRunningSomethingElseRestoresAsShell(t *testing.T) {
 // create_window records the app's commands, and the restore snapshot the
 // outgoing helper hands over carries them.
 func TestCreateWindowRecordsLaunchCommandsForRestore(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("launch-commands")
 	t.Cleanup(server.close)
 	server.handleControlRequest(newControlClient(nil), controlMessage{

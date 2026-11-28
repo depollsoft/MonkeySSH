@@ -1509,6 +1509,7 @@ func TestRestoreAntigravityExactOwnershipBeforeHistory(t *testing.T) {
 }
 
 func TestProtectExactAgentSessionBindingsPrefersCapturedOwner(t *testing.T) {
+	t.Parallel()
 	restore := &serverRestore{Windows: []restoreWindowState{
 		{ID: "@1", AgentTool: "claude"},
 		{ID: "@2", AgentTool: "claude", AgentSessionID: "X", AgentSessionDir: "original-dir", AgentSessionPath: "original-path", AgentSessionIdentityExact: true},

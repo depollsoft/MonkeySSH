@@ -68,6 +68,7 @@ func windowPtyOutput(t *testing.T, window *muxWindow) string {
 }
 
 func TestKittyClipboardWindowTagRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		windowID string
 		sequence uint64
@@ -96,6 +97,7 @@ func TestKittyClipboardWindowTagRoundTrip(t *testing.T) {
 }
 
 func TestKittyClipboardRequestFromOnScreenWindowIsTaggedForPrimaryOnly(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	secondary := &recordingConn{}
 	registerTestAttachClient(t, server, secondary, "secondary", 80, 24)
@@ -122,6 +124,7 @@ func TestKittyClipboardRequestFromOnScreenWindowIsTaggedForPrimaryOnly(t *testin
 }
 
 func TestKittyClipboardRequestFromBackgroundWindowIsAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, _, second, attach := newKittyClipboardTestServer(t)
 
 	server.handleWindowOutput("@2", []byte("\x1b]5522;type=read:id=q;Lg==\x07"))
@@ -138,6 +141,7 @@ func TestKittyClipboardRequestFromBackgroundWindowIsAnsweredBusy(t *testing.T) {
 }
 
 func TestKittyClipboardRequestIsAnsweredBusyWithoutCapableClient(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("kitty-clipboard-detached")
 	window := &muxWindow{id: "@1", pty: &recordingPty{}, lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
@@ -164,6 +168,7 @@ func TestKittyClipboardRequestIsAnsweredBusyWithoutCapableClient(t *testing.T) {
 }
 
 func TestKittyClipboardWriteForwardsWholeTransaction(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	write := "\x1b]5522;type=write:id=w\x1b\\" +
 		"\x1b]5522;type=walias:mime=dGV4dC9wbGFpbg==;VEVYVA==\x1b\\" +
@@ -196,6 +201,7 @@ func TestKittyClipboardWriteForwardsWholeTransaction(t *testing.T) {
 }
 
 func TestKittyClipboardWriteInterruptedBySwitchIsAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
 	waitForAttachOutput(t, attach, "aGk=")
@@ -228,6 +234,7 @@ func TestKittyClipboardWriteInterruptedBySwitchIsAnsweredBusy(t *testing.T) {
 }
 
 func TestKittyClipboardSecondWriterTakesTheClientSlot(t *testing.T) {
+	t.Parallel()
 	server, first, second, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
@@ -255,6 +262,7 @@ func TestKittyClipboardSecondWriterTakesTheClientSlot(t *testing.T) {
 }
 
 func TestKittyClipboardSplitRoutesTaggedRepliesToTheirWindow(t *testing.T) {
+	t.Parallel()
 	client := newAttachClient(&recordingConn{}, controlMessage{})
 	client.inputDispatchMu.Lock()
 	defer client.inputDispatchMu.Unlock()
@@ -276,6 +284,7 @@ func TestKittyClipboardSplitRoutesTaggedRepliesToTheirWindow(t *testing.T) {
 // A reply reaches the program with its own id back, and only while the tag
 // it carries names a request the window still holds.
 func TestKittyClipboardReplyIsResolvedByItsTag(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte(
 		"\x1b]5522;type=read:id=x;Lg==\x1b\\\x1b]5522;type=write\x1b\\"))
@@ -318,6 +327,7 @@ func TestKittyClipboardReplyIsResolvedByItsTag(t *testing.T) {
 }
 
 func TestKittyClipboardSplitLeavesPasteEventsAndPastedTextAsInput(t *testing.T) {
+	t.Parallel()
 	client := newAttachClient(&recordingConn{}, controlMessage{})
 	client.inputDispatchMu.Lock()
 	defer client.inputDispatchMu.Unlock()
@@ -335,6 +345,7 @@ func TestKittyClipboardSplitLeavesPasteEventsAndPastedTextAsInput(t *testing.T) 
 }
 
 func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
+	t.Parallel()
 	client := newAttachClient(&recordingConn{}, controlMessage{})
 	client.inputDispatchMu.Lock()
 	defer client.inputDispatchMu.Unlock()
@@ -367,7 +378,10 @@ func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
 }
 
 func TestKittyClipboardAmbiguousCarryIsReleasedAfterTimeout(t *testing.T) {
+	t.Parallel()
+	const carryTimeout = 120 * time.Millisecond
 	client := newAttachClient(&recordingConn{}, controlMessage{})
+	client.kittyClipboardInput.ambiguousCarryTimeout = carryTimeout
 	oweKittyClipboardReplies(client)
 	// As handleAttach wires it: input the routing holds and later releases.
 	client.inputPassthrough = func(data []byte) {
@@ -383,7 +397,7 @@ func TestKittyClipboardAmbiguousCarryIsReleasedAfterTimeout(t *testing.T) {
 		t.Fatalf("input = %q, want the lone ESC held while replies are owed", input)
 	}
 
-	deadline := time.Now().Add(kittyClipboardAmbiguousCarryTimeout + 2*time.Second)
+	deadline := time.Now().Add(carryTimeout + 2*time.Second)
 	for {
 		action, ok := nextQueuedInputAction(client)
 		if ok {
@@ -480,6 +494,7 @@ func TestKittyClipboardRepliesRouteBackThroughAttach(t *testing.T) {
 }
 
 func TestKittyClipboardRequestsAreLeftOutOfReplays(t *testing.T) {
+	t.Parallel()
 	history := "a\x1b]5522;type=write\x1b\\b\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x07c\x9d5522;type=wdata\x1b\\d"
 	if got := string(stripTerminalQueriesFromReplay([]byte(history))); got != "abcd" {
 		t.Fatalf("replay = %q, want the clipboard packets stripped", got)
@@ -487,6 +502,7 @@ func TestKittyClipboardRequestsAreLeftOutOfReplays(t *testing.T) {
 }
 
 func TestKittyPasteEventsModeIsTrackedAndReplayed(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
 	window.observeTerminalModesLocked([]byte("\x1b[?5522h"))
 	if !window.privateModes[kittyPasteEventsMode] {
@@ -518,6 +534,7 @@ func TestKittyPasteEventsModeIsTrackedAndReplayed(t *testing.T) {
 // the PTY read boundaries, every byte must reach the client in order, with
 // only the opening packet's id tagged.
 func TestKittyClipboardLargeWriteSurvivesArbitraryReadSplits(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(5522))
 	data := make([]byte, 1<<20)
 	random.Read(data)
@@ -555,6 +572,7 @@ func TestKittyClipboardLargeWriteSurvivesArbitraryReadSplits(t *testing.T) {
 // split at arbitrary points. Every packet must still be routed whole, with
 // the user's own keystrokes between reads left alone.
 func TestKittyClipboardLargeReplySurvivesArbitraryReadSplits(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(2026))
 	data := make([]byte, 256<<10)
 	random.Read(data)
@@ -603,6 +621,7 @@ func TestKittyClipboardLargeReplySurvivesArbitraryReadSplits(t *testing.T) {
 // back on screen, it forwards the rest of its write into nothing and waits
 // forever.
 func TestKittyClipboardWriteCommittedInOneReadDisplacesOpenWrite(t *testing.T) {
+	t.Parallel()
 	server, first, second, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
@@ -655,6 +674,7 @@ func maxKittyClipboardDataPacket(random *rand.Rand) string {
 // A packet split past the generic OSC carry used to leave the scan unchecked,
 // so a rejected writer's data reached the write another window has open.
 func TestKittyClipboardSplitPacketOfRejectedWriterIsDropped(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(14016))
 	for round := 0; round < 20; round++ {
 		server, first, second, attach := newKittyClipboardTestServer(t)
@@ -689,6 +709,7 @@ func TestKittyClipboardSplitPacketOfRejectedWriterIsDropped(t *testing.T) {
 
 // The owner's split packets still arrive whole and tagged-through unchanged.
 func TestKittyClipboardSplitPacketOfOpenWriteIsForwardedWhole(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(4096))
 	server, _, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
@@ -707,6 +728,7 @@ func TestKittyClipboardSplitPacketOfOpenWriteIsForwardedWhole(t *testing.T) {
 // is dropped, and its write is refused, so the client never commits a write
 // with a gap.
 func TestKittyClipboardOversizedPacketIsDropped(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=big\x1b\\"))
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
@@ -728,6 +750,7 @@ func TestKittyClipboardOversizedPacketIsDropped(t *testing.T) {
 }
 
 func TestKittyClipboardDiscardEndsAtTheTerminatorAcrossReads(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1"}
 	window.kittyClipboard.discarding = true
 	if got := window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB\x1b")); got != nil {
@@ -755,6 +778,7 @@ func TestKittyClipboardDiscardEndsAtTheTerminatorAcrossReads(t *testing.T) {
 // A read that outgrows the carry can end anywhere around the packet's
 // terminator, ESC \ or BEL; the output after it must survive every split.
 func TestKittyClipboardOversizedPacketEndsAtSplitTerminator(t *testing.T) {
+	t.Parallel()
 	body := "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;" +
 		strings.Repeat("QUFB", kittyClipboardPacketLimitBytes/4+16)
 	for _, terminator := range []string{"\x1b\\", "\a"} {
@@ -787,6 +811,7 @@ func TestKittyClipboardOversizedPacketEndsAtSplitTerminator(t *testing.T) {
 // A packet cancelled by another escape sequence ends there: the output after
 // the cancelling ESC is never discarded with it.
 func TestKittyClipboardOversizedCancelledPacketKeepsFollowingOutput(t *testing.T) {
+	t.Parallel()
 	server, _, _, attach := newKittyClipboardTestServer(t)
 	cancelled := "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;QUFB\x1b[1m" +
 		strings.Repeat("x", kittyClipboardPacketLimitBytes)
@@ -803,6 +828,7 @@ func TestKittyClipboardOversizedCancelledPacketKeepsFollowingOutput(t *testing.T
 // after a split end marker still goes to its window, and a reply-shaped
 // sequence after a split start marker is still pasted text.
 func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
+	t.Parallel()
 	reply := "\x1b]5522;type=read:status=DONE:id=" + kittyClipboardTagWindow1 + ".1\x1b\\"
 	split := func(input string, at int) (string, []attachInputAction) {
 		client := newAttachClient(&recordingConn{}, controlMessage{})
@@ -844,6 +870,7 @@ func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
 // output after them is ordinary output, whether the packet was being
 // discarded for its size or was still short enough to hold.
 func TestKittyClipboardPacketCancelledByCanOrSubKeepsFollowingOutput(t *testing.T) {
+	t.Parallel()
 	for _, cancel := range []string{"\x18", "\x1a"} {
 		// Oversized: the discard must stop at the cancel.
 		server, first, _, attach := newKittyClipboardTestServer(t)
@@ -886,6 +913,7 @@ func TestKittyClipboardPacketCancelledByCanOrSubKeepsFollowingOutput(t *testing.
 }
 
 func TestKittyClipboardDiscardEndsAtCanOrSub(t *testing.T) {
+	t.Parallel()
 	for _, cancel := range []byte{0x18, 0x1a} {
 		window := &muxWindow{id: "@1"}
 		window.kittyClipboard.discarding = true
@@ -903,6 +931,7 @@ func TestKittyClipboardDiscardEndsAtCanOrSub(t *testing.T) {
 // rest of the write must not go to the new primary, which has no open write
 // and would drop it.
 func TestKittyClipboardWriteStaysWithTheClientItWentTo(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachA := newKittyClipboardTestServer(t)
 	attachB := &recordingConn{}
 	clientB := registerTestAttachClient(t, server, attachB, "second", 80, 24)
@@ -964,6 +993,7 @@ func waitForWindowPtyOutput(t *testing.T, window *muxWindow, want string) {
 // session usually ends, and the program would otherwise wait for its own
 // timeout.
 func TestKittyClipboardRequestsOfADepartedClientAreAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	client := startKittyClipboardInputWorker(t, server, attach)
 	server.handleWindowOutput("@1", []byte(
@@ -988,6 +1018,7 @@ func TestKittyClipboardRequestsOfADepartedClientAreAnsweredBusy(t *testing.T) {
 // of the EBUSY for what it left unanswered, and a request it finished is
 // not answered again.
 func TestKittyClipboardDepartedClientRepliesComeFirst(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	client := startKittyClipboardInputWorker(t, server, attach)
 	server.handleWindowOutput("@1", []byte(
@@ -1015,6 +1046,7 @@ func TestKittyClipboardDepartedClientRepliesComeFirst(t *testing.T) {
 // A write the client already refused is not answered again when MonkeyMux
 // later drops the rest of it.
 func TestKittyClipboardAnsweredWriteIsNotAnsweredAgain(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	client := startKittyClipboardInputWorker(t, server, attach)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
@@ -1114,6 +1146,7 @@ func TestKittyClipboardEscapeIsNotHeldOnceRepliesAreDone(t *testing.T) {
 // A client owes replies from a request until its final reply, and a request
 // it never answers stops holding the Escape key back after the grace.
 func TestKittyClipboardRepliesAreOwedOnlyWhileARequestIsOpen(t *testing.T) {
+	t.Parallel()
 	server, _, _, attach := newKittyClipboardTestServer(t)
 	server.mu.Lock()
 	client := server.attachClients[attach]
@@ -1179,6 +1212,7 @@ func TestKittyClipboardRepliesAreOwedOnlyWhileARequestIsOpen(t *testing.T) {
 // back when a read splits it, however long it takes to come: the grace only
 // covers a request the client never answers.
 func TestKittyClipboardReadBeingAnsweredOwesItsRestPastTheGrace(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.mu.Lock()
 	client := server.attachClients[attach]
@@ -1254,6 +1288,7 @@ func (*failingWriteConn) Write([]byte) (int, error) {
 // belongs to that client: the failed one's departure does not answer it,
 // and the client that got it owes its reply.
 func TestKittyClipboardRequestFailedOverBelongsToTheClientThatGotIt(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	clientB := startKittyClipboardInputWorker(t, server, attachB)
 	clientA := registerTestAttachClient(t, server, &failingWriteConn{}, "failing", 80, 24)
@@ -1290,6 +1325,7 @@ func TestKittyClipboardRequestFailedOverBelongsToTheClientThatGotIt(t *testing.T
 // program has since sent another request with the same id through another
 // client: it must not retire that one.
 func TestKittyClipboardLateReplyLeavesAnotherClientsRequest(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachA := newKittyClipboardTestServer(t)
 	clientA := startKittyClipboardInputWorker(t, server, attachA)
 	attachB := &recordingConn{}
@@ -1337,6 +1373,7 @@ func TestKittyClipboardLateReplyLeavesAnotherClientsRequest(t *testing.T) {
 // however the pause ends, even when the held redraw is replaced by a frame
 // painted from the screen model.
 func TestKittyClipboardRequestHeldByARedrawPauseIsDelivered(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"answered cursor", "oversized", "restarted"} {
 		t.Run(name, func(t *testing.T) {
 			server, first, _, attach := newKittyClipboardTestServer(t)
@@ -1387,6 +1424,7 @@ func TestKittyClipboardRequestHeldByARedrawPauseIsDelivered(t *testing.T) {
 // A request whose packet reaches no client is answered EBUSY: here the
 // window left the screen while a redraw pause held the packet.
 func TestKittyClipboardRequestThatReachesNoClientIsAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.mu.Lock()
 	first.redrawForwardingPaused = true
@@ -1413,6 +1451,7 @@ func TestKittyClipboardRequestThatReachesNoClientIsAnsweredBusy(t *testing.T) {
 // A replay the client already received covers a window's output, but never
 // its clipboard packets, which still reach the client.
 func TestKittyClipboardRequestInReplayedOutputIsDelivered(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.mu.Lock()
 	server.attachClients[attach].markOutputReplay("@1", ^uint64(0))
@@ -1432,6 +1471,7 @@ func TestKittyClipboardRequestInReplayedOutputIsDelivered(t *testing.T) {
 // Past the requests a window keeps, the oldest is answered EBUSY, and the
 // client's late reply to it is dropped.
 func TestKittyClipboardOldestRequestPastTheLimitIsAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	for index := 0; index <= maxTrackedKittyClipboardRequests; index++ {
 		server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r"+strconv.Itoa(index)+";Lg==\x1b\\"))
@@ -1457,6 +1497,7 @@ func TestKittyClipboardOldestRequestPastTheLimitIsAnsweredBusy(t *testing.T) {
 // never complete and is answered EBUSY, even though the held packets
 // committed it.
 func TestKittyClipboardWriteContinuationThatReachesNoClientIsAnsweredBusy(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
@@ -1492,6 +1533,7 @@ func TestKittyClipboardWriteContinuationThatReachesNoClientIsAnsweredBusy(t *tes
 // The rest of a write held by a redraw pause that reaches the write's own
 // client leaves the write to that client to answer.
 func TestKittyClipboardWriteContinuationHeldByARedrawPauseIsLeftToItsClient(t *testing.T) {
+	t.Parallel()
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
@@ -1533,6 +1575,7 @@ func (c *stalledWriteConn) Write(data []byte) (int, error) {
 // with that client: the program gets the answer it started, ended EBUSY when
 // the client goes, and nothing of the client the output failed over to.
 func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	clientB := startKittyClipboardInputWorker(t, server, attachB)
 	attachA := &stalledWriteConn{release: make(chan struct{})}
@@ -1572,6 +1615,7 @@ func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
 // MonkeyMux will drop, counted while the read is open so a reply it splits
 // across its reads is still recognised rather than typed into the program.
 func TestKittyClipboardBystanderOwesTheReadWhileItIsOpen(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	clientA := registerTestAttachClient(t, server, &recordingConn{}, "answering", 80, 24)
 	server.mu.Lock()
@@ -1617,6 +1661,7 @@ func TestKittyClipboardBystanderOwesTheReadWhileItIsOpen(t *testing.T) {
 // before it went are not the program's: they must not reach it, interleave
 // with the new client's, or finish the request.
 func TestKittyClipboardReplyFromAClientTheRequestLeftIsDropped(t *testing.T) {
+	t.Parallel()
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	startKittyClipboardInputWorker(t, server, attachB)
 	attachA := &stalledWriteConn{release: make(chan struct{})}
@@ -1778,6 +1823,7 @@ var answerKittyClipboardRequestInPlaceOf = []struct {
 // its place, which MonkeyMux drops. However its reads split that reply, no
 // part of it reaches the program on screen as typed input.
 func TestKittyClipboardSplitReplyToAnAnsweredRequestIsNotInput(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range answerKittyClipboardRequestInPlaceOf {
 		t.Run(scenario.name, func(t *testing.T) {
 			for cut := 1; ; cut++ {
@@ -1806,6 +1852,7 @@ func TestKittyClipboardSplitReplyToAnAnsweredRequestIsNotInput(t *testing.T) {
 // holding it back then. Held input is given back, in order, with the next
 // read.
 func TestKittyClipboardAnsweredRequestHoldsInputOnlyWhileItsReplyCanCome(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range answerKittyClipboardRequestInPlaceOf {
 		t.Run(scenario.name, func(t *testing.T) {
 			server, first, _, attach := newKittyClipboardTestServer(t)
@@ -1892,6 +1939,10 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 		}
 		time.Sleep(time.Millisecond)
 	}
+	const carryTimeout = 300 * time.Millisecond
+	client.inputDispatchMu.Lock()
+	client.kittyClipboardInput.ambiguousCarryTimeout = carryTimeout
+	client.inputDispatchMu.Unlock()
 	write := func(data string) {
 		t.Helper()
 		if _, err := writer.Write([]byte(data)); err != nil {
@@ -1922,7 +1973,7 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 	waitForWindowPtyOutput(t, first, busy)
 
 	write("\x1b]")
-	if took := waitForSecond("\x1b]", kittyClipboardAmbiguousCarryTimeout+2*time.Second); took < kittyClipboardAmbiguousCarryTimeout/2 {
+	if took := waitForSecond("\x1b]", carryTimeout+2*time.Second); took < carryTimeout/2 {
 		t.Fatalf("Alt+] arrived after %v while the client's reply could still come, want it held", took)
 	}
 
@@ -1942,7 +1993,7 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 		time.Sleep(time.Millisecond)
 	}
 	write("\x1b]")
-	waitForSecond("\x1b]\x1b]", kittyClipboardAmbiguousCarryTimeout/2)
+	waitForSecond("\x1b]\x1b]", carryTimeout/2)
 	if got := windowPtyOutput(t, first); got != busy {
 		t.Fatalf("asking window got %q, want only MonkeyMux's answer", got)
 	}
@@ -1955,6 +2006,7 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 // replacement characters followed by the request's text. A 0x9d that
 // continues a character is text.
 func TestKittyClipboardC1RequestIsRoutedInTheSevenBitForm(t *testing.T) {
+	t.Parallel()
 	for _, introducer := range []string{"\x1b]", "\x9d"} {
 		for _, terminator := range []string{"\a", "\x1b\\", "\x9c"} {
 			request := introducer + "5522;type=read:id=r;Lg==" + terminator
@@ -2011,6 +2063,7 @@ func TestKittyClipboardC1RequestIsRoutedInTheSevenBitForm(t *testing.T) {
 // A C1 data packet is held whole up to the packet limit when reads split it,
 // as the 7-bit form is, and one that outgrows it is dropped up to its C1 ST.
 func TestKittyClipboardSplitC1PacketIsHeldWholeOrDropped(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(157))
 	server, first, _, attach := newKittyClipboardTestServer(t)
 	server.handleWindowOutput("@1", []byte("\x9d5522;type=write:id=one\x9c"))
@@ -2048,6 +2101,7 @@ func TestKittyClipboardSplitC1PacketIsHeldWholeOrDropped(t *testing.T) {
 // nothing would be owed, and the rest of a reply a client is partway through
 // would reach the program as typed input.
 func TestAnsweredKittyClipboardRequestStaysOwedWhileForgotten(t *testing.T) {
+	t.Parallel()
 	for range 2000 {
 		client := &attachClient{capabilityHint: []byte(kittyClipboardHintFixture)}
 		bystander := &attachClient{capabilityHint: []byte(kittyClipboardHintFixture)}

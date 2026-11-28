@@ -48,6 +48,7 @@ func startCapabilityTestAttach(t *testing.T, server *muxServer, hello controlMes
 }
 
 func TestXtversionClassifiedAsReplayUnsafeQuery(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		sequence string
@@ -72,6 +73,7 @@ func TestXtversionClassifiedAsReplayUnsafeQuery(t *testing.T) {
 }
 
 func TestC1CapabilityQueryBufferedWhileDetached(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
 	query := []byte{0x9b, 'c'}
 
@@ -201,6 +203,7 @@ func TestPendingCapabilityQueriesDeliveredOnWindowSwitch(t *testing.T) {
 // terminal is already showing the window, its queries are forwarded live (and
 // answered by that terminal), not buffered as pending.
 func TestCapabilityQueriesNotBufferedWhenTerminalAttached(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-live")
 	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
@@ -225,6 +228,7 @@ func TestCapabilityQueriesNotBufferedWhenTerminalAttached(t *testing.T) {
 // TestPendingCapabilityQuerySplitAcrossReads verifies a query sequence split
 // across pty reads is reassembled via the carry buffer.
 func TestPendingCapabilityQuerySplitAcrossReads(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-split")
 	window := &muxWindow{
 		id:           "@1",
@@ -247,6 +251,7 @@ func TestPendingCapabilityQuerySplitAcrossReads(t *testing.T) {
 }
 
 func TestDetachedTerminalCapabilityResponses(t *testing.T) {
+	t.Parallel()
 	const cursorPositionQuery = "\x1b[6n"
 	const kittyGraphicsQuery = "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"
 	const decrqmQuery = "\x1b[?2026$p"
@@ -340,6 +345,7 @@ func TestDetachedTerminalCapabilityResponses(t *testing.T) {
 // output would otherwise deadlock all three. The reply still reaches the pty
 // after the paste and before input written after it.
 func TestLocallyAnsweredQueryDoesNotWaitForBlockedInput(t *testing.T) {
+	t.Parallel()
 	pty := &pasteGatePty{entered: make(chan struct{}), release: make(chan struct{})}
 	window := &muxWindow{id: "@1", agentTool: "copilot", pty: pty, lastActivity: time.Now()}
 	server := newMuxServer("reply-queue")
@@ -395,6 +401,7 @@ func (p *pasteGatePty) Write(data []byte) (int, error) {
 // window that starts behind the active one: the daemon answers its probes on
 // its own pty without disturbing the window the user is looking at.
 func TestCapabilityHintAnswersBackgroundWindowQueries(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-hint-background")
 	pty := &recordingPty{}
 	background := &muxWindow{
@@ -430,6 +437,7 @@ func TestCapabilityHintAnswersBackgroundWindowQueries(t *testing.T) {
 // plain terminal running `monkeymux attach` — must not have the previous
 // client's terminal identity advertised to its windows.
 func TestCapabilityHintIsNotBorrowedFromAnotherClient(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-hint-client")
 	pty := &recordingPty{}
 	background := &muxWindow{
@@ -470,6 +478,7 @@ func TestCapabilityHintIsNotBorrowedFromAnotherClient(t *testing.T) {
 // would block the window's reader goroutine on a child that is not draining its
 // input.
 func TestCapabilityHintAnswerBurstIsBounded(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-hint-burst")
 	pty := &recordingPty{}
 	window := &muxWindow{
@@ -516,6 +525,7 @@ func TestCapabilityHintAnswerBurstIsBounded(t *testing.T) {
 // by the pending buffer, so only the running answer budget keeps a stream of
 // XTVERSION queries in unwatched output from flooding the child's stdin.
 func TestCapabilityHintVersionAnswersAreBoundedAcrossChunks(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("cap-hint-version-burst")
 	pty := &recordingPty{}
 	window := &muxWindow{
@@ -595,6 +605,7 @@ func TestCapabilityAnswerBudgetResetsWhenWindowIsShown(t *testing.T) {
 }
 
 func TestCapabilityQueryKeyMapsStaticQueries(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		sequence string
@@ -633,6 +644,7 @@ func TestCapabilityQueryKeyMapsStaticQueries(t *testing.T) {
 }
 
 func TestCapabilityHintResponseMapParsesRecords(t *testing.T) {
+	t.Parallel()
 	responses := capabilityHintResponseMap([]byte(capabilityHintFixture))
 	if got := string(responses[capabilityHintKeyTerminalVersion]); got !=
 		"\x1bP>|kitty(0.32.0)\x1b\\" {
@@ -685,6 +697,7 @@ const colorSchemeQuery = "\x1b[?996n"
 // is untouched: a terminal showing the window answers the query itself with its
 // current theme, so the daemon must not short circuit it from a cached hint.
 func TestColorSchemeQueryForwardedLiveWhenTerminalAttached(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("theme-hint-live")
 	pty := &recordingPty{}
 	window := &muxWindow{
@@ -719,6 +732,7 @@ func TestColorSchemeQueryForwardedLiveWhenTerminalAttached(t *testing.T) {
 // TestIsTerminalColorSchemeQuery covers the sequence matcher, including the C1
 // form and the neighbouring DSR queries it must not claim.
 func TestIsTerminalColorSchemeQuery(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		sequence string
@@ -803,6 +817,7 @@ func TestBufferedColorSchemeQueryDroppedOnFlush(t *testing.T) {
 // TestDropColorSchemeQueries covers the flush-time filter directly, including a
 // buffer that holds nothing else and one whose tail is a partial sequence.
 func TestDropColorSchemeQueries(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		pending string
@@ -829,6 +844,7 @@ func TestDropColorSchemeQueries(t *testing.T) {
 }
 
 func TestControlStringAt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		data       string

@@ -10,6 +10,7 @@ import (
 )
 
 func TestTerminalOutputReplacesScreen(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name  string
 		data  string
@@ -61,6 +62,7 @@ func TestTerminalOutputReplacesScreen(t *testing.T) {
 }
 
 func TestRedrawDoesNotReplayPreviousBufferAcrossAlternateScreenSwitch(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"47", "1047", "1049", "25;1049;2004"} {
 		for _, action := range []string{"h", "l"} {
 			t.Run(mode+action, func(t *testing.T) {
@@ -93,6 +95,7 @@ func TestRedrawDoesNotReplayPreviousBufferAcrossAlternateScreenSwitch(t *testing
 }
 
 func TestRedrawPreservesParserStateAcrossPause(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, prefix, continuation string
 		keepsBase                  bool
@@ -167,6 +170,7 @@ func differentialComposerHistory() []byte {
 }
 
 func TestSwitchFallbackPreservesUnchangedComposerBeyondShellReplayLimit(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"pi", "copilot", "opencode", ""} {
 		name := tool
 		if name == "" {
@@ -214,6 +218,7 @@ func TestSwitchFallbackPreservesUnchangedComposerBeyondShellReplayLimit(t *testi
 }
 
 func TestForegroundHistoryFallbackRendersDifferentialFrame(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	window := &muxWindow{foregroundCommand: "pi"}
 	window.appendHistoryLocked(differentialComposerHistory())
@@ -240,6 +245,7 @@ func TestForegroundHistoryFallbackRendersDifferentialFrame(t *testing.T) {
 }
 
 func TestForegroundHistoryFallbackSkipsEvictedControlSequencePrefix(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	for _, prefix := range []string{"\x1b_Ga=t;", "\x1b]2;", "\x1bP"} {
 		window := &muxWindow{foregroundCommand: "pi"}
@@ -284,6 +290,7 @@ func renderClientOutput(t *testing.T, conn *recordingConn, width, height int) []
 // full repaint is long gone from the byte history, the child coalesces the
 // synthetic resize, and the client must still receive the whole frame.
 func TestRedrawFallbackSurvivesIncrementalHistoryEviction(t *testing.T) {
+	t.Parallel()
 	for _, answer := range []string{"", "\x1b[?2026h\x1b[21;1H\x1b[2Kspinner tick\x1b[?2026l"} {
 		name := "coalesced"
 		if answer != "" {
@@ -334,6 +341,7 @@ func TestRedrawFallbackSurvivesIncrementalHistoryEviction(t *testing.T) {
 // longer than the redraw buffer budget used to lose its head, which is where
 // the top rows are painted.
 func TestOversizedRedrawPaintsScreenModel(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@2", index: 1, agentTool: "pi"}
 	window.appendHistoryLocked([]byte("\x1b[2J\x1b[Hold frame"))
@@ -364,6 +372,7 @@ func TestOversizedRedrawPaintsScreenModel(t *testing.T) {
 	}
 }
 func TestSwitchRedrawPreservesScreenUnderIncrementalUpdates(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"muse", "copilot", ""} {
 		t.Run("tool="+tool, func(t *testing.T) {
 			server := newMuxServerWithSize("test", 80, 24)
@@ -421,6 +430,7 @@ func TestSwitchRedrawPreservesScreenUnderIncrementalUpdates(t *testing.T) {
 // replay only carries a handful, which left a frame referencing more images
 // than that showing blank image areas (Copilot CLI's inline screenshots).
 func TestOversizedRedrawReplaysEveryPlaceholderImage(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@2", index: 1, agentTool: "pi"}
 	window.appendHistoryLocked([]byte("\x1b[2J\x1b[Hold frame"))
@@ -556,6 +566,7 @@ func seedPlaceholderImageWindow(
 // missing-image request round trip. A separate write behind the replay now
 // carries exactly those images.
 func TestAttachReplayFollowsUpWithPlaceholderImages(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@1", agentTool: "copilot"}
 	server.windows = []*muxWindow{window}
@@ -637,6 +648,7 @@ func TestAttachReplayFollowsUpWithPlaceholderImages(t *testing.T) {
 // client must parse before SSH and terminal readiness deadlines, so the repair
 // may only ever ride behind it.
 func TestPlaceholderImageFollowUpKeepsReplayBudget(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@1", agentTool: "copilot"}
 	server.windows = []*muxWindow{window}
@@ -674,6 +686,7 @@ func TestPlaceholderImageFollowUpKeepsReplayBudget(t *testing.T) {
 // repaint it belongs with, so the image follow-up has to travel with it instead
 // of racing ahead of the clear.
 func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
 	server.windows = []*muxWindow{{id: "@1"}, window}
@@ -704,6 +717,7 @@ func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
 }
 
 func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 120, 40)
 	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
 	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
@@ -755,6 +769,7 @@ func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
 }
 
 func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T) {
+	t.Parallel()
 	const fullApc = "\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAABBBB\x1b\\"
 	const placement = "\x1b[16;4H\x1b_Ga=p,i=4242,p=1,c=10,r=5,C=1,q=2\x1b\\"
 	for _, tc := range []struct {
@@ -817,6 +832,7 @@ func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T
 }
 
 func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 120, 40)
 	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
 	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
@@ -867,6 +883,8 @@ func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t 
 }
 
 func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *testing.T) {
+	restore := stubForegroundResize(t)
+	t.Cleanup(restore)
 	for _, tc := range []struct {
 		name     string
 		midChunk bool
@@ -875,9 +893,7 @@ func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *t
 		{"between m=1 chunks", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			restore := stubForegroundResize(t)
-			defer restore()
-
+			t.Parallel()
 			server := newMuxServerWithSize("test", 120, 40)
 			window := &muxWindow{
 				id:        "@2",
@@ -956,6 +972,7 @@ func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *t
 }
 
 func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ mode, app string }{
 		{"1047", "alternate app"},
 		{"1049", "alternate app"},
@@ -1002,6 +1019,7 @@ func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
 // model saved, so the exit restores the same origin mode in client and
 // model, whatever the alternate screen did with it.
 func TestActiveReplayKeepsTheOriginModeAlternateScreenEntrySaved(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, main, alt string }{
 		{"saved on, now off", "\x1b[?6h\x1b[3;4H", "\x1b[?6l"},
 		{"saved on in a region", "\x1b[2;5r\x1b[?6h\x1b[2;3H", "\x1b[r\x1b[?6l"},
@@ -1035,6 +1053,7 @@ func TestActiveReplayKeepsTheOriginModeAlternateScreenEntrySaved(t *testing.T) {
 // DECRC restores origin mode without a DECSET, so the mode replay reads it
 // from the model rather than the tracked flag, which still says off here.
 func TestActiveReplayTakesOriginModeFromTheModel(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("test")
 	window := &muxWindow{id: "@1", screenWidth: 20, screenHeight: 6, lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}

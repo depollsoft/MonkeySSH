@@ -37,6 +37,7 @@ const (
 )
 
 func TestCodexLockedPromptShown(t *testing.T) {
+	t.Parallel()
 	render := func(width int, output string) []string {
 		screen := newTerminalScreen(width, 12)
 		screen.Write([]byte(output))
@@ -132,6 +133,7 @@ func runCodexLockedResumeRetry(
 }
 
 func TestCodexLockedResumeRetry(t *testing.T) {
+	t.Parallel()
 	policy := defaultCodexLockedResumePolicy
 	release := 3 * time.Minute
 	for _, tc := range []struct {
@@ -267,6 +269,7 @@ func TestCodexLockedResumeRetry(t *testing.T) {
 // it becomes, or the Node launcher in front of it. The fresh fallback and the
 // recovery shell are other programs.
 func TestCodexResumeCommandLine(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		argv []string
@@ -326,6 +329,7 @@ func (p *codexLockedResumeTestPty) foregroundProcessGroup() int {
 }
 
 func TestWatchCodexLockedResumePressesROnceLockReleases(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -379,6 +383,7 @@ func TestWatchCodexLockedResumePressesROnceLockReleases(t *testing.T) {
 }
 
 func TestWatchCodexLockedResumeStopsWithWindow(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-close")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -413,6 +418,7 @@ func TestWatchCodexLockedResumeStopsWithWindow(t *testing.T) {
 // is still held. Once another program takes the terminal, the release must
 // not press R into it.
 func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-switch")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -449,6 +455,7 @@ func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
 // the program changes during that wait, the queued press must not land in the
 // next program.
 func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-input")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -498,6 +505,7 @@ func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
 // The press must not be sent then, and an unsent press must not use up the
 // retry budget.
 func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-reacquired")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -555,6 +563,7 @@ func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
 // The backoff runs from when R was written, not from when the watcher decided
 // to press before waiting for window input.
 func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-backoff")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -609,6 +618,7 @@ func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
 // prompt stays on screen. The program in front then must not get R, even once
 // the old lease ends.
 func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-leftover")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(42) // The resume ran as group 41 and has exited.
@@ -663,6 +673,7 @@ func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T)
 // program in front can change meanwhile. The press must check the program
 // after that probe, not before it.
 func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-last-probe")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)
@@ -714,6 +725,7 @@ func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
 // The time bound covers the key press itself: a press that waited for window
 // input past the bound is not sent.
 func TestWatchCodexLockedResumeStopsPressingAtTheLimit(t *testing.T) {
+	t.Parallel()
 	server := newMuxServer("codex-locked-resume-limit")
 	pty := &codexLockedResumeTestPty{}
 	pty.foreground.Store(41)

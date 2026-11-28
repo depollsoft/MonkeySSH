@@ -26,6 +26,7 @@ func identityTestPayload(identity agentIdentity) string {
 }
 
 func TestAgentSessionIDValid(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"claude", "codex", "copilot", "cursor-agent", "antigravity"} {
 		for _, id := range []string{identityTestID, strings.ToUpper(identityTestID)} {
 			if !agentSessionIDValid(tool, id) {
@@ -56,6 +57,7 @@ func TestAgentSessionIDValid(t *testing.T) {
 }
 
 func TestAgentIdentityMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
 	file := filepath.Join(t.TempDir(), "not-created.jsonl")
 	for _, identity := range []agentIdentity{
 		{Tool: "claude", ID: identityTestID, File: file, Source: "fork"},
@@ -85,6 +87,7 @@ func TestAgentIdentityMarkerRoundTrip(t *testing.T) {
 }
 
 func TestAgentIdentityFromHookPayload(t *testing.T) {
+	t.Parallel()
 	file := filepath.Join(t.TempDir(), "future.jsonl")
 	cases := []struct {
 		name, tool, payload, notify string
@@ -139,6 +142,7 @@ func TestAgentIdentityFromHookPayload(t *testing.T) {
 }
 
 func TestApplyAgentIdentityPayloadLocked(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	w := &muxWindow{agentTool: "claude", agentToolConfirmed: true, agentSessionWatch: &agentSessionWatch{tool: "claude"}}
 	server := &muxServer{windows: []*muxWindow{w}}
@@ -198,6 +202,7 @@ func TestApplyAgentIdentityPayloadLocked(t *testing.T) {
 }
 
 func TestAgentIdentityExclusivity(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                            string
 		exact, assigned, closed, exited bool
@@ -342,6 +347,7 @@ func TestProtectProvisionalAgentSessionBindings(t *testing.T) {
 }
 
 func TestAgentIdentityOSCFiltering(t *testing.T) {
+	t.Parallel()
 	for _, end := range []string{"\x07", "\x1b\\"} {
 		marker := strings.TrimSuffix(encodeAgentIdentityMarker(agentIdentity{Tool: "claude", ID: identityTestID}), "\x07") + end
 		if !isReplayUnsafeOscNotification([]byte("1337;" + identityTestPayload(agentIdentity{Tool: "claude", ID: identityTestID}))) {
@@ -369,6 +375,7 @@ func TestAgentIdentityOSCFiltering(t *testing.T) {
 }
 
 func TestWithPaneTTYEnvironment(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		env, want []string
@@ -393,6 +400,7 @@ func TestWithPaneTTYEnvironment(t *testing.T) {
 // Invoke the command in a separate process so stdin/stdout and environment
 // handling are exercised without replacing the test runner's descriptors.
 func TestAgentIdentityHookProcess(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("MONKEYMUX_IDENTITY_TEST_PROCESS") != "1" {
 		return
 	}
@@ -420,6 +428,7 @@ func identityHookTestCommand(t *testing.T, args ...string) *exec.Cmd {
 }
 
 func TestAgentIdentityHookAlwaysAcknowledges(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		args  []string
@@ -442,6 +451,7 @@ func TestAgentIdentityHookAlwaysAcknowledges(t *testing.T) {
 }
 
 func TestAgentIdentityPaneTTYTransport(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix pane tty transport")
 	}

@@ -24,6 +24,7 @@ func appendPiTitleTestRecords(t *testing.T, path string, records ...string) {
 }
 
 func TestPiSessionTitleScanPrefersNameOverFirstPrompt(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	appendPiTitleTestRecords(t, path,
 		piTitleTestHeader,
@@ -63,6 +64,7 @@ func TestPiSessionTitleScanPrefersNameOverFirstPrompt(t *testing.T) {
 }
 
 func TestPiSessionTitleScanSummarizesLongPrompts(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	prompt := strings.Repeat("é", 100)
 	appendPiTitleTestRecords(t, path,
@@ -78,6 +80,7 @@ func TestPiSessionTitleScanSummarizesLongPrompts(t *testing.T) {
 }
 
 func TestPiSessionTitleScanIgnoresFilesThatAreNotPiSessions(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "other.jsonl")
 	appendPiTitleTestRecords(t, path,
@@ -169,6 +172,7 @@ func newPiTitleTestServer(window *muxWindow) (*muxServer, *controlRecorder) {
 }
 
 func TestQuietTitleRefreshBroadcastsARename(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	appendPiTitleTestRecords(t, path, piTitleTestHeader,
 		`{"type":"message","message":{"role":"user","content":"Fix the window bar"}}`+"\n")
@@ -202,6 +206,7 @@ func TestQuietTitleRefreshBroadcastsARename(t *testing.T) {
 }
 
 func TestQuietTitleRefreshWaitsForAWatcherAndStopsAfterClose(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	appendPiTitleTestRecords(t, path, piTitleTestHeader,
 		`{"type":"message","message":{"role":"user","content":"Unwatched"}}`+"\n")

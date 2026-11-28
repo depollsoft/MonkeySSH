@@ -13,6 +13,7 @@ import (
 // of the table scripts/generate_unicode_grapheme_tables.py generates for both
 // the model and the client, whose own test checks the same digest.
 func TestGraphemePropertyMatchesSharedTable(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../scripts/unicode_grapheme_table.crc32")
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestGraphemePropertyMatchesSharedTable(t *testing.T) {
 // emoji modifier that does not follow an emoji modifier base, and without
 // GB9c a consonant joins only a prepended mark.
 func TestGraphemeBreakPassesUnicodeTests(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("testdata/grapheme_break_test.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +86,7 @@ lines:
 }
 
 func TestGraphemeWidthEffects(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		previous, r rune
 		want        graphemeWidthEffect

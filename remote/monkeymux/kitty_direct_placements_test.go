@@ -278,6 +278,7 @@ func TestMainScreenReplayKeepsTheAlternateScreensImageData(t *testing.T) {
 // are sent while it is the screen shown, before the frame places them, and a
 // placement whose image the replay cannot carry is left out.
 func TestForegroundReplaySendsMainScreenImagesToTheMainScreen(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
 	big := strings.Repeat("A", maxReplayedKittyImageBytes)
 	stream := "\x1b[2;3H\x1b_Ga=T,i=5,C=1," + kittyPixelRoot + "\x1b\\" +
@@ -314,6 +315,7 @@ func TestForegroundReplaySendsMainScreenImagesToTheMainScreen(t *testing.T) {
 // foreground window keeps what it holds, so the frame deletes the client's
 // copies of each image it places again, and nothing else.
 func TestAttachReplayDeletesOnlyTheImagesItPlacesAgain(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@1", index: 0, agentTool: "copilot", lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
@@ -518,6 +520,7 @@ func TestShellReplayLeavesOutAnImageOverItsBudget(t *testing.T) {
 // scrollback by the output. The replay deletes the client's placements
 // first; it places again every image it reaches.
 func TestShellReplayReplacesTheClientsPlacements(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	shell := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
 	server.windows = []*muxWindow{shell}
@@ -545,6 +548,7 @@ func TestShellReplayReplacesTheClientsPlacements(t *testing.T) {
 // screen with the rows, away from its cell. Every placement the client kept
 // there goes before the main screen is painted; the image is left out.
 func TestMainScreenReplayLeavesOutCleanlyAnImageOverItsBudget(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
 	big := strings.Repeat("A", maxReplayedKittyImageBytes)
 	stream := strings.Repeat("earlier output\r\n", 60) +
@@ -616,6 +620,7 @@ func TestShellReplayFindsItsCutCommandBehindManyImages(t *testing.T) {
 // normal screen and replays its whole retained output, which places its
 // images again, so a reopened client's own placements go first there too.
 func TestConPtyReplayReplacesTheClientsPlacements(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 80, 24)
 	window := &muxWindow{id: "@1", index: 0, win32InputMode: true, lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
@@ -642,6 +647,7 @@ func TestConPtyReplayReplacesTheClientsPlacements(t *testing.T) {
 // deletes the client's data of the rest, so their display commands fail
 // instead.
 func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
+	t.Parallel()
 	// The display commands run on the main screen, where the client starts
 	// the replay: also after a program used the alternate screen in what the
 	// replay carries, and before a reset of a mode that was not set.
@@ -707,6 +713,7 @@ func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
 // follow-up places the virtual one again, but nothing does the direct one,
 // so the replay sends the image before both.
 func TestShellReplaySendsTheImageADirectPlacementShowsBesideAVirtualOne(t *testing.T) {
+	t.Parallel()
 	const (
 		virtual = "\x1b_Ga=p,U=1,i=7,p=1,c=1,r=1\x1b\\"
 		direct  = "\x1b_Ga=p,i=7,p=2,c=1,r=1\x1b\\"

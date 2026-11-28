@@ -73,7 +73,7 @@ runs:
           build/${{ inputs.platform }}/SourcePackages/repositories
           build/${{ inputs.platform }}/SourcePackages/artifacts
           build/${{ inputs.platform }}/SourcePackages/workspace-state.json
-        key: spm-workspace-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}-${{ inputs.platform }}-${{ inputs.dependency-fingerprint }}
+        key: spm-workspace-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.flutter-version }}-${{ inputs.platform }}-${{ inputs.dependency-fingerprint }}-${{ steps.toolchain.outputs.xcode }}
 
     - name: Restore Apple compilation cache
       id: compilation
@@ -81,4 +81,4 @@ runs:
       uses: actions/cache/restore@v6.1.0
       with:
         path: ~/Library/Caches/monkeyssh-xcode
-        key: ${{ inputs.platform }}-compile-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.xcode }}-${{ inputs.flutter-version }}-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}
+        key: ${{ inputs.platform }}-compile-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.flutter-version }}-${{ inputs.configuration }}-${{ inputs.dependency-fingerprint }}-${{ steps.toolchain.outputs.xcode }}

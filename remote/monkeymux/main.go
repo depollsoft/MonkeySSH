@@ -877,9 +877,11 @@ type muxServer struct {
 	nextFocusSequence                uint64
 	pendingFocusRefreshConn          net.Conn
 	attachViewportTransitionWindowID string
-	pendingResizeWidth               int
-	pendingResizeHeight              int
-	pendingResizeRedraw              bool
+	// attachTransitionTimeout overrides the package default when positive (used by tests).
+	attachTransitionTimeout time.Duration
+	pendingResizeWidth      int
+	pendingResizeHeight     int
+	pendingResizeRedraw     bool
 	// keyboardModesUsed records that a window switched the terminal's
 	// keyboard encoding, so replays restore each window's own encoding.
 	keyboardModesUsed bool
@@ -8172,9 +8174,13 @@ func writeConnection(conn net.Conn, data []byte) error {
 }
 
 func writeAttachConnection(conn net.Conn, data []byte) error {
+	return writeAttachConnectionWithTimeout(conn, data, attachWriteTimeout)
+}
+
+func writeAttachConnectionWithTimeout(conn net.Conn, data []byte, timeout time.Duration) error {
 	for len(data) > 0 {
 		chunkSize := min(len(data), attachWriteChunkBytes)
-		_ = conn.SetWriteDeadline(time.Now().Add(attachWriteTimeout))
+		_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 		if err := writeConnection(conn, data[:chunkSize]); err != nil {
 			return err
 		}
@@ -9910,7 +9916,11 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		}})
 	}
 	go s.runAttachInputActions(client)
-	transitionDeadline := time.Now().Add(attachTransitionTimeout)
+	transitionTimeout := s.attachTransitionTimeout
+	if transitionTimeout <= 0 {
+		transitionTimeout = attachTransitionTimeout
+	}
+	transitionDeadline := time.Now().Add(transitionTimeout)
 	s.attachTransitionMu.Lock()
 	attachTransitionLocked := true
 	defer func() {
@@ -11824,7 +11834,7 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 		window.redrawForwardingFallbackScreen = nil
 	}
 	if !window.redrawForwardingPaused {
-		window.redrawForwardingStartKittySeq = kittyImageStoreSeq
+		window.redrawForwardingStartKittySeq = kittyImageStoreSeq.Load()
 	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
@@ -16253,7 +16263,7 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 					id = fmt.Sprintf(
 						"I:%s:%d",
 						event.imageNumber,
-						kittyImageStoreSeq+1,
+						kittyImageStoreSeq.Add(1),
 					)
 					if _, exists := w.kittyImageNumberToID[event.imageNumber]; !exists &&
 						len(w.kittyImageNumberToID) >= maxRetainedKittyImageNumbers {
@@ -16277,8 +16287,7 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			}
 		}
 		if event.mappingOnly {
-			kittyImageStoreSeq++
-			w.kittyImageSeq[id] = kittyImageStoreSeq
+			w.kittyImageSeq[id] = kittyImageStoreSeq.Add(1)
 			w.enforceKittyImageCapsLocked()
 			changed = true
 			continue
@@ -16331,8 +16340,7 @@ func (w *muxWindow) storeKittyImageLocked(id string, buf []byte) {
 	w.kittyImages[id] = append([]byte(nil), buf...)
 	delete(w.kittyImageAnimations, id)
 	w.kittyImageToken[id] = kittyTransmissionPayloadSignature(buf)
-	kittyImageStoreSeq++
-	w.kittyImageSeq[id] = kittyImageStoreSeq
+	w.kittyImageSeq[id] = kittyImageStoreSeq.Add(1)
 	w.enforceKittyImageCapsLocked()
 }
 
@@ -16351,8 +16359,7 @@ func (w *muxWindow) appendKittyImageAnimationLocked(id string, buf []byte) bool 
 		return w.removeKittyImageLocked(id)
 	}
 	w.kittyImageAnimations[id] = append(w.kittyImageAnimations[id], buf...)
-	kittyImageStoreSeq++
-	w.kittyImageSeq[id] = kittyImageStoreSeq
+	w.kittyImageSeq[id] = kittyImageStoreSeq.Add(1)
 	w.enforceKittyImageCapsLocked()
 	return true
 }
@@ -16401,9 +16408,8 @@ func (w *muxWindow) recordKittyImageNumberMappingLocked(number, id string) {
 	if w.kittyImageNumberSeq == nil {
 		w.kittyImageNumberSeq = map[string]uint64{}
 	}
-	kittyImageStoreSeq++
 	w.kittyImageNumberToID[number] = id
-	w.kittyImageNumberSeq[number] = kittyImageStoreSeq
+	w.kittyImageNumberSeq[number] = kittyImageStoreSeq.Add(1)
 }
 
 func (w *muxWindow) clearKittyImagesLocked() bool {
@@ -16438,8 +16444,9 @@ func (w *muxWindow) enforceKittyImageCapsLocked() {
 
 // kittyImageStoreSeq is a global monotonic counter assigning each image mutation
 // an order, used to evict the least recently changed image under the local and
-// machine-wide budgets. Mutated only while the server lock is held.
-var kittyImageStoreSeq uint64
+// machine-wide budgets. Atomic so independent servers in parallel tests do not
+// race on it.
+var kittyImageStoreSeq atomic.Uint64
 
 // kittyImagePerIDBudgetBytes prevents one long-running animation from bypassing
 // the per-window/global "keep one image" policy and growing without bound.
@@ -20024,12 +20031,20 @@ func requestServerShutdown(session string) error {
 }
 
 func requestServerShutdownOnConnection(conn net.Conn, session string) error {
+	return requestServerShutdownOnConnectionWithTimeout(conn, session, socketTimeout)
+}
+
+func requestServerShutdownOnConnectionWithTimeout(conn net.Conn, session string, timeout time.Duration) error {
 	defer conn.Close()
-	return sendServerShutdown(conn, session)
+	return sendServerShutdownWithTimeout(conn, session, timeout)
 }
 
 func sendServerShutdown(conn net.Conn, session string) error {
-	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
+	return sendServerShutdownWithTimeout(conn, session, socketTimeout)
+}
+
+func sendServerShutdownWithTimeout(conn net.Conn, session string, timeout time.Duration) error {
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)

@@ -10,6 +10,7 @@ import (
 
 // Expected bindings are python-dotenv 1.2.4's, the version Hermes locks.
 func TestParseDotenvMatchesPythonDotenv(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		text string
 		want []dotenvAssignment
@@ -55,6 +56,7 @@ func TestParseDotenvMatchesPythonDotenv(t *testing.T) {
 }
 
 func TestResolveHermesDotenv(t *testing.T) {
+	t.Parallel()
 	lookup := map[string]string{"SHELL_SPEED": "2", "EMPTY": ""}
 	got := resolveHermesDotenv(parseDotenv(
 		"A=${SHELL_SPEED}\n"+
@@ -85,6 +87,7 @@ func TestResolveHermesDotenv(t *testing.T) {
 }
 
 func TestResolveHermesDotenvKeepsLastBinding(t *testing.T) {
+	t.Parallel()
 	got := resolveHermesDotenv(parseDotenv("A=1\nB=2\nA=3\nB\nC=${A}${B}\n"), map[string]string{"B": "9"})
 	// B's bare last line drops it and shadows it as empty for later lines.
 	want := []dotenvAssignment{{"A", "3", true}, {"C", "3", true}}
@@ -130,6 +133,7 @@ func environmentSlice(environment map[string]string) []string {
 }
 
 func TestHermesLaunchEnvironmentLayers(t *testing.T) {
+	t.Parallel()
 	account, defaultHome, environment := hermesTestAccount(t)
 	environment["HERMES_TUI_SCROLL_SPEED"] = "2"
 	base := environmentSlice(environment)
@@ -162,6 +166,7 @@ func TestHermesLaunchEnvironmentLayers(t *testing.T) {
 }
 
 func TestHermesLaunchEnvironmentEmptyValueShadowsFallback(t *testing.T) {
+	t.Parallel()
 	_, defaultHome, environment := hermesTestAccount(t)
 	environment["CLAUDE_CODE_SCROLL_SPEED"] = "3"
 	writeHermesTestFile(t, filepath.Join(defaultHome, ".env"), "HERMES_TUI_SCROLL_SPEED=\n")
@@ -171,6 +176,7 @@ func TestHermesLaunchEnvironmentEmptyValueShadowsFallback(t *testing.T) {
 }
 
 func TestHermesHomeForLaunch(t *testing.T) {
+	t.Parallel()
 	account, defaultHome, environment := hermesTestAccount(t)
 	work := filepath.Join(defaultHome, "profiles", "work")
 	writeHermesTestFile(t, filepath.Join(work, "config.yaml"), "")

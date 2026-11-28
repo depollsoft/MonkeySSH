@@ -23,6 +23,13 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    # Non-Dart trees: avoid walking node_modules, Go sources, and binary assets.
+    - "remote/**"
+    - "functions/**"
+    - "store/**"
+    - "assets/**"
+    - "docs/**"
+    - "scripts/**"
 
 linter:
   rules:

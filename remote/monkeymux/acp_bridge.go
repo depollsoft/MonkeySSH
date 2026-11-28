@@ -42,7 +42,6 @@ const (
 	acpPendingReplayMaxBytes  = acpReplayMaxBytes
 	acpIdleTimeout            = 24 * time.Hour
 	acpProviderDrainTimeout   = 2 * time.Second
-	acpRequestTimeout         = 500 * time.Millisecond
 	acpStopRetryInterval      = 50 * time.Millisecond
 	acpWaitMaxFailures        = 5
 	// The live queue only has to absorb output published while the writer
@@ -71,6 +70,11 @@ var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 // socket whose bridge died, until the bridge runs again and drains the queue.
 // Tests change it.
 var acpStopRetryWindow = time.Second
+
+// acpRequestTimeout bounds a single request/response round-trip to an ACP
+// bridge socket. Tests override it to verify timeout handling without waiting
+// half a second per case.
+var acpRequestTimeout = 500 * time.Millisecond
 
 var (
 	errAcpProviderInputClosed = errors.New("closed")
@@ -2318,7 +2322,11 @@ func acpBridgeStatus(id string) (acpBridgeInfo, error) {
 }
 
 func acpBridgeStatusFromConn(conn net.Conn) (acpBridgeInfo, error) {
-	if err := conn.SetDeadline(time.Now().Add(acpRequestTimeout)); err != nil {
+	return acpBridgeStatusFromConnWithTimeout(conn, acpRequestTimeout)
+}
+
+func acpBridgeStatusFromConnWithTimeout(conn net.Conn, timeout time.Duration) (acpBridgeInfo, error) {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return acpBridgeInfo{}, err
 	}
 	if err := writeAcpWireFrame(conn, acpWireMessage{

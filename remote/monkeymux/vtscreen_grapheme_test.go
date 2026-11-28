@@ -104,6 +104,7 @@ func loadGraphemeParityCases(t *testing.T) []graphemeParityCase {
 // grapheme_cluster_parity_test.dart runs, and expects the same cells, cursor
 // and soft wraps.
 func TestGraphemeClusterParityWithClient(t *testing.T) {
+	t.Parallel()
 	for _, c := range loadGraphemeParityCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
 			s := c.screen()
@@ -121,6 +122,7 @@ func TestGraphemeClusterParityWithClient(t *testing.T) {
 // and onto one that received a whole window replay: every one must end with
 // the same cells and cursor, and in the model's mode.
 func TestGraphemeClusterParityFramesRepaintTheCells(t *testing.T) {
+	t.Parallel()
 	for _, c := range loadGraphemeParityCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
 			s := c.screen()
@@ -157,6 +159,7 @@ func graphemeRows(s *terminalScreen) [][]string {
 // planVTSingleGlyph rely on to look up a code point's width once: a cluster
 // starts at the code point's own width unless that is 0.
 func TestGraphemeStartWidthDiffersOnlyFromNoWidth(t *testing.T) {
+	t.Parallel()
 	for r := rune(0); r <= 0x10FFFF; r++ {
 		if width := runeWidth(r); width != 0 && graphemeStartWidth(r) != width {
 			t.Fatalf("%U starts %d columns wide, not its width %d", r, graphemeStartWidth(r), width)
@@ -165,6 +168,7 @@ func TestGraphemeStartWidthDiffersOnlyFromNoWidth(t *testing.T) {
 }
 
 func TestGraphemeClusterModeDefaultsAndResets(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	if !s.graphemeCluster {
 		t.Fatal("clustering is off on a new screen")
@@ -194,6 +198,7 @@ func TestGraphemeClusterModeDefaultsAndResets(t *testing.T) {
 // keeps for its replays and its snapshot: RIS sets it again, DECSTR keeps it,
 // and an upgrade restore carries it like the other display modes.
 func TestWindowTracksGraphemeClusterMode(t *testing.T) {
+	t.Parallel()
 	window := &muxWindow{}
 	window.observeTerminalModesLocked([]byte("\x1b[?2027l"))
 	if enabled, ok := window.privateModes["2027"]; !ok || enabled {
@@ -218,6 +223,7 @@ func TestWindowTracksGraphemeClusterMode(t *testing.T) {
 // replay sets it before the history, after its prefix put back the default
 // for windows that never changed it.
 func TestWindowReplayRestoresGraphemeClusterMode(t *testing.T) {
+	t.Parallel()
 	server := newMuxServerWithSize("test", 10, 3)
 	legacy := &muxWindow{
 		id: "@1", index: 0, lastActivity: time.Now(), screenWidth: 10, screenHeight: 3,
@@ -264,6 +270,7 @@ func TestWindowReplayRestoresGraphemeClusterMode(t *testing.T) {
 // began or past a switch the kept history no longer holds, and a model
 // rebuilt from a snapshot of the window starts in that mode too.
 func TestShellReplayStartsInTheModeItsHistoryDid(t *testing.T) {
+	t.Parallel()
 	family := "\U0001F468\u200d\U0001F469"
 	clustered := []string{family, "<"}
 	legacy := []string{"\U0001F468\u200d", "<", "\U0001F469", "<"}
@@ -348,6 +355,7 @@ func TestShellReplayStartsInTheModeItsHistoryDid(t *testing.T) {
 // kept, however many, and one no replay can start before only sets the mode
 // before the next.
 func TestGraphemeClusterAtKeepsTheChangesAReplayReaches(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("ab\x1b[?2027lcd\x1b[?2027hef"))
 	for at, want := range map[int64]bool{0: true, 9: true, 10: false, 19: false, 20: true, 22: true} {
@@ -390,6 +398,7 @@ func TestGraphemeClusterAtKeepsTheChangesAReplayReaches(t *testing.T) {
 // prints them first, from the right, also at the start of a soft-wrapped row
 // and in a line kept in the scrollback.
 func TestFramesPaintGlyphsThatWouldJoinTheGlyphBefore(t *testing.T) {
+	t.Parallel()
 	swatch, thumb := "\U0001F3FD", "\U0001F44D"
 	for _, tc := range []struct {
 		name, write string
@@ -431,6 +440,7 @@ func TestFramesPaintGlyphsThatWouldJoinTheGlyphBefore(t *testing.T) {
 // case "a cluster widened over a wide glyph blanks that glyph's right half"
 // leaves: that right half keeps only its background, as in the client.
 func TestWidenedClusterBlanksTheWideGlyphItCovers(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("\u2665\x1b[7;31;44m\u754c\x1b[2G\x1b[0m\ufe0f"))
 	ref := newTerminalScreen(1, 1)
@@ -458,6 +468,7 @@ func TestForegroundFrameRestoresGraphemeClusterMode(t *testing.T) {
 }
 
 func TestGraphemeClustersMoveWithTheirCells(t *testing.T) {
+	t.Parallel()
 	family := "\U0001F468\u200d\U0001F469"
 	s := newTerminalScreen(8, 3)
 	s.Write([]byte("e\u0301" + family + "\r\x1b[2@"))
@@ -512,6 +523,7 @@ func TestGraphemeClustersMoveWithTheirCells(t *testing.T) {
 }
 
 func TestGraphemeClustersReflow(t *testing.T) {
+	t.Parallel()
 	family := "\U0001F468\u200d\U0001F469"
 	s := newTerminalScreen(8, 3)
 	s.Write([]byte("\r\n\r\nab" + family + "cde\u0301"))
@@ -539,6 +551,7 @@ func TestGraphemeClustersReflow(t *testing.T) {
 // TestGraphemeEraseClearsClusters: every erase leaves cells without the code
 // points that were joined to them, and a new glyph replaces them.
 func TestGraphemeEraseClearsClusters(t *testing.T) {
+	t.Parallel()
 	cluster := "e\u0301\U0001F468\u200d\U0001F469"
 	for _, tc := range []struct {
 		name, op string
@@ -570,6 +583,7 @@ func TestGraphemeEraseClearsClusters(t *testing.T) {
 }
 
 func TestGraphemeVariationSelectorsInLegacyModeOnlyFollowEmoji(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		write string
 		want  []string
@@ -592,6 +606,7 @@ func TestGraphemeVariationSelectorsInLegacyModeOnlyFollowEmoji(t *testing.T) {
 // more code points, in either mode, and drops the rest, even one that would
 // widen it.
 func TestGraphemeClusterKeepsFifteenExtras(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"\x1b[?2027h", "\x1b[?2027l"} {
 		s := newTerminalScreen(6, 1)
 		s.Write([]byte(mode + "e" + strings.Repeat("\u0301", 20) + "x"))
@@ -613,6 +628,7 @@ func TestGraphemeClusterKeepsFifteenExtras(t *testing.T) {
 // to its left and moved there, as the input it was typed as. Painted as the
 // prompt before it, it took no clicks after a replay.
 func TestFrameMovesANarrowedClusterIntoTheLastColumnAsInput(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(5, 2)
 	s.Write([]byte(osc133("A") + "$ " + osc133("B") + "\u231a\ufe0e\x1b[3G\x1b[2@"))
 	if row := graphemeRows(s)[0]; !reflect.DeepEqual(row, []string{"$", " ", "", "", "\u231a\ufe0e"}) {
@@ -637,6 +653,7 @@ func TestFrameMovesANarrowedClusterIntoTheLastColumnAsInput(t *testing.T) {
 // every such cluster that ends a row into place together, the cell before
 // them painted after.
 func TestFrameMovesNarrowedClustersBeforeTheLastColumnToo(t *testing.T) {
+	t.Parallel()
 	watch := "\u231a\ufe0e"
 	for _, tc := range []struct {
 		width int
@@ -673,6 +690,7 @@ func TestFrameMovesNarrowedClustersBeforeTheLastColumnToo(t *testing.T) {
 // that widens a cluster writes its second half as the content then current,
 // prompt or input, as it does in the rendition then current.
 func TestFrameWidensAClusterAsTheContentItsSecondHalfWasWrittenAs(t *testing.T) {
+	t.Parallel()
 	for _, write := range []string{
 		osc133("A") + "\u2665" + osc133("B") + "\ufe0f",
 		osc133("A") + "$ " + osc133("B") + "\u2665" + osc133("C") + "\ufe0f\r\n",
@@ -697,6 +715,7 @@ func TestFrameWidensAClusterAsTheContentItsSecondHalfWasWrittenAs(t *testing.T) 
 // cluster is printed in is set where the cursor is, at the start of the row
 // on a narrow screen, where a C would end the row's prompt mark.
 func TestFrameMovesAClusterInWithoutEndingItsPromptRow(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(2, 2)
 	s.Write([]byte("\u231a\ufe0e\r\x1b[@" + osc133("P;k=i") + "$" + osc133("C")))
 	want := dumpSemanticPrompt(s)
@@ -713,6 +732,7 @@ func TestFrameMovesAClusterInWithoutEndingItsPromptRow(t *testing.T) {
 // keeps the output in force for its second half as for its first, rather
 // than leave the app editing for finish to start the command again there.
 func TestFrameKeepsTheCursorsWidenedGlyphOutOfANewCommand(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(4, 3)
 	s.Write([]byte(osc133("A") + "$ " + osc133("B") + "\u2665\ufe0f\r\n" + osc133("C") + "x\x1b[1;4H\t"))
 	if rows := graphemeCommandMarkRows(replaySequence(s), 4, 3); !slices.Equal(rows, []int{1}) {
@@ -728,6 +748,7 @@ func TestFrameKeepsTheCursorsWidenedGlyphOutOfANewCommand(t *testing.T) {
 // happens, so the glyph a frame wraps with keeps that content for its second
 // half too. A clear afterwards saves as many rows as the model does.
 func TestFrameWrapsOntoAClusterAsTheContentInForceThen(t *testing.T) {
+	t.Parallel()
 	for _, write := range []string{
 		osc133("A") + "$" + osc133("B") + "abc" + osc133("C") + "\u2665\ufe0f",
 		"abcd" + osc133("B") + "\u2665\ufe0f",
@@ -833,6 +854,7 @@ func requireGraphemeFrameRoundTrip(t *testing.T, s *terminalScreen, stream strin
 // would not rebuild by printing them under the mode the window is in now:
 // written under the other mode, or before the glyph left of them.
 func TestFramesRepaintClustersWrittenUnderEitherMode(t *testing.T) {
+	t.Parallel()
 	for _, stream := range []string{
 		// Written without clustering, painted with it.
 		"\x1b[?2027l\u0915\u093f a\U0001F3FD \U0001F468\u200d\U0001F469 \u2665\ufe0f\x1b[?2027h",
@@ -864,6 +886,7 @@ func TestFramesRepaintClustersWrittenUnderEitherMode(t *testing.T) {
 // row has no room to widen it into, a wide glyph above a soft wrap keeps its
 // cell, as does one in the scrollback, and a narrowed glyph waits to wrap.
 func TestFramesRepaintOneColumnScreens(t *testing.T) {
+	t.Parallel()
 	for _, stream := range []string{
 		"⌚︎",
 		"\x1b[41m⌚︎\x1b[0m",
@@ -883,6 +906,7 @@ func TestFramesRepaintOneColumnScreens(t *testing.T) {
 // with the model's cells. Cases with a picture no frame paints are skipped
 // (graphemeFrameCannotPaint).
 func TestFramesRepaintRandomClusters(t *testing.T) {
+	t.Parallel()
 	tokens := []string{
 		"a", "e", " ", "1", "\u0301", "\u0308", "\u200d", "\ufe0f", "\ufe0e",
 		"\U0001F468", "\U0001F469", "\U0001F44D", "\U0001F3FD", "\u2665", "\u231a",
@@ -939,6 +963,7 @@ func TestFramesRepaintRandomClusters(t *testing.T) {
 // glyph the cursor waits to wrap after is printed again as the output in
 // force (cursorContent), so its content is left out.
 func TestFramesRepaintPromptMarksAroundRandomClusters(t *testing.T) {
+	t.Parallel()
 	a, b, c := osc133("A"), osc133("B"), osc133("C")
 	tokens := []string{
 		"a", "b", "$ ", "abc", a, b, c, osc133("D;0"), osc133("P;k=s"), "\r\n", "\r", "\x1b[K",
@@ -968,6 +993,7 @@ func TestFramesRepaintPromptMarksAroundRandomClusters(t *testing.T) {
 // around: the client must end as requirePromptFrameRoundTrip says. Cases
 // with a picture no frame paints are skipped (graphemeFrameCannotPaint).
 func TestFramesRepaintPromptMarksAroundRandomEdits(t *testing.T) {
+	t.Parallel()
 	a, b, c := osc133("A"), osc133("B"), osc133("C")
 	tokens := []string{
 		"a", "b", "$ ", "abc", a, b, c, osc133("D;0"), osc133("P;k=s"), "\r\n", "\r", "\t",
@@ -1015,6 +1041,7 @@ func TestFramesRepaintPromptMarksAroundRandomEdits(t *testing.T) {
 // left above or below the scroll region in origin mode, where CUP cannot put
 // it, and a saved cursor there.
 func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
+	t.Parallel()
 	for _, stream := range []string{
 		// Restored above the region, by DECRC and by leaving the alternate
 		// screen.
@@ -1056,6 +1083,7 @@ func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
 // it is erased in the current background alone, as in the client
 // (grapheme_cluster_test.dart), xterm.js and Ghostty.
 func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
+	t.Parallel()
 	blank := vtCell{width: 1, attrs: vtAttrs{bg: vtColor{kind: vtColorIndexed, index: 4}}}
 	for _, c := range []struct {
 		stream string
@@ -1088,6 +1116,7 @@ func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
 // moving it on from it. It keeps only its own background, as in the client
 // (grapheme_cluster_test.dart).
 func TestBlankingTheOtherHalfKeepsItsBackground(t *testing.T) {
+	t.Parallel()
 	blank := vtCell{width: 1, attrs: vtAttrs{bg: vtColor{kind: vtColorIndexed, index: 1}}}
 	for _, c := range []struct {
 		stream string
@@ -1189,6 +1218,7 @@ func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string)
 // content than it: each keeps its own, and the app sees the marks a painting
 // from the left puts there, a running command's C included.
 func TestFramesPaintJoiningGlyphsWithTheirOwnContent(t *testing.T) {
+	t.Parallel()
 	a, b, c := osc133("A"), osc133("B"), osc133("C")
 	swatch, thumb := "\U0001F3FD", "\U0001F44D"
 	for _, stream := range []string{

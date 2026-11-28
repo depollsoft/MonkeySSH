@@ -155,6 +155,7 @@ func boolStrings(values []bool) []string {
 }
 
 func TestVTScreenCursorMovesAndClamp(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 4)
 	s.Write([]byte("\x1b[99;99H"))
 	if r, c := s.CursorPosition(); r != 3 || c != 9 {
@@ -171,6 +172,7 @@ func TestVTScreenCursorMovesAndClamp(t *testing.T) {
 }
 
 func TestVTScreenWrapAndPendingWrap(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(5, 3)
 	s.Write([]byte("abcde"))
 	if r, c := s.CursorPosition(); r != 0 || c != 4 {
@@ -191,6 +193,7 @@ func TestVTScreenWrapAndPendingWrap(t *testing.T) {
 }
 
 func TestVTScreenWideAndCombining(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(6, 2)
 	s.Write([]byte("a漢b"))
 	if got := s.TextRows()[0]; got != "a漢b" {
@@ -220,6 +223,7 @@ func TestVTScreenWideAndCombining(t *testing.T) {
 }
 
 func TestVTScreenEraseInsertDelete(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(8, 4)
 	s.Write([]byte("12345678\r\nabcdefgh\r\nABCDEFGH\r\nwxyz"))
 	s.Write([]byte("\x1b[2;3H\x1b[K"))
@@ -261,6 +265,7 @@ func TestVTScreenEraseInsertDelete(t *testing.T) {
 }
 
 func TestVTScreenScrollRegionAndOriginMode(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 6)
 	for i := 1; i <= 6; i++ {
 		s.Write([]byte(fmt.Sprintf("\x1b[%d;1Hline%d", i, i)))
@@ -294,6 +299,7 @@ func TestVTScreenScrollRegionAndOriginMode(t *testing.T) {
 // they must survive into a rendered frame so the client can scroll back to
 // them after a replay.
 func TestVTScreenTopAnchoredPartialRegionFeedsScrollback(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 6)
 	s.Write([]byte("\x1b[4;1HV0\r\nV1\r\nV2"))
 	s.Write([]byte("\x1b7\x1b[1;3r\x1b[3;1H"))
@@ -333,6 +339,7 @@ func TestVTScreenTopAnchoredPartialRegionFeedsScrollback(t *testing.T) {
 }
 
 func TestVTScreenScrollbackAndClear(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 3)
 	for i := 1; i <= 5; i++ {
 		s.Write([]byte(fmt.Sprintf("row %d\r\n", i)))
@@ -362,6 +369,7 @@ func TestVTScreenScrollbackAndClear(t *testing.T) {
 }
 
 func TestVTScreenScrollbackBounded(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	for i := 0; i < vtScrollbackLimit+50; i++ {
 		s.Write([]byte(fmt.Sprintf("%d\r\n", i)))
@@ -395,6 +403,7 @@ func TestVTScreenScrollbackBounded(t *testing.T) {
 }
 
 func TestVTScreenTabs(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(24, 1)
 	s.Write([]byte("\tA\x1b[1;12H\x1bH\x1b[1;1H\t\tB"))
 	if got := s.TextRows()[0]; got != "        A  B" {
@@ -413,6 +422,7 @@ func TestVTScreenTabs(t *testing.T) {
 }
 
 func TestVTScreenInsertMode(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(6, 1)
 	s.Write([]byte("abcd\x1b[1;2H\x1b[4hXY\x1b[4l"))
 	if got := s.TextRows()[0]; got != "aXYbcd" {
@@ -421,6 +431,7 @@ func TestVTScreenInsertMode(t *testing.T) {
 }
 
 func TestVTScreenSGRParsing(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 1)
 	s.Write([]byte("\x1b[1;3;4:3;38;2;10;20;30;48;5;200;58:2::1:2:3mX"))
 	cell := s.grid().rows[0][0]
@@ -447,6 +458,7 @@ func TestVTScreenSGRParsing(t *testing.T) {
 }
 
 func TestVTScreenSplitSequencesAndInvalidUTF8(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("\x1b[38;2;10;"))
 	s.Write([]byte("20;30mX\xe6\xbc"))
@@ -475,6 +487,7 @@ func TestVTScreenSplitSequencesAndInvalidUTF8(t *testing.T) {
 }
 
 func TestVTScreenDECGraphicsAndCharsets(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 1)
 	s.Write([]byte("\x1b(0lqk\x1b(B|\x1b)0\x0ex\x0f|"))
 	if got := s.TextRows()[0]; got != "┌─┐|│|" {
@@ -484,6 +497,7 @@ func TestVTScreenDECGraphicsAndCharsets(t *testing.T) {
 }
 
 func TestVTScreenSaveRestoreAndAlternate1049(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 3)
 	s.Write([]byte("main\x1b[2;3H\x1b[31m\x1b7\x1b[?1049hALT\x1b[?1049lX"))
 	if got := s.TextRows(); got[0] != "main" || got[1] != "  X" {
@@ -507,6 +521,7 @@ func TestVTScreenSaveRestoreAndAlternate1049(t *testing.T) {
 }
 
 func TestVTScreenResize(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 4)
 	s.Write([]byte("one\r\ntwo\r\nthree\r\nfour"))
 	s.Resize(3, 2)
@@ -552,6 +567,7 @@ func TestVTScreenResize(t *testing.T) {
 }
 
 func TestVTScreenResetAndClone(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("abc\r\nline\r\n\x1b[31m\x1b[2;5r\x1b[?6h"))
 	clone := s.Clone()
@@ -572,6 +588,7 @@ func TestVTScreenResetAndClone(t *testing.T) {
 }
 
 func TestVTScreenHasVisibleContent(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(5, 2)
 	if s.HasVisibleContent() {
 		t.Fatal("empty screen is not visible")
@@ -617,6 +634,7 @@ func inkLikeFrames(width, height int, alternate bool) [][]byte {
 }
 
 func TestVTScreenRenderRoundTrip(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		build func() *terminalScreen
@@ -687,6 +705,7 @@ func (s *terminalScreen) writeFormatted(format string, args ...any) {
 }
 
 func TestVTScreenRenderFrameIsSelfContained(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 4)
 	s.Write([]byte("hello\r\nworld\x1b[2;3H"))
 	frame := s.RenderFrame()
@@ -710,6 +729,7 @@ func TestVTScreenRenderFrameIsSelfContained(t *testing.T) {
 // MONKEYMUX_VT_SIZE=<cols>x<rows> prints the screen a captured byte stream
 // produces, for differential checks against other emulators.
 func TestVTScreenDumpFile(t *testing.T) {
+	t.Parallel()
 	path := os.Getenv("MONKEYMUX_VT_DUMP")
 	if path == "" {
 		t.Skip("MONKEYMUX_VT_DUMP not set")
@@ -737,6 +757,7 @@ func TestVTScreenDumpFile(t *testing.T) {
 }
 
 func TestVTScreenPendingWrapSurvivesFrame(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(5, 3)
 	s.Write([]byte("abcde"))
 	replica := newTerminalScreen(5, 3)
@@ -750,6 +771,7 @@ func TestVTScreenPendingWrapSurvivesFrame(t *testing.T) {
 }
 
 func TestVTScreenSavedCursorSurvivesFrame(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 4)
 	s.Write([]byte("\x1b[3;5H\x1b7\x1b[1;1Hhi"))
 	replica := newTerminalScreen(10, 4)
@@ -762,6 +784,7 @@ func TestVTScreenSavedCursorSurvivesFrame(t *testing.T) {
 }
 
 func TestVTScreenSavedCursorKeepsPendingWrap(t *testing.T) {
+	t.Parallel()
 	// The client keeps a cursor saved with a wrap pending at viewWidth and
 	// DECRC restores it (terminal_state_regression_test.dart).
 	s := newTerminalScreen(5, 3)
@@ -789,6 +812,7 @@ func TestVTScreenSavedCursorKeepsPendingWrap(t *testing.T) {
 }
 
 func TestVTScreenRepeatSoftResetAndAlignment(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 3)
 	s.Write([]byte("\x1b(0q\x1b[4b\x1b(B"))
 	if got := s.TextRows()[0]; got != "─────" {
@@ -816,6 +840,7 @@ func TestVTScreenRepeatSoftResetAndAlignment(t *testing.T) {
 }
 
 func TestVTScreenRawC1AndMode47(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("abc\x9b2Jd"))
 	if got := s.TextRows()[0]; got != "   d" {
@@ -832,6 +857,7 @@ func TestVTScreenRawC1AndMode47(t *testing.T) {
 // alternate screen on the way out; 1049 saves and restores the cursor even
 // when the screen doesn't change.
 func TestVTScreenScreenSwitchKeepsCursor(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"47", "1047"} {
 		s := newTerminalScreen(10, 4)
 		s.Write([]byte("abc\r\nabc\x1b[?" + mode + "h"))
@@ -873,6 +899,7 @@ func TestVTScreenScreenSwitchKeepsCursor(t *testing.T) {
 // SCOSC and SCORC, and mode 1048, are DECSC and DECRC, origin mode included,
 // as in xterm and the client.
 func TestVTScreenSCOCursorIsDECSC(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 8)
 	s.Write([]byte("\x1b[6;5H\x1b[s\x1b[5;7r\x1b[?6h\x1b[u\x1b[1;1HX"))
 	if s.originMode || s.TextRows()[0] != "X" {
@@ -889,6 +916,7 @@ func TestVTScreenSCOCursorIsDECSC(t *testing.T) {
 }
 
 func TestVTScreenInsertCharsSplitsWideGlyphSafely(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(8, 1)
 	s.Write([]byte("a漢bcde\x1b[1;3H\x1b[2@"))
 	for i, cell := range s.grid().rows[0] {
@@ -900,6 +928,7 @@ func TestVTScreenInsertCharsSplitsWideGlyphSafely(t *testing.T) {
 }
 
 func TestVTScreenASCIIFastPathMatchesSlowPath(t *testing.T) {
+	t.Parallel()
 	inputs := []string{
 		"hello world, this is a plain run of text that wraps around the row end",
 		"\x1b[4hinsert\x1b[4l mode",
@@ -925,6 +954,7 @@ func TestVTScreenASCIIFastPathMatchesSlowPath(t *testing.T) {
 }
 
 func TestVTScreenScrollbackRowsAreTrimmed(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(200, 2)
 	s.Write([]byte("hi\r\n\x1b[31mred\x1b[0m\r\n\r\n"))
 	if got := string(s.scrollback.at(0).text); got != "hi" {
@@ -937,6 +967,7 @@ func TestVTScreenScrollbackRowsAreTrimmed(t *testing.T) {
 }
 
 func TestVTScreenBounds(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(1<<20, 1<<20)
 	if w, h := s.Size(); w*h > vtMaxCells || w > vtMaxColumns || h > vtMaxRows {
 		t.Fatalf("size not clamped: %dx%d", w, h)
@@ -962,6 +993,7 @@ func TestVTScreenBounds(t *testing.T) {
 }
 
 func TestVTScreenC1TerminatorInsideStrings(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 2)
 	// ✳ is E2 9C B3: the 9C inside it must not end the title.
 	s.Write([]byte("\x9d0;\xe2\x9c\xb3 Claude\x9cok\x1b]2;title\x9c!\x1bPdata\x9c?"))
@@ -971,6 +1003,7 @@ func TestVTScreenC1TerminatorInsideStrings(t *testing.T) {
 }
 
 func TestVTScreenInsertModeKeepsWidePairs(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(6, 1)
 	s.Write([]byte("ab漢cd\x1b[1;1H\x1b[4hX"))
 	row := s.grid().rows[0]
@@ -993,6 +1026,7 @@ func TestVTScreenInsertModeKeepsWidePairs(t *testing.T) {
 }
 
 func TestVTScreenFrameRebuildsDefaultTabStops(t *testing.T) {
+	t.Parallel()
 	client := newTerminalScreen(20, 1)
 	client.Write([]byte("\x1b[3g\x1b[1;3H\x1bH"))
 	client.Write(newTerminalScreen(20, 1).RenderFrame())
@@ -1006,6 +1040,7 @@ func TestVTScreenFrameRebuildsDefaultTabStops(t *testing.T) {
 // placeholder marks identical to the vendored client's list, so a placeholder
 // grid lays out the same on both sides.
 func TestKittyPlaceholderDiacriticsMatchClient(t *testing.T) {
+	t.Parallel()
 	source, err := os.ReadFile("../../third_party/xterm/lib/src/terminal.dart")
 	if err != nil {
 		t.Skipf("client source unavailable: %v", err)
@@ -1062,6 +1097,7 @@ func TestKittyPlaceholderDiacriticsMatchClient(t *testing.T) {
 // two sides drift, and the model wraps and places the cursor differently from
 // the live client.
 func TestRuneWidthMatchesSharedTable(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../scripts/unicode_width_table.crc32")
 	if err != nil {
 		t.Fatal(err)
@@ -1094,6 +1130,7 @@ func TestRuneWidthMatchesSharedTable(t *testing.T) {
 }
 
 func TestVTScreenScrollbackByteBudget(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(4000, 2)
 	// Each scrolled line alternates truecolor renditions per cell, so a single
 	// line renders to well over 50 KB.
@@ -1125,6 +1162,7 @@ func TestVTScreenScrollbackByteBudget(t *testing.T) {
 // placeholder cells but not the image transmissions that fill them. The model
 // therefore has to report which images the frame still needs.
 func TestVTScreenTracksKittyPlaceholderImageIDs(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 3)
 	const transmit = "\x1b_Ga=T,f=100,c=2,r=1,q=2,i=4822;PAYLOADBYTES\x1b\\"
 	// An RGB foreground carries the low 24 bits of the image id:
@@ -1180,6 +1218,7 @@ func TestVTScreenTracksKittyPlaceholderImageIDs(t *testing.T) {
 }
 
 func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(20, 2)
 	for i := 1; i <= vtKittyPlaceholderIDLimit+16; i++ {
 		s.Write([]byte(fmt.Sprintf("\x1b[38;2;%d;%d;%dm\U0010EEEE̅̅",
@@ -1197,6 +1236,7 @@ func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {
 // REP repeats the glyph shown, whatever the character set is now, and nothing
 // after RIS, as the client does.
 func TestVTScreenRepeatAfterCharsetChangeAndReset(t *testing.T) {
+	t.Parallel()
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("\x1b(0q\x1b(B\x1b[2b"))
 	if got := s.TextRows()[0]; got != "───" {

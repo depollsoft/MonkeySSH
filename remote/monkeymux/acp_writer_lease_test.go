@@ -105,6 +105,7 @@ func assertLeaseLost(t *testing.T, message acpWireMessage, wantLabel string) {
 }
 
 func TestAcpWriterLeaseTakeoverMovesLeaseAndNotifiesOldWriter(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -134,6 +135,7 @@ func TestAcpWriterLeaseTakeoverMovesLeaseAndNotifiesOldWriter(t *testing.T) {
 }
 
 func TestAcpWriterLeaseCarriesPendingRequestsAndInFlightTurns(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -186,6 +188,7 @@ func TestAcpWriterLeaseCarriesPendingRequestsAndInFlightTurns(t *testing.T) {
 }
 
 func TestAcpWriterLeaseProbeReportsLiveWriterWithoutAttaching(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	clock := newTestLeaseClock(bridge)
 
@@ -225,6 +228,7 @@ func TestAcpWriterLeaseProbeReportsLiveWriterWithoutAttaching(t *testing.T) {
 }
 
 func TestAcpWriterLeaseStaleWriterIsReplacedOnAttach(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	clock := newTestLeaseClock(bridge)
 
@@ -249,6 +253,7 @@ func TestAcpWriterLeaseStaleWriterIsReplacedOnAttach(t *testing.T) {
 }
 
 func TestAcpWriterLeaseSameProcessReclaimsItsOwnLease(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -263,6 +268,7 @@ func TestAcpWriterLeaseSameProcessReclaimsItsOwnLease(t *testing.T) {
 }
 
 func TestAcpWriterLeaseDisconnectsDisplacedLegacyWriter(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -284,6 +290,7 @@ func TestAcpWriterLeaseDisconnectsDisplacedLegacyWriter(t *testing.T) {
 }
 
 func TestAcpWriterLeaseLegacyReaderCannotTakeOver(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -308,6 +315,7 @@ func TestAcpWriterLeaseLegacyReaderCannotTakeOver(t *testing.T) {
 }
 
 func TestAcpWriterLeaseIgnoresMalformedTokens(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -319,6 +327,7 @@ func TestAcpWriterLeaseIgnoresMalformedTokens(t *testing.T) {
 }
 
 func TestSanitizeAcpDeviceLabel(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want string
@@ -350,6 +359,7 @@ func writerClient(t *testing.T, bridge *acpBridge) *acpBridgeClient {
 }
 
 func TestAcpWriterLeaseClosesDisplacedWriterThatStoppedReading(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	bridge.leaseLinger = 50 * time.Millisecond
@@ -368,6 +378,7 @@ func TestAcpWriterLeaseClosesDisplacedWriterThatStoppedReading(t *testing.T) {
 }
 
 func TestAcpWriterLeaseNoticePreemptsQueuedOutput(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -391,6 +402,7 @@ func TestAcpWriterLeaseNoticePreemptsQueuedOutput(t *testing.T) {
 }
 
 func TestAcpWriterLeaseNoticeCountsAcceptedInputs(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -411,6 +423,7 @@ func TestAcpWriterLeaseNoticeCountsAcceptedInputs(t *testing.T) {
 }
 
 func TestAcpAnsweredRequestIsNeitherReplayedNorAnsweredTwice(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
@@ -433,6 +446,7 @@ func TestAcpAnsweredRequestIsNeitherReplayedNorAnsweredTwice(t *testing.T) {
 }
 
 func TestAcpWriterLeaseKeepsLegacyWriterUntilAskedToTakeOver(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	clock := newTestLeaseClock(bridge)
 
@@ -452,6 +466,7 @@ func TestAcpWriterLeaseKeepsLegacyWriterUntilAskedToTakeOver(t *testing.T) {
 }
 
 func TestAcpWriterLeaseHeartbeatKeepsLeasePastStaleBound(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	clock := newTestLeaseClock(bridge)
 
@@ -482,6 +497,7 @@ func TestAcpWriterLeaseHeartbeatKeepsLeasePastStaleBound(t *testing.T) {
 }
 
 func TestAcpWriterLeaseResumeAfterAnotherWriterIsAProbe(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
@@ -509,6 +525,7 @@ func TestAcpWriterLeaseResumeAfterAnotherWriterIsAProbe(t *testing.T) {
 }
 
 func TestAcpWriterLeaseSameProcessResumesNormally(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
@@ -529,6 +546,7 @@ func TestAcpWriterLeaseSameProcessResumesNormally(t *testing.T) {
 }
 
 func TestAcpWriterLeaseStatusReportsTheWriter(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	clock := newTestLeaseClock(bridge)
 
@@ -546,6 +564,7 @@ func TestAcpWriterLeaseStatusReportsTheWriter(t *testing.T) {
 }
 
 func TestAcpWriterLeaseConcurrentTakeoversLeaveOneWriter(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	bridge.leaseLinger = 50 * time.Millisecond
@@ -612,6 +631,7 @@ func waitForNoWriter(t *testing.T, bridge *acpBridge) {
 }
 
 func TestAcpDuplicateAnswerLeavesTheReplayCopyForARetry(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)
@@ -651,6 +671,7 @@ func TestAcpDuplicateAnswerLeavesTheReplayCopyForARetry(t *testing.T) {
 }
 
 func TestAcpWriterLeaseNoticeAlwaysCarriesTheCount(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -670,6 +691,7 @@ func TestAcpWriterLeaseNoticeAlwaysCarriesTheCount(t *testing.T) {
 }
 
 func TestAcpWriterLeaseReportsThePreviousConnectionsCount(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -687,6 +709,7 @@ func TestAcpWriterLeaseReportsThePreviousConnectionsCount(t *testing.T) {
 }
 
 func TestAcpWriterLeaseProbeReportsThePreviousConnectionsCount(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -704,6 +727,7 @@ func TestAcpWriterLeaseProbeReportsThePreviousConnectionsCount(t *testing.T) {
 }
 
 func TestAcpWriterLeaseTokenlessResumeAttachesAfresh(t *testing.T) {
+	t.Parallel()
 	bridge, _ := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
@@ -726,6 +750,7 @@ func TestAcpWriterLeaseTokenlessResumeAttachesAfresh(t *testing.T) {
 }
 
 func TestAcpWriterLeaseLostHelloKeepsTheEarlierCount(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -746,6 +771,7 @@ func TestAcpWriterLeaseLostHelloKeepsTheEarlierCount(t *testing.T) {
 }
 
 func TestAcpWriterLeaseReportsNoCountForAnotherProcess(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 
@@ -759,6 +785,7 @@ func TestAcpWriterLeaseReportsNoCountForAnotherProcess(t *testing.T) {
 }
 
 func TestAcpWriterLeaseNoticeLeavesOutAnInputTheProviderRefused(t *testing.T) {
+	t.Parallel()
 	bridge := newTestAcpBridge()
 	newTestLeaseClock(bridge)
 	written := make(chan struct{}, 4)
@@ -807,6 +834,7 @@ func TestAcpWriterLeaseNoticeLeavesOutAnInputTheProviderRefused(t *testing.T) {
 }
 
 func TestAcpCancelDuringAFailedAnswerIsNotReplayed(t *testing.T) {
+	t.Parallel()
 	bridge, lines := newCancelTestBridge(t)
 	newTestLeaseClock(bridge)
 	publishTestProviderFrame(t, bridge, testPermissionRequest)

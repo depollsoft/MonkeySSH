@@ -7,6 +7,7 @@ import (
 )
 
 func TestAcpTrimReplayKeepsPendingAndNewestEvents(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		weights []int

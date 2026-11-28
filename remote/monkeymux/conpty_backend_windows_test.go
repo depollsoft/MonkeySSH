@@ -152,6 +152,7 @@ func TestBundledConPtyNativeInputDoesNotLeakProtocolText(t *testing.T) {
 	}
 }
 func TestConPtyRejectsInvalidInputBeforeCreate(t *testing.T) {
+	t.Parallel()
 	backend := &conPtyBackend{create: func(windows.Coord, windows.Handle, windows.Handle, uint32, *windows.Handle) error {
 		t.Error("invalid input reached pseudoconsole creation")
 		return windows.ERROR_INVALID_PARAMETER

@@ -6,6 +6,7 @@ import (
 )
 
 func TestThemeRefreshUsesCapabilitiesNotAgentIdentity(t *testing.T) {
+	t.Parallel()
 	const background = "\x1b]11;rgb:0d0d/1a1a/2020\x1b\\"
 	const mode = "\x1b[?997;1n"
 	for _, tool := range []string{"", "muse", "future-agent", "claude", "copilot", "codex", "opencode", "antigravity", "cursor-agent", "pi"} {

@@ -19,6 +19,7 @@ import (
 // compiled constant.
 
 func TestVersionScriptMatchesCompiledVersion(t *testing.T) {
+	t.Parallel()
 	output, err := exec.Command("sh", "monkeymux-version.sh").Output()
 	if err != nil {
 		t.Fatalf("monkeymux-version.sh failed: %v", err)
@@ -33,6 +34,7 @@ func TestVersionScriptMatchesCompiledVersion(t *testing.T) {
 }
 
 func TestBundledManifestMatchesCompiledVersion(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join("..", "..", "assets", "monkeymux", "manifest.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
