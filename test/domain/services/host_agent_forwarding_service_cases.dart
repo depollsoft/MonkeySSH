@@ -22,10 +22,9 @@ import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_agent_forwarding.dart';
 
+import '../../helpers/mocks.dart';
 import '../../helpers/recording_diagnostics_logger.dart';
 import '../../helpers/ssh_key_fixtures.dart';
-
-class _MockSshClient extends Mock implements SSHClient {}
 
 class _FailingSaves extends SettingsService {
   _FailingSaves(super.db);
@@ -352,7 +351,7 @@ void registerDomainServicesHostAgentForwardingServiceTests() {
           confirm: (_) async => SshAgentSignatureDecision.approved,
           diagnostics: RecordingDiagnosticsLogger(),
         ))!;
-        final client = _MockSshClient();
+        final client = MockSshClient();
         when(() => client.done).thenAnswer((_) => Completer<void>().future);
         forwarding.attachClient(client);
 

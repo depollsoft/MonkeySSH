@@ -16,8 +16,6 @@ import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
-class _MockSshExecSession extends MockSessionWithChannel {}
-
 class _MockByteSink extends Mock implements StreamSink<Uint8List> {}
 
 SshSession _buildShellCompletionSession(
@@ -50,7 +48,7 @@ Future<List<ShellCompletionSuggestion>> _completeFromHistory(
 }
 
 void _stubHistoryExec(ssh.SSHClient client, List<String> commands) {
-  final exec = _MockSshExecSession();
+  final exec = MockSessionWithChannel();
   final output = [
     '__FLUTTY_HISTORY_START__',
     ...commands.map((command) => 'bash\t$command'),
@@ -81,7 +79,7 @@ class _PendingHistoryExec {
         });
   }
 
-  final _MockSshExecSession exec = _MockSshExecSession();
+  final MockSessionWithChannel exec = MockSessionWithChannel();
   final StreamController<Uint8List> _stdout = StreamController<Uint8List>();
   final Completer<void> _done = Completer<void>();
   final Completer<void> started = Completer<void>();
@@ -136,7 +134,7 @@ void registerDomainServicesShellCompletionServiceTests() {
             final output = !history && calls++ == 0
                 ? ''
                 : '$retained${history ? 'bash' : 'command'}\téother\n';
-            final exec = _MockSshExecSession();
+            final exec = MockSessionWithChannel();
             execs.add(exec);
             when(() => exec.stdout).thenAnswer(
               (_) => Stream.fromIterable(
@@ -175,7 +173,7 @@ void registerDomainServicesShellCompletionServiceTests() {
         final execs = <ssh.SSHSession>[];
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((_) async {
-              final exec = _MockSshExecSession();
+              final exec = MockSessionWithChannel();
               execs.add(exec);
               when(() => exec.stdout).thenAnswer((_) => const Stream.empty());
               when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
@@ -229,7 +227,7 @@ void registerDomainServicesShellCompletionServiceTests() {
           final channels = <ssh.SSHSession>[];
           for (final opening in openings) {
             if (lateResult == 'channel') {
-              final channel = _MockSshExecSession();
+              final channel = MockSessionWithChannel();
               channels.add(channel);
               opening.complete(channel);
             } else if (lateResult == 'error') {
@@ -253,7 +251,7 @@ void registerDomainServicesShellCompletionServiceTests() {
           connectionId: 103,
           hostId: 103,
         );
-        final exec = _MockSshExecSession();
+        final exec = MockSessionWithChannel();
         final input = _MockByteSink();
         final output = StreamController<Uint8List>();
         final done = Completer<void>();
@@ -274,7 +272,7 @@ void registerDomainServicesShellCompletionServiceTests() {
           done.complete();
           if (stdinCloseHangs) await Completer<void>().future;
         });
-        final history = _MockSshExecSession();
+        final history = MockSessionWithChannel();
         when(() => history.stdout).thenAnswer((_) => const Stream.empty());
         when(() => history.stderr).thenAnswer((_) => const Stream.empty());
         when(() => history.done).thenAnswer((_) => Future<void>.value());
@@ -342,7 +340,7 @@ void registerDomainServicesShellCompletionServiceTests() {
             .thenAnswer((call) async {
               final isProbe = call.namedArguments[#pty] != null;
               if (isProbe) probes++;
-              final exec = _MockSshExecSession();
+              final exec = MockSessionWithChannel();
               when(() => exec.stdout).thenAnswer((_) => const Stream.empty());
               when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
               when(() => exec.done).thenAnswer((_) => Future<void>.value());
@@ -370,7 +368,7 @@ void registerDomainServicesShellCompletionServiceTests() {
             connectionId: 106,
             hostId: 106,
           );
-          final probe = _MockSshExecSession();
+          final probe = MockSessionWithChannel();
           final input = _MockByteSink();
           when(() => probe.stdout)
               .thenAnswer((_) => StreamController<Uint8List>().stream);
@@ -379,7 +377,7 @@ void registerDomainServicesShellCompletionServiceTests() {
           when(() => probe.stdin).thenReturn(input);
           when(() => probe.write(any())).thenAnswer((_) {});
           when(input.close).thenAnswer((_) async {});
-          final fallback = _MockSshExecSession();
+          final fallback = MockSessionWithChannel();
           when(() => fallback.stdout).thenAnswer((_) => const Stream.empty());
           when(() => fallback.stderr).thenAnswer((_) => const Stream.empty());
           when(() => fallback.done).thenAnswer((_) => Future<void>.value());
@@ -1025,7 +1023,7 @@ void registerDomainServicesShellCompletionServiceTests() {
                 final output = script.contains('ConsoleHost_history')
                     ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
                     : 'command\tgit\ncommand\tgitk\n';
-                final exec = _MockSshExecSession();
+                final exec = MockSessionWithChannel();
                 when(() => exec.stdout).thenAnswer(
                   (_) => Stream<Uint8List>.fromIterable([
                     Uint8List.fromList(utf8.encode(output)),
@@ -1080,7 +1078,7 @@ void registerDomainServicesShellCompletionServiceTests() {
               final output = script.contains('HistorySavePath')
                   ? '__FLUTTY_HISTORY_START__\n__FLUTTY_HISTORY_DONE__\n'
                   : 'argument\tcheckout\nargument\tcherry-pick\n';
-              final exec = _MockSshExecSession();
+              final exec = MockSessionWithChannel();
               when(() => exec.stdout).thenAnswer(
                 (_) => Stream<Uint8List>.fromIterable([
                   Uint8List.fromList(utf8.encode(output)),

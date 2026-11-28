@@ -22,6 +22,7 @@ import 'package:monkeyssh/presentation/screens/hosts_screen.dart';
 import 'package:monkeyssh/presentation/widgets/brand_list_skeleton.dart';
 
 import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 
 void _callReorderItemCallback(
   ReorderCallback? callback,
@@ -99,36 +100,11 @@ Host _buildHost({
   required int id,
   required String label,
   required int sortOrder,
-}) => Host(
+}) => testHost(
   id: id,
   label: label,
   hostname: '$label.example.com',
-  port: 22,
-  username: 'root',
-  password: null,
-  keyId: null,
-  groupId: null,
-  jumpHostId: null,
-  isFavorite: false,
-  color: null,
-  notes: null,
-  tags: null,
-  createdAt: DateTime(2026),
-  updatedAt: DateTime(2026),
-  autoForwardPorts: false,
-  lastConnectedAt: null,
-  terminalThemeLightId: null,
-  terminalThemeDarkId: null,
-  terminalFontFamily: null,
-  autoConnectCommand: null,
-  autoConnectSnippetId: null,
-  autoConnectRequiresConfirmation: false,
   sortOrder: sortOrder,
-  notifyAgentAttention: true,
-  notifyAgentFinished: true,
-  notifyWindowAlerts: true,
-  notifyShellNotifications: true,
-  pushWhenClosed: true,
 );
 
 ActiveConnection _buildActiveConnection({

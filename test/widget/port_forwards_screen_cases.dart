@@ -17,9 +17,7 @@ import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart'
 import 'package:monkeyssh/presentation/screens/port_forwards_screen.dart';
 
 import '../helpers/mocks.dart';
-
-class _MockPortForwardRepository extends Mock
-    implements PortForwardRepository {}
+import '../helpers/test_fixtures.dart';
 
 PortForward _buildPortForward({
   required int id,
@@ -39,33 +37,17 @@ PortForward _buildPortForward({
   createdAt: DateTime(2026),
 );
 
-Host _buildHost({required int id, required String label}) => Host(
-  id: id,
-  label: label,
-  hostname: 'example.com',
-  username: 'user',
-  port: 22,
-  isFavorite: false,
-  autoConnectRequiresConfirmation: false,
-  autoForwardPorts: false,
-  createdAt: DateTime(2026),
-  updatedAt: DateTime(2026),
-  sortOrder: 0,
-  notifyAgentAttention: true,
-  notifyAgentFinished: true,
-  notifyWindowAlerts: true,
-  notifyShellNotifications: true,
-  pushWhenClosed: true,
-);
+Host _buildHost({required int id, required String label}) =>
+    testHost(id: id, label: label, hostname: 'example.com', username: 'user');
 
 /// Registers tests from port_forwards_screen_test.dart.
 void registerWidgetPortForwardsScreenTests() {
   group('port_forwards_screen', () {
-    late _MockPortForwardRepository portForwardRepository;
+    late MockPortForwardRepository portForwardRepository;
     late MockHostRepository hostRepository;
 
     setUp(() {
-      portForwardRepository = _MockPortForwardRepository();
+      portForwardRepository = MockPortForwardRepository();
       hostRepository = MockHostRepository();
     });
 

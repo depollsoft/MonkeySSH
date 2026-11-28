@@ -8,7 +8,7 @@ import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart'
 import '../test/helpers/terminal_input_harness.dart';
 import '../test/helpers/terminal_input_helpers.dart';
 
-import '../test/helpers/terminal_input_scenarios.dart';
+import 'helpers/terminal_input_scenarios.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 

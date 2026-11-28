@@ -11,7 +11,7 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/domain/services/auth_service.dart';
 
-import '../helpers/mocks.dart';
+import '../../helpers/mocks.dart';
 
 const _validPinHash = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 const _shortPinHash = 'AAECAwQFBgcICQoLDA0ODw==';

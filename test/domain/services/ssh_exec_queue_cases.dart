@@ -1,15 +1,13 @@
 import 'dart:async';
 
 import 'package:dartssh2/dartssh2.dart';
-import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 import 'ssh_exec_queue_crashlytics_cases.dart';
-
-class _MockChannel extends Mock implements SSHChannel {}
 
 /// Registers tests from ssh_exec_queue_test.dart.
 void registerDomainServicesSshExecQueueTests() {
@@ -47,7 +45,8 @@ void registerDomainServicesSshExecQueueTests() {
             for (final opening in openings) {
               if (lateResult == 'channel') {
                 final channel = MockSSHSession();
-                when(() => channel.channel).thenReturn(_MockChannel());
+                when(() => channel.channel)
+                    .thenReturn(MockUnderlyingSshChannel());
                 channels.add(channel);
                 opening.complete(channel);
               } else if (lateResult == 'error') {
@@ -67,7 +66,7 @@ void registerDomainServicesSshExecQueueTests() {
         test('abandoned exec cleanup destroys the channel when the peer '
             '${peerCloses ? 'closes' : 'ignores EOF'}', () async {
           final session = MockSSHSession();
-          final channel = _MockChannel();
+          final channel = MockUnderlyingSshChannel();
           when(() => session.channel).thenReturn(channel);
           when(() => session.done).thenAnswer(
             (_) => peerCloses ? Future.value() : Completer<void>().future,

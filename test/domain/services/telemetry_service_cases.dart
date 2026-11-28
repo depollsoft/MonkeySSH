@@ -14,6 +14,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
 
 import '../../helpers/recording_diagnostics_logger.dart';
+import '../../helpers/telemetry_test_fakes.dart';
 
 /// Registers tests from telemetry_service_test.dart.
 void registerDomainServicesTelemetryServiceTests() {
@@ -21,18 +22,18 @@ void registerDomainServicesTelemetryServiceTests() {
     group('absorbed crash reporting', () {
       late Duration elapsed;
       late AbsorbedErrorRateLimiter limiter;
-      late _FakeCrashReporter reporter;
+      late FakeTelemetryCrashReporter reporter;
       late TelemetryService service;
 
       setUp(() {
         elapsed = Duration.zero;
         limiter = AbsorbedErrorRateLimiter(elapsed: () => elapsed);
-        reporter = _FakeCrashReporter();
+        reporter = FakeTelemetryCrashReporter();
         service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
-          analyticsClient: _FakeAnalyticsClient(),
+          analyticsClient: FakeTelemetryAnalyticsClient(),
           crashReporter: reporter,
           absorbedErrorRateLimiter: limiter,
         );
@@ -314,7 +315,7 @@ void registerDomainServicesTelemetryServiceTests() {
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
-            analyticsClient: _FakeAnalyticsClient(),
+            analyticsClient: FakeTelemetryAnalyticsClient(),
             crashReporter: delayed,
           );
           final first = telemetry.recordError(
@@ -339,13 +340,13 @@ void registerDomainServicesTelemetryServiceTests() {
 
     group('TelemetryService', () {
       test('does not send analytics until collection is enabled', () async {
-        final analytics = _FakeAnalyticsClient();
+        final analytics = FakeTelemetryAnalyticsClient();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: false,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
           analyticsClient: analytics,
-          crashReporter: _FakeCrashReporter(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
 
         await service.logFeatureOpened(feature: 'terminal');
@@ -358,8 +359,8 @@ void registerDomainServicesTelemetryServiceTests() {
       });
 
       test('disabling collection clears analytics data', () async {
-        final analytics = _FakeAnalyticsClient();
-        final crashReporter = _FakeCrashReporter();
+        final analytics = FakeTelemetryAnalyticsClient();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
@@ -379,8 +380,8 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'does not reset analytics when collection is already disabled',
         () async {
-          final analytics = _FakeAnalyticsClient();
-          final crashReporter = _FakeCrashReporter();
+          final analytics = FakeTelemetryAnalyticsClient();
+          final crashReporter = FakeTelemetryCrashReporter();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: false,
@@ -400,7 +401,7 @@ void registerDomainServicesTelemetryServiceTests() {
 
       test('overlapping consent updates leave both SDKs opted out', () async {
         final analytics = _DelayedAnalyticsClient();
-        final crashReporter = _FakeCrashReporter();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: false,
@@ -428,7 +429,7 @@ void registerDomainServicesTelemetryServiceTests() {
       });
 
       test('swallows SDK failures while updating collection state', () async {
-        final crashReporter = _FakeCrashReporter();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
@@ -450,20 +451,20 @@ void registerDomainServicesTelemetryServiceTests() {
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
           analyticsClient: _ThrowingAnalyticsClient(),
-          crashReporter: _FakeCrashReporter(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
 
         await service.logFeatureOpened(feature: 'terminal');
       });
 
       test('sanitizes and allowlists event parameter values', () async {
-        final analytics = _FakeAnalyticsClient();
+        final analytics = FakeTelemetryAnalyticsClient();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
           analyticsClient: analytics,
-          crashReporter: _FakeCrashReporter(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
 
         await service.logFeatureOpened(feature: 'terminal');
@@ -511,13 +512,13 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'every paywall feature and the invalid-name failure are allowlisted',
         () async {
-          final analytics = _FakeAnalyticsClient();
+          final analytics = FakeTelemetryAnalyticsClient();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
             analyticsClient: analytics,
-            crashReporter: _FakeCrashReporter(),
+            crashReporter: FakeTelemetryCrashReporter(),
           );
 
           for (final feature in MonetizationFeature.values) {
@@ -549,13 +550,13 @@ void registerDomainServicesTelemetryServiceTests() {
       );
 
       test('logs connection funnel with coarse buckets', () async {
-        final analytics = _FakeAnalyticsClient();
+        final analytics = FakeTelemetryAnalyticsClient();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
           analyticsClient: analytics,
-          crashReporter: _FakeCrashReporter(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
 
         await service.logConnectionAttempted(
@@ -587,13 +588,13 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'logs transfer and interaction events without raw content',
         () async {
-          final analytics = _FakeAnalyticsClient();
+          final analytics = FakeTelemetryAnalyticsClient();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
             analyticsClient: analytics,
-            crashReporter: _FakeCrashReporter(),
+            crashReporter: FakeTelemetryCrashReporter(),
           );
 
           await service.logSftpTransferCompleted(
@@ -623,13 +624,13 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'logs mux agent and monetization events with allowlisted values',
         () async {
-          final analytics = _FakeAnalyticsClient();
+          final analytics = FakeTelemetryAnalyticsClient();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
             analyticsClient: analytics,
-            crashReporter: _FakeCrashReporter(),
+            crashReporter: FakeTelemetryCrashReporter(),
           );
 
           await service.logMuxNavigatorOpened(backend: 'tmux', windowCount: 21);
@@ -662,12 +663,12 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'records sanitized crash errors when collection is enabled',
         () async {
-          final crashReporter = _FakeCrashReporter();
+          final crashReporter = FakeTelemetryCrashReporter();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
-            analyticsClient: _FakeAnalyticsClient(),
+            analyticsClient: FakeTelemetryAnalyticsClient(),
             crashReporter: crashReporter,
           );
 
@@ -693,12 +694,12 @@ void registerDomainServicesTelemetryServiceTests() {
       test(
         'preserves sanitized custom error type names for crash grouping',
         () async {
-          final crashReporter = _FakeCrashReporter();
+          final crashReporter = FakeTelemetryCrashReporter();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
-            analyticsClient: _FakeAnalyticsClient(),
+            analyticsClient: FakeTelemetryAnalyticsClient(),
             crashReporter: crashReporter,
           );
 
@@ -716,7 +717,7 @@ void registerDomainServicesTelemetryServiceTests() {
       );
 
       test('does not record crashes when unavailable', () async {
-        final crashReporter = _FakeCrashReporter();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.disabledByBuild,
           collectionEnabled: true,
@@ -732,17 +733,17 @@ void registerDomainServicesTelemetryServiceTests() {
       });
 
       group('ACP telemetry allowlist', () {
-        late _FakeAnalyticsClient analytics;
+        late FakeTelemetryAnalyticsClient analytics;
         late TelemetryService service;
 
         setUp(() {
-          analytics = _FakeAnalyticsClient();
+          analytics = FakeTelemetryAnalyticsClient();
           service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
             analyticsClient: analytics,
-            crashReporter: _FakeCrashReporter(),
+            crashReporter: FakeTelemetryCrashReporter(),
           );
         });
 
@@ -866,8 +867,8 @@ void registerDomainServicesTelemetryServiceTests() {
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
           diagnosticsLogger: const NoopDiagnosticsLogger(),
-          analyticsClient: _FakeAnalyticsClient(),
-          crashReporter: _FakeCrashReporter(),
+          analyticsClient: FakeTelemetryAnalyticsClient(),
+          crashReporter: FakeTelemetryCrashReporter(),
         );
         final container = ProviderContainer(
           overrides: [
@@ -900,13 +901,13 @@ void registerDomainServicesTelemetryServiceTests() {
           addTearDown(db.close);
           await SettingsService(db)
               .setBool(SettingKeys.telemetryCollection, value: true);
-          final analytics = _FakeAnalyticsClient();
+          final analytics = FakeTelemetryAnalyticsClient();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: true,
             diagnosticsLogger: const NoopDiagnosticsLogger(),
             analyticsClient: analytics,
-            crashReporter: _FakeCrashReporter(),
+            crashReporter: FakeTelemetryCrashReporter(),
           );
           final container = ProviderContainer(
             overrides: [
@@ -933,8 +934,8 @@ void registerDomainServicesTelemetryServiceTests() {
             final db = AppDatabase.forTesting(NativeDatabase.memory());
             addTearDown(db.close);
             final settings = _DelayedTelemetryWriteSettingsService(db);
-            final analytics = _FakeAnalyticsClient();
-            final crashReporter = _FakeCrashReporter();
+            final analytics = FakeTelemetryAnalyticsClient();
+            final crashReporter = FakeTelemetryCrashReporter();
             final service = TelemetryService(
               status: TelemetryServiceStatus.ready,
               collectionEnabled: initiallyEnabled,
@@ -995,7 +996,7 @@ void registerDomainServicesTelemetryServiceTests() {
           final db = AppDatabase.forTesting(NativeDatabase.memory());
           addTearDown(db.close);
           final analytics = _DelayedAnalyticsClient();
-          final crashReporter = _FakeCrashReporter();
+          final crashReporter = FakeTelemetryCrashReporter();
           final service = TelemetryService(
             status: TelemetryServiceStatus.ready,
             collectionEnabled: false,
@@ -1049,8 +1050,8 @@ void registerDomainServicesTelemetryServiceTests() {
           delayedValue: false,
           failWrite: true,
         );
-        final analytics = _FakeAnalyticsClient();
-        final crashReporter = _FakeCrashReporter();
+        final analytics = FakeTelemetryAnalyticsClient();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
@@ -1096,8 +1097,8 @@ void registerDomainServicesTelemetryServiceTests() {
           db,
           delayedValue: false,
         );
-        final analytics = _FakeAnalyticsClient();
-        final crashReporter = _FakeCrashReporter();
+        final analytics = FakeTelemetryAnalyticsClient();
+        final crashReporter = FakeTelemetryCrashReporter();
         final service = TelemetryService(
           status: TelemetryServiceStatus.ready,
           collectionEnabled: true,
@@ -1295,8 +1296,8 @@ void registerDomainServicesTelemetryServiceTests() {
 
       test('accept enables collection and resolves prompt', () async {
         final db = AppDatabase.forTesting(NativeDatabase.memory());
-        final analytics = _FakeAnalyticsClient();
-        final crashReporter = _FakeCrashReporter();
+        final analytics = FakeTelemetryAnalyticsClient();
+        final crashReporter = FakeTelemetryCrashReporter();
         final container = _createTelemetryContainer(
           db: db,
           telemetryService: TelemetryService(
@@ -1377,33 +1378,7 @@ class _CustomTelemetryException implements Exception {
   const _CustomTelemetryException();
 }
 
-class _FakeAnalyticsClient implements TelemetryAnalyticsClient {
-  final List<_AnalyticsEvent> events = <_AnalyticsEvent>[];
-  final collectionUpdates = <bool>[];
-  bool? collectionEnabled;
-  int resetCount = 0;
-
-  @override
-  Future<void> logEvent({
-    required String name,
-    required Map<String, Object> parameters,
-  }) async {
-    events.add(_AnalyticsEvent(name: name, parameters: parameters));
-  }
-
-  @override
-  Future<void> resetAnalyticsData() async {
-    resetCount += 1;
-  }
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {
-    collectionUpdates.add(enabled);
-    collectionEnabled = enabled;
-  }
-}
-
-class _DelayedAnalyticsClient extends _FakeAnalyticsClient {
+class _DelayedAnalyticsClient extends FakeTelemetryAnalyticsClient {
   final enableStarted = Completer<void>();
   final finishEnable = Completer<void>();
 
@@ -1483,86 +1458,19 @@ class _ThrowingAnalyticsClient implements TelemetryAnalyticsClient {
   }
 }
 
-class _FakeCrashReporter implements TelemetryCrashReporter {
-  final List<_RecordedError> recordedErrors = <_RecordedError>[];
-  final List<FlutterErrorDetails> recordedFlutterErrors =
-      <FlutterErrorDetails>[];
-  final Map<String, Object> customKeys = <String, Object>{};
-  bool? collectionEnabled;
-  int deleteUnsentReportsCount = 0;
-
-  @override
-  Future<void> deleteUnsentReports() async {
-    deleteUnsentReportsCount += 1;
-  }
-
-  @override
-  Future<void> recordError(
-    Object error,
-    StackTrace stackTrace, {
-    required bool fatal,
-  }) async {
-    recordedErrors.add(
-      _RecordedError(
-        error: error,
-        stackTrace: stackTrace,
-        fatal: fatal,
-        keys: Map.of(customKeys),
-      ),
-    );
-  }
-
-  @override
-  Future<void> recordFlutterError(FlutterErrorDetails details) async {
-    recordedFlutterErrors.add(details);
-  }
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {
-    collectionEnabled = enabled;
-  }
-
-  @override
-  Future<void> setCustomKey(String key, Object value) async {
-    customKeys[key] = value;
-  }
-}
-
-class _AnalyticsEvent {
-  const _AnalyticsEvent({required this.name, required this.parameters});
-
-  final String name;
-  final Map<String, Object> parameters;
-}
-
-class _RecordedError {
-  const _RecordedError({
-    required this.error,
-    required this.stackTrace,
-    required this.fatal,
-    required this.keys,
-  });
-
-  final Object error;
-  final StackTrace stackTrace;
-  final bool fatal;
-  final Map<String, Object> keys;
-  String get reason => (error as SanitizedTelemetryError).reason;
-}
-
 class _ThrowingToStringError {
   @override
   String toString() => throw StateError('cannot stringify');
 }
 
-class _FailingMetadataCrashReporter extends _FakeCrashReporter {
+class _FailingMetadataCrashReporter extends FakeTelemetryCrashReporter {
   @override
   Future<void> setCustomKey(String key, Object value) async {
     throw StateError('metadata unavailable');
   }
 }
 
-class _DelayedMetadataCrashReporter extends _FakeCrashReporter {
+class _DelayedMetadataCrashReporter extends FakeTelemetryCrashReporter {
   final started = Completer<void>();
   final finish = Completer<void>();
 

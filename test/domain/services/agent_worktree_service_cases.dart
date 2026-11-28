@@ -6,10 +6,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
-// SSHChannel is only exported from the implementation library.
-// ignore: implementation_imports
-import 'package:dartssh2/src/ssh_channel.dart';
-
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -22,6 +18,8 @@ import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
+import '../../helpers/mock_ssh_exec_session.dart';
+import '../../helpers/mocks.dart';
 import '../../support/fake_agent_worktree.dart';
 
 /// System directories every test process may use. The scripts add their own
@@ -80,11 +78,7 @@ class _LocalShell implements AgentWorktreeShell {
   }
 }
 
-class _MockSshClient extends Mock implements SSHClient {}
-
 class _MockExecSession extends Mock implements SSHSession {}
-
-class _MockChannel extends Mock implements SSHChannel {}
 
 class _FixedShell implements AgentWorktreeShell {
   _FixedShell(this.stdout);
@@ -167,7 +161,7 @@ Matcher _throwsKind(AgentWorktreeErrorKind kind) => throwsA(
 
 SSHSession _exec(String stdout, StreamController<Uint8List> input) {
   final exec = _MockExecSession();
-  when(() => exec.channel).thenReturn(_MockChannel());
+  when(() => exec.channel).thenReturn(MockUnderlyingSshChannel());
   when(() => exec.stdin).thenReturn(input.sink);
   when(() => exec.stdout)
       .thenAnswer((_) => Stream<Uint8List>.value(utf8.encode(stdout)));
@@ -213,7 +207,7 @@ void registerAgentWorktreeCoreTests() {
   test(
     'sends user content on stdin, never on the login shell command line',
     () async {
-      final client = _MockSshClient();
+      final client = MockSshClient();
       final received = <int>[];
       final inputs = <StreamController<Uint8List>>[];
       final replies = [

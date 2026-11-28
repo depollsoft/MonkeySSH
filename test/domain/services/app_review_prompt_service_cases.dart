@@ -8,6 +8,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
 
 import '../../helpers/recording_diagnostics_logger.dart';
+import '../../helpers/telemetry_test_fakes.dart';
 
 /// Registers tests from app_review_prompt_service_test.dart.
 void registerDomainServicesAppReviewPromptServiceTests() {
@@ -15,7 +16,7 @@ void registerDomainServicesAppReviewPromptServiceTests() {
     late AppDatabase db;
     late SettingsService settings;
     late RecordingDiagnosticsLogger logger;
-    late _FakeAnalyticsClient analytics;
+    late FakeTelemetryAnalyticsClient analytics;
     late _FakeReviewClient client;
     late DateTime now;
     late bool appActive;
@@ -61,7 +62,7 @@ void registerDomainServicesAppReviewPromptServiceTests() {
       db = AppDatabase.forTesting(NativeDatabase.memory());
       settings = SettingsService(db);
       logger = RecordingDiagnosticsLogger();
-      analytics = _FakeAnalyticsClient();
+      analytics = FakeTelemetryAnalyticsClient();
       client = _FakeReviewClient();
       now = DateTime(2026, 10, 1, 9);
       appActive = true;
@@ -311,22 +312,4 @@ class _FakeReviewClient implements AppReviewClient {
       throw error;
     }
   }
-}
-
-class _FakeAnalyticsClient implements TelemetryAnalyticsClient {
-  final events = <({String name, Map<String, Object> parameters})>[];
-
-  @override
-  Future<void> logEvent({
-    required String name,
-    required Map<String, Object> parameters,
-  }) async {
-    events.add((name: name, parameters: parameters));
-  }
-
-  @override
-  Future<void> resetAnalyticsData() async {}
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {}
 }

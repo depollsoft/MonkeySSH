@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:cross_file/cross_file.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +9,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
-import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
@@ -18,22 +16,12 @@ import 'package:monkeyssh/presentation/models/app_platform_file.dart';
 import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
 import 'package:monkeyssh/presentation/screens/sftp_screen.dart';
 
-const _proMonetizationState = MonetizationState(
-  billingAvailability: MonetizationBillingAvailability.available,
-  entitlements: MonetizationEntitlements.pro(),
-  offers: [],
-  debugUnlockAvailable: false,
-  debugUnlocked: false,
-);
+import '../../helpers/mocks.dart';
+import '../../helpers/test_fixtures.dart';
 
 final _onePixelPngBytes = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/luzp0wAAAABJRU5ErkJggg==',
 );
-
-class _MockSshClient extends Mock implements SSHClient {
-  @override
-  Future<void> close() async {}
-}
 
 Future<void> _completeSftpClose(Invocation _) async {}
 
@@ -46,35 +34,6 @@ class _MockSftpClient extends Mock implements SftpClient {
         SftpStatusError(SftpStatusCode.noSuchFile, 'missing'),
       ),
     );
-  }
-}
-
-class _MockRemoteFileService extends Mock implements RemoteFileService {}
-
-class _MemoryViewStore implements SftpBrowserViewStore {
-  final saved = <int, SftpBrowserViewSettings>{};
-
-  @override
-  Future<SftpBrowserViewSettings> load(int hostId) async =>
-      saved[hostId] ?? const SftpBrowserViewSettings();
-
-  @override
-  Future<void> save(int hostId, SftpBrowserViewSettings settings) async {
-    saved[hostId] = settings;
-  }
-
-  final filters = <int, SftpBrowserFilter>{};
-
-  @override
-  Future<SftpBrowserFilter?> loadFilter(int hostId) async => filters[hostId];
-
-  @override
-  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) async {
-    if (filter == null) {
-      filters.remove(hostId);
-    } else {
-      filters[hostId] = filter;
-    }
   }
 }
 
@@ -162,16 +121,6 @@ class _SftpFilePicker extends FilePickerPlatform {
   }
 }
 
-class _MockXFile extends Mock implements XFile {}
-
-class _MockSftpFile extends Mock implements SftpFile {}
-
-class _MockMonetizationService extends Mock implements MonetizationService {
-  _MockMonetizationService() {
-    when(() => currentState).thenReturn(_proMonetizationState);
-  }
-}
-
 SshSession _sftpSession(SSHClient client) => SshSession(
   connectionId: 7,
   hostId: 1,
@@ -183,24 +132,6 @@ SshSession _sftpSession(SSHClient client) => SshSession(
   ),
 );
 
-class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
-  _TestActiveSessionsNotifier(this.session);
-
-  final SshSession session;
-
-  @override
-  Map<int, SshConnectionState> build() => <int, SshConnectionState>{
-    session.connectionId: SshConnectionState.connected,
-  };
-
-  @override
-  SshSession? getSession(int connectionId) =>
-      connectionId == session.connectionId ? session : null;
-
-  @override
-  Future<void> syncBackgroundStatus() async {}
-}
-
 Widget _buildSftpTestApp({
   required SshSession session,
   required Widget child,
@@ -209,17 +140,20 @@ Widget _buildSftpTestApp({
   NavigatorObserver? observer,
 }) => ProviderScope(
   overrides: [
-    sftpBrowserViewStoreProvider.overrideWithValue(_MemoryViewStore()),
+    sftpBrowserViewStoreProvider.overrideWithValue(
+      MemorySftpBrowserViewStore(),
+    ),
     if (remoteFileService != null)
       remoteFileServiceProvider.overrideWithValue(remoteFileService),
     activeSessionsProvider.overrideWith(
-      () => _TestActiveSessionsNotifier(session),
+      () => TestActiveSessionsNotifier(sessions: [session]),
     ),
     monetizationServiceProvider.overrideWithValue(
-      monetizationService ?? _MockMonetizationService(),
+      monetizationService ??
+          createMockMonetizationService(state: proMonetizationState),
     ),
     monetizationStateProvider.overrideWith(
-      (ref) => Stream.value(_proMonetizationState),
+      (ref) => Stream.value(proMonetizationState),
     ),
   ],
   child: MaterialApp(home: child, navigatorObservers: [?observer]),
@@ -361,9 +295,11 @@ Future<_MockSftpClient> _pumpCrashlyticsBrowser(
   List<SftpName>? entries,
   RemoteFileService? remoteFiles,
 }) async {
-  final ssh = _MockSshClient();
+  final ssh = ClosableMockSshClient();
   final sftp = _MockSftpClient();
-  final monetization = _MockMonetizationService();
+  final monetization = createMockMonetizationService(
+    state: proMonetizationState,
+  );
   final session = SshSession(
     connectionId: 7,
     hostId: 1,
@@ -375,12 +311,12 @@ Future<_MockSftpClient> _pumpCrashlyticsBrowser(
     ),
   );
   addTearDown(session.close);
-  when(() => monetization.currentState).thenReturn(_proMonetizationState);
+  when(() => monetization.currentState).thenReturn(proMonetizationState);
   when(ssh.sftp).thenAnswer((_) async => sftp);
   when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
   when(() => sftp.listdir('/home/demo'))
       .thenAnswer((_) async => entries ?? [_fileEntry('notes.txt')]);
-  if (remoteFiles is _MockRemoteFileService) {
+  if (remoteFiles is MockRemoteFileService) {
     when(() => remoteFiles.resolveInitialDirectory(sftp))
         .thenAnswer((_) async => '/home/demo');
   }
@@ -462,9 +398,9 @@ void main() {
     testWidgets(
       'requested image files open directly and return to a highlighted row',
       (tester) async {
-        final sshClient = _MockSshClient();
+        final sshClient = ClosableMockSshClient();
         final sftp = _MockSftpClient();
-        final remoteFile = _MockSftpFile();
+        final remoteFile = MockSftpFile();
         final session = _sftpSession(sshClient);
         when(sshClient.sftp).thenAnswer((_) async => sftp);
         when(() => sftp.absolute('.')).thenAnswer((_) async => '/home/demo');
@@ -521,7 +457,7 @@ void main() {
     );
 
     testWidgets('cancelling remote file picker returns null', (tester) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final sftp = _MockSftpClient();
       final session = _sftpSession(sshClient);
       addTearDown(session.close);
@@ -550,7 +486,7 @@ void main() {
     testWidgets(
       'public remote picker dismisses input, lists workspace files, and returns selection',
       (tester) async {
-        final sshClient = _MockSshClient();
+        final sshClient = ClosableMockSshClient();
         final sftp = _MockSftpClient();
         final session = _sftpSession(sshClient);
         addTearDown(session.close);
@@ -596,7 +532,7 @@ void main() {
       testWidgets(
         'public picker recovers from a ${inaccessible ? 'denied' : 'missing'} starting directory',
         (tester) async {
-          final sshClient = _MockSshClient();
+          final sshClient = ClosableMockSshClient();
           final sftp = _MockSftpClient();
           final session = _sftpSession(sshClient);
           addTearDown(session.close);
@@ -679,7 +615,7 @@ void main() {
             () => tester.binding.defaultBinaryMessenger
                 .setMockMethodCallHandler(channel, null),
           );
-          final sshClient = _MockSshClient();
+          final sshClient = ClosableMockSshClient();
           final sftp = _MockSftpClient();
           final session = _sftpSession(sshClient);
           addTearDown(session.close);
@@ -758,9 +694,9 @@ void main() {
     testWidgets('normal mode still previews tapped image files', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final sftp = _MockSftpClient();
-      final remoteFile = _MockSftpFile();
+      final remoteFile = MockSftpFile();
       final session = _sftpSession(sshClient);
       addTearDown(session.close);
       when(sshClient.sftp).thenAnswer((_) async => sftp);
@@ -794,7 +730,7 @@ void main() {
     testWidgets('normal mode shows 0 B for files with unknown size', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final sftp = _MockSftpClient();
       final session = _sftpSession(sshClient);
       addTearDown(session.close);
@@ -827,7 +763,7 @@ void main() {
     testWidgets('handles stale SSH errors while opening the browser', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final session = _sftpSession(sshClient);
       when(sshClient.sftp).thenThrow(SSHStateError('Transport is closed'));
       addTearDown(session.close);
@@ -866,7 +802,7 @@ void main() {
         testWidgets('failed SFTP browser waiter preserves '
             '${replacementReady ? 'cached' : 'pending'} replacement '
             'after late $oldOutcome and Retry', (tester) async {
-          final sshClient = _MockSshClient();
+          final sshClient = ClosableMockSshClient();
           final oldClient = _MockSftpClient();
           final replacement = _MockSftpClient();
           final oldOpen = Completer<SftpClient>();
@@ -950,7 +886,7 @@ void main() {
 
     for (final outcome in ['success', 'failure', 'timeout', 'reconnect']) {
       testWidgets('newer navigation supersedes older $outcome', (tester) async {
-        final sshClient = _MockSshClient();
+        final sshClient = ClosableMockSshClient();
         final sftp = _MockSftpClient();
         final freshSftp = _MockSftpClient();
         final older = Completer<List<SftpName>>();
@@ -1126,10 +1062,10 @@ void main() {
           FilePickerPlatform.instance = picker;
           addTearDown(() => FilePickerPlatform.instance = previous);
           final sftp = await _pumpCrashlyticsBrowser(tester);
-          final failedFile = _MockSftpFile();
+          final failedFile = MockSftpFile();
           final failedName = hasEarlierSuccess ? 'second.txt' : 'first.txt';
           final skippedName = hasEarlierSuccess ? 'third.txt' : 'second.txt';
-          final successfulFile = _MockSftpFile();
+          final successfulFile = MockSftpFile();
           if (hasEarlierSuccess) {
             when(
               () => sftp.open('/home/demo/first.txt', mode: any(named: 'mode')),
@@ -1292,7 +1228,7 @@ void main() {
           tester,
           entries: [_fileEntry('movie.mp4', size: 10)],
         );
-        final file = _MockSftpFile();
+        final file = MockSftpFile();
         final signals = (await tester.runAsync(
           () async => (
             reading: Completer<void>(),
@@ -1350,17 +1286,17 @@ void main() {
       testWidgets(
         'upload keeps its directory and handles stream failure: $failRead',
         (tester) async {
-          final sshClient = _MockSshClient();
+          final sshClient = ClosableMockSshClient();
           final sftp = _MockSftpClient();
 
-          final remoteFiles = _MockRemoteFileService();
+          final remoteFiles = MockRemoteFileService();
           final session = _sftpSession(sshClient);
           addTearDown(session.close);
           final picker = _SftpFilePicker();
           final previous = FilePickerPlatform.instance;
           FilePickerPlatform.instance = picker;
           addTearDown(() => FilePickerPlatform.instance = previous);
-          final broken = _MockXFile();
+          final broken = MockXFile();
           when(broken.length).thenAnswer((_) async => 1);
           when(broken.openRead).thenAnswer(
             (_) => Stream.error(const FileSystemException('read failed')),
@@ -1472,7 +1408,7 @@ void main() {
           null,
         ),
       );
-      final remoteFiles = _MockRemoteFileService();
+      final remoteFiles = MockRemoteFileService();
       final sftp = await _pumpCrashlyticsBrowser(
         tester,
         entries: [_fileEntry('demo.mp4', size: 200 * 1024 * 1024)],
@@ -1514,7 +1450,7 @@ void main() {
     testWidgets('reopens SFTP when the directory channel goes stale', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final staleSftp = _MockSftpClient();
       final freshSftp = _MockSftpClient();
       final session = _sftpSession(sshClient);
@@ -1555,7 +1491,7 @@ void main() {
     testWidgets('hides Upload and New folder while SFTP reopens', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final staleSftp = _MockSftpClient();
       final freshSftp = _MockSftpClient();
       final session = _sftpSession(sshClient);
@@ -1624,7 +1560,7 @@ void main() {
     testWidgets('opens a Windows remote home directory from SFTP realpath', (
       tester,
     ) async {
-      final sshClient = _MockSshClient();
+      final sshClient = ClosableMockSshClient();
       final sftp = _MockSftpClient();
 
       final session = SshSession(

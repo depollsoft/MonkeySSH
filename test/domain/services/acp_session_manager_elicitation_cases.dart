@@ -1,7 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,165 +12,65 @@ import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
-import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
-import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
-import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
-/// Minimal in-memory agent: answers setup requests and lets tests push
-/// agent-to-client requests and notifications.
-class _Agent implements AcpTransport {
-  final _incoming = StreamController<List<int>>(sync: true);
-  final responses = <Object, Map<String, Object?>>{};
-  Map<String, Object?>? clientCapabilities;
+import '../../helpers/acp_test_fakes.dart';
+
+class _Agent extends FakeAcpTransport {
+  _Agent({this.holdSetup = false})
+    : super(
+        agentCapabilities: const <String, Object?>{
+          'loadSession': true,
+          'sessionCapabilities': <String, Object?>{'fork': <String, Object?>{}},
+        },
+        onRequest: (transport, id, method, _) {
+          final agent = transport as _Agent;
+          if (method == 'session/prompt') {
+            agent.heldPromptId = id;
+            return true;
+          }
+          if ((method == 'session/load' || method == 'session/resume') &&
+              agent.holdSetup) {
+            agent.heldSetupId = id;
+            return true;
+          }
+          return false;
+        },
+      );
+
   Object? heldPromptId;
   Object? heldSetupId;
-  bool holdSetup = false;
-  int _sessions = 0;
-  bool closed = false;
+  bool holdSetup;
 
-  @override
-  Stream<List<int>> get incoming => _incoming.stream;
+  void failPrompt(int code) =>
+      replyError(heldPromptId, code, 'Request cancelled');
 
-  @override
-  Future<void> write(List<int> bytes) async {
-    final message = (jsonDecode(utf8.decode(bytes).trim()) as Map)
-        .cast<String, Object?>();
-    final id = message['id'];
-    final method = message['method'];
-    if (method == null && id != null) {
-      responses[id] = message;
-      return;
-    }
-    if (id == null) return;
-    switch (method) {
-      case 'initialize':
-        clientCapabilities =
-            ((message['params']! as Map)['clientCapabilities']! as Map)
-                .cast<String, Object?>();
-        _reply(id, {
-          'protocolVersion': 1,
-          'agentCapabilities': {
-            'loadSession': true,
-            'sessionCapabilities': {'fork': <String, Object?>{}},
-          },
-        });
-      case 'session/new':
-        _reply(id, {'sessionId': 'session-${++_sessions}'});
-      case 'session/fork':
-        _reply(id, {'sessionId': 'fork-${++_sessions}'});
-      case 'session/prompt':
-        heldPromptId = id;
-      case 'session/load' || 'session/resume' when holdSetup:
-        heldSetupId = id;
-      default:
-        _reply(id, <String, Object?>{});
-    }
-  }
-
-  void request(Object id, String method, Map<String, Object?> params) =>
-      push({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
-
-  void notify(String method, Map<String, Object?> params) =>
-      push({'jsonrpc': '2.0', 'method': method, 'params': params});
-
-  void failPrompt(int code) => push({
-    'jsonrpc': '2.0',
-    'id': heldPromptId,
-    'error': {'code': code, 'message': 'Request cancelled'},
-  });
-
-  void releaseSetup() => _reply(heldSetupId!, <String, Object?>{});
-
-  void _reply(Object id, Object? result) =>
-      push({'jsonrpc': '2.0', 'id': id, 'result': result});
-
-  void push(Map<String, Object?> message) {
-    if (closed) return;
-    _incoming.add(utf8.encode('${jsonEncode(message)}\n'));
-  }
-
-  @override
-  Future<void> close() async {
-    if (closed) return;
-    closed = true;
-    await _incoming.close();
-  }
+  void releaseSetup() => reply(heldSetupId, const <String, Object?>{});
 }
 
-class _Connector implements AcpBridgeConnector {
+class _Connector extends FakeAcpBridgeConnector {
+  _Connector() : super(listAvailableBridges: false);
+
   final agents = <String, _Agent>{};
   bool holdSessionSetup = false;
-  var _bridges = 0;
 
   @override
-  Future<MonkeyMuxAcpBridgeStartResult> startBridge({
-    required int hostId,
-    required String providerId,
-    required String providerLabel,
-    required List<String> launchArgv,
-    required String cwd,
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => MonkeyMuxAcpBridgeStartResult(bridgeId: 'bridge-${++_bridges}');
-
-  @override
-  Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
-    int hostId, {
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => const [];
-
-  @override
-  Future<String> resolveWorkingDirectory(
-    int hostId,
-    String cwd, {
-    bool trustAbsolute = false,
-  }) async => cwd;
-
-  @override
-  Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
+  FakeAcpTransport Function(
     int hostId,
     String bridgeId,
-  ) => throw UnimplementedError();
-
-  @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {}
-
-  @override
-  AcpBridgeSession connect({
-    required int hostId,
-    required String bridgeId,
-    required String providerId,
-    int lastAcknowledgedSequence = 0,
-    bool takeOver = false,
-  }) {
-    final agent = agents[bridgeId] = _Agent()..holdSetup = holdSessionSetup;
-    final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();
-    final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
-    final client = AcpClient(AcpJsonRpcConnection(transport: agent));
-    return AcpBridgeSession(
-      client: client,
-      transportStates: states.stream,
-      transportErrors: errors.stream,
-      onClose: () async {
-        await client.close();
-        await states.close();
-        await errors.close();
-      },
-    );
-  }
-
-  @override
-  Future<AcpHostCapabilityBinding?> resolveCapabilityBinding(
-    int hostId,
-  ) async => null;
+    StreamController<MonkeyMuxAcpTransportState> states, {
+    required bool takeOver,
+  })
+  get transportFactory =>
+      (_, bridgeId, _, {required takeOver}) =>
+          agents[bridgeId] = _Agent(holdSetup: holdSessionSetup);
 }
 
-Future<void> _pump() => Future<void>.delayed(const Duration(milliseconds: 20));
+Future<void> _pump() => pumpAcpEventLoop();
 
 const _form = <String, Object?>{
   'mode': 'form',

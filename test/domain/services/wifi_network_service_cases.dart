@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 
+import '../../helpers/permission_channel_test_helper.dart';
 import 'app_permission_service_cases.dart';
 
 /// Registers tests from wifi_network_service_test.dart.

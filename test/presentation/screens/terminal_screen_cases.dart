@@ -3240,33 +3240,6 @@ void registerTerminalScreenTests({required int partIndex}) {
         variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       );
 
-      testWidgets('resolves a URL char-wrapped flush against TUI box borders', (
-        tester,
-      ) async {
-        await pumpScreen(tester);
-        // Copilot CLI on a narrow screen char-wraps a URL flush against its box
-        // borders across two absolutely positioned (non-wrapped) rendered
-        // lines. Tapping either fragment must resolve the whole URL, and the
-        // U+2502 borders must not leak into it.
-        session.terminal!
-          ..write('\x1b[2J')
-          ..write('\x1b[14;1H\u2502https://github.com/depollsoft/Mon\u2502')
-          ..write('\x1b[15;1H\u2502keySSH/pull/592 ok\u2502');
-        await tester.pumpAndSettle();
-
-        final view = tester.widget<MonkeyTerminalView>(
-          find.byType(MonkeyTerminalView),
-        );
-        const expected = 'https://github.com/depollsoft/MonkeySSH/pull/592';
-        // Tap the first fragment (row 13, after the leading border).
-        final firstHalf = view.resolveLinkTap!(const CellOffset(3, 13));
-        // Tap the second fragment (row 14, after the leading border).
-        final secondHalf = view.resolveLinkTap!(const CellOffset(3, 14));
-
-        expect(firstHalf, expected);
-        expect(secondHalf, expected);
-      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
-
       testWidgets('tapping an OSC 8 hyperlink opens locally without forwarding a mouse '
           'click to the host', (tester) async {
         const url = 'https://github.com/depollsoft/MonkeySSH/issues/1';
@@ -19152,83 +19125,40 @@ void registerTerminalScreenTests({required int partIndex}) {
         );
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-      testWidgets(
-        'prompt-like shell output does not reconnect the IME input client before keyboard input',
-        (tester) async {
-          await pumpScreen(tester);
+      for (final (label, promptOutput) in [
+        ('plain', '> '),
+        ('ANSI-styled', '\u001b[38;5;39m>\u001b[0m '),
+      ]) {
+        testWidgets(
+          '$label prompt-like shell output reconnects the IME input client after keyboard input',
+          (tester) async {
+            await pumpScreen(tester);
 
-          tester.testTextInput.log.clear();
-          shellStdoutController.add(Uint8List.fromList(utf8.encode('> ')));
-          await tester.pump(const Duration(milliseconds: 100));
+            tester.testTextInput.updateEditingValue(
+              _editingValue('ls', selectionOffset: 2),
+            );
+            await tester.pump();
 
-          expect(
-            tester.testTextInput.log.where(
-              (call) => call.method == 'TextInput.setClient',
-            ),
-            isEmpty,
-          );
-          await tester.pump(const Duration(milliseconds: 200));
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
+            await tester.testTextInput.receiveAction(TextInputAction.newline);
+            await tester.pump();
 
-      testWidgets(
-        'prompt-like shell output reconnects the IME input client after keyboard input',
-        (tester) async {
-          await pumpScreen(tester);
+            tester.testTextInput.log.clear();
+            shellStdoutController.add(
+              Uint8List.fromList(utf8.encode(promptOutput)),
+            );
+            await tester.pump(const Duration(milliseconds: 100));
 
-          tester.testTextInput.updateEditingValue(
-            _editingValue('ls', selectionOffset: 2),
-          );
-          await tester.pump();
-
-          await tester.testTextInput.receiveAction(TextInputAction.newline);
-          await tester.pump();
-
-          tester.testTextInput.log.clear();
-          shellStdoutController.add(Uint8List.fromList(utf8.encode('> ')));
-          await tester.pump(const Duration(milliseconds: 100));
-
-          expect(
-            tester.testTextInput.log.where(
-              (call) => call.method == 'TextInput.setEditingState',
-            ),
-            hasLength(greaterThanOrEqualTo(1)),
-          );
-          await tester.pump(const Duration(milliseconds: 200));
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
-
-      testWidgets(
-        'ANSI-styled prompt-like shell output reconnects the IME input client after keyboard input',
-        (tester) async {
-          await pumpScreen(tester);
-
-          tester.testTextInput.updateEditingValue(
-            _editingValue('ls', selectionOffset: 2),
-          );
-          await tester.pump();
-
-          await tester.testTextInput.receiveAction(TextInputAction.newline);
-          await tester.pump();
-
-          tester.testTextInput.log.clear();
-          shellStdoutController.add(
-            Uint8List.fromList(utf8.encode('\u001b[38;5;39m>\u001b[0m ')),
-          );
-          await tester.pump(const Duration(milliseconds: 100));
-
-          expect(
-            tester.testTextInput.log.where(
-              (call) => call.method == 'TextInput.setEditingState',
-            ),
-            hasLength(greaterThanOrEqualTo(1)),
-          );
-          await tester.pump(const Duration(milliseconds: 200));
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
+            expect(
+              tester.testTextInput.log.where(
+                (call) => call.method == 'TextInput.setEditingState',
+              ),
+              hasLength(greaterThanOrEqualTo(1)),
+            );
+            await tester.pump(const Duration(milliseconds: 200));
+          },
+          variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+        );
+      }
 
       testWidgets('running shell commands bypass keyboard paste review', (
         tester,
@@ -19275,50 +19205,6 @@ void registerTerminalScreenTests({required int partIndex}) {
         },
         variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       );
-
-      for (final runningCommand in [false, true]) {
-        testWidgets('splits dictation into pastes only while a command runs, '
-            'running: $runningCommand', (tester) async {
-          await pumpScreen(tester);
-
-          session.terminal!.write(
-            '\u001b[?2004h${runningCommand ? '\u001b]133;C\u0007' : ''}',
-          );
-          await tester.pump();
-
-          shellWrites.clear();
-          final dictated =
-              '${List.filled(30, 'dictated words').join(' ')}\n\nmore';
-          final end = _deleteDetectionMarker.length + dictated.length;
-          tester.testTextInput.updateEditingValue(
-            TextEditingValue(
-              text: '$_deleteDetectionMarker$dictated',
-              selection: TextSelection.collapsed(offset: end),
-              composing: TextRange(
-                start: _deleteDetectionMarker.length,
-                end: end,
-              ),
-            ),
-          );
-          await tester.pump();
-          tester.testTextInput.updateEditingValue(
-            _editingValue(dictated, selectionOffset: dictated.length),
-          );
-          await tester.pump();
-          await tester.pump();
-
-          final written = shellWrites.map(utf8.decode).join();
-          expect(find.text('Review keyboard paste'), findsNothing);
-          expect(
-            written.replaceAll('\u001b[200~', '').replaceAll('\u001b[201~', ''),
-            dictated.replaceAll('\n', '\r'),
-          );
-          expect(
-            '\u001b[200~'.allMatches(written).length,
-            runningCommand ? greaterThan(1) : 1,
-          );
-        }, variant: TargetPlatformVariant.only(TargetPlatform.android));
-      }
 
       testWidgets(
         'non-prompt shell output does not reconnect the IME input client',

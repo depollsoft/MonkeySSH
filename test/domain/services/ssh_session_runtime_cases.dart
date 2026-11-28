@@ -7,10 +7,7 @@ import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
-
-class _Client extends Mock implements SSHClient {}
-
-class _Shell extends MockSessionWithChannel {}
+import '../../helpers/mocks.dart';
 
 /// Registers tests from ssh_session_runtime_test.dart.
 void registerDomainServicesSshSessionRuntimeTests() {
@@ -18,8 +15,8 @@ void registerDomainServicesSshSessionRuntimeTests() {
     testWidgets('Windows detection opening times out and closes a late probe', (
       tester,
     ) async {
-      final client = _Client();
-      final shell = _Shell();
+      final client = MockSshClient();
+      final shell = MockSessionWithChannel();
       final opening = Completer<SSHSession>();
       when(() => client.remoteVersion)
           .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
@@ -56,7 +53,7 @@ void registerDomainServicesSshSessionRuntimeTests() {
       expect(await result, same(shell));
       expect(commands, hasLength(2));
       expect(commands.last, startsWith('cmd.exe /d /k'));
-      final lateProbe = _Shell();
+      final lateProbe = MockSessionWithChannel();
       opening.complete(lateProbe);
       await tester.pump();
       verify(lateProbe.channel.destroy).called(1);
@@ -69,13 +66,13 @@ void registerDomainServicesSshSessionRuntimeTests() {
     });
 
     group('concurrent shell opens', () {
-      late _Client client;
+      late MockSshClient client;
       late SshSession session;
-      late _Shell shell;
+      late MockSessionWithChannel shell;
 
       setUp(() {
-        client = _Client();
-        shell = _Shell();
+        client = MockSshClient();
+        shell = MockSessionWithChannel();
         session = SshSession(
           connectionId: 123,
           hostId: 1,
@@ -170,7 +167,7 @@ void registerDomainServicesSshSessionRuntimeTests() {
           final oldOpening = Completer<SSHSession>();
           final newOpening = Completer<SSHSession>();
           final replacementStarted = Completer<void>();
-          final discarded = _Shell();
+          final discarded = MockSessionWithChannel();
           var opens = 0;
           when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
             _,
@@ -209,9 +206,9 @@ void registerDomainServicesSshSessionRuntimeTests() {
     test(
       'shell arriving after close is discarded without replacing a new shell',
       () async {
-        final client = _Client();
-        final lateShell = _Shell();
-        final replacement = _Shell();
+        final client = MockSshClient();
+        final lateShell = MockSessionWithChannel();
+        final replacement = MockSessionWithChannel();
         final opening = Completer<SSHSession>();
         final session = SshSession(
           connectionId: 123,

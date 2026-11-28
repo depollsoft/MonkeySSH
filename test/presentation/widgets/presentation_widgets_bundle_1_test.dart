@@ -9,7 +9,6 @@ import 'keyboard_shortcuts_sheet_cases.dart';
 import 'snippet_key_sender_cases.dart';
 import 'terminal_ime_engine_cases.dart';
 import 'terminal_key_input_cases.dart';
-import 'terminal_text_input_handler_cases.dart';
 
 void main() {
   registerPresentationWidgetsAcpMarkdownPathsTests();
@@ -21,5 +20,4 @@ void main() {
   registerPresentationWidgetsSnippetKeySenderTests();
   registerPresentationWidgetsTerminalImeEngineTests();
   registerPresentationWidgetsTerminalKeyInputTests();
-  registerPresentationWidgetsTerminalTextInputHandlerTests();
 }

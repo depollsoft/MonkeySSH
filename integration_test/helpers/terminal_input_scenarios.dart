@@ -5,8 +5,8 @@ import 'package:flutter/services.dart' show TextInputClient;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 
-import 'terminal_input_harness.dart';
-import 'terminal_input_helpers.dart';
+import '../../test/helpers/terminal_input_harness.dart';
+import '../../test/helpers/terminal_input_helpers.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 

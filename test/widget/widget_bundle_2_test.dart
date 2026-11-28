@@ -1,6 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'acp_auth_method_sheet_cases.dart';
 import 'acp_composer_cases.dart';
 import 'acp_writer_lease_banner_cases.dart';
 import 'agent_usage_rings_cases.dart';
@@ -12,7 +11,6 @@ import 'monkey_terminal_gestures_cases.dart';
 import 'port_forwards_screen_cases.dart';
 
 void main() {
-  registerWidgetAcpAuthMethodSheetTests();
   registerWidgetAcpComposerTests();
   registerWidgetAcpWriterLeaseBannerTests();
   registerWidgetAgentUsageRingsTests();

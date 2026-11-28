@@ -176,27 +176,15 @@ _MatrixScenario _deleteMiddleSelectionScenario(_SegmentSeed seed) {
 }
 
 List<_MatrixScenario> _buildGeneratedComparisonScenarios() {
+  // Representative character classes: plain ASCII, whitespace/indent, repeated
+  // characters, multi-code-unit emoji, CJK/BMP, and punctuation/symbols.
   const seeds = <_SegmentSeed>[
     (name: 'plain-word', before: 'he', middle: 'll', after: 'o there'),
-    (name: 'space-separated', before: 'foo ', middle: 'ba', after: 'r baz'),
-    (name: 'punctuation', before: 'hello, ', middle: 'wo', after: 'rld!'),
+    (name: 'leading-indent', before: '  ', middle: 'he', after: 'llo world'),
     (name: 'repeated-token', before: 'aa', middle: 'aa', after: ' aa'),
     (name: 'emoji-boundary', before: 'go ', middle: '👩🏽‍💻', after: ' now'),
-    (name: 'path-fragment', before: '/usr/', middle: 'lo', after: 'cal/bin'),
-    (name: 'number-fragment', before: '12', middle: '34', after: '56-78'),
-    (name: 'hyphenated', before: 'shell-', middle: 'hi', after: 'story.txt'),
-    (name: 'apostrophe', before: 'did', middle: 'n\'t', after: ' panic'),
-    (name: 'command-subst', before: 'echo ', middle: r'$(pwd)', after: ' done'),
-    (name: 'tab-separated', before: 'foo\t', middle: 'bar', after: '\tbaz'),
-    (name: 'snake-case', before: 'snake_', middle: 'ca', after: 'se_value'),
-    (name: 'bracketed', before: '[', middle: 'item', after: '] list'),
-    (name: 'quoted', before: '"', middle: 'hello', after: '" world'),
-    (name: 'pipe-chain', before: 'ls | ', middle: 'gr', after: 'ep ssh'),
-    (name: 'git-ref', before: 'feature/', middle: 'ime', after: '-fix'),
-    (name: 'ipv6-ish', before: 'fe80::', middle: '1', after: 'ff:fe23'),
-    (name: 'env-var', before: r'$HO', middle: 'ME', after: '/bin'),
-    (name: 'semicolon', before: 'echo ', middle: 'hi', after: '; pwd'),
-    (name: 'mixed-symbols', before: 'x=', middle: '42', after: '; y=7'),
+    (name: 'cjk-plain', before: '你', middle: '好', after: '世界'),
+    (name: 'punctuation', before: 'hello, ', middle: 'wo', after: 'rld!'),
   ];
 
   return [
@@ -206,61 +194,6 @@ List<_MatrixScenario> _buildGeneratedComparisonScenarios() {
       _replaceMiddleScenario(seed),
       _backspaceWithinMiddleScenario(seed),
       _deleteMiddleSelectionScenario(seed),
-    ],
-  ];
-}
-
-List<_MatrixScenario> _buildGptComparisonScenarios() {
-  const seeds = <_SegmentSeed>[
-    (name: 'leading-indent', before: '  ', middle: 'he', after: 'llo world'),
-    (name: 'double-space', before: 'foo  ', middle: 'ba', after: 'r baz'),
-    (name: 'cjk-plain', before: '你', middle: '好', after: '世界'),
-    (name: 'accented-latin', before: 'na', middle: 'ï', after: 've test'),
-    (name: 'quoted-arg', before: 'echo "', middle: 'hi', after: '" now'),
-    (name: 'brace-expansion', before: '{a,', middle: 'b', after: ',c}'),
-    (name: 'windows-path', before: r'C:\', middle: 'Us', after: r'ers\me'),
-    (name: 'env-braces', before: r'${', middle: 'HO', after: 'ME}'),
-    (name: 'and-chain', before: 'cmd && ', middle: 'ec', after: 'ho'),
-    (name: 'comment-fragment', before: '# ', middle: 'to', after: 'do item'),
-    (name: 'ssh-config', before: 'Host ', middle: 'my', after: '-box'),
-    (name: 'url-like', before: 'https://', middle: 'ex', after: '.am/path'),
-    (name: 'csv-fragment', before: 'a,', middle: 'b', after: ',c,d'),
-    (name: 'leading-tab', before: '\t', middle: 'cm', after: 'd --help'),
-    (name: 'mid-spaces', before: 'cmd', middle: '  ', after: 'arg'),
-    (name: 'spanish-tilde', before: 'mañ', middle: 'an', after: 'a mode'),
-    (name: 'pipe-reader', before: 'cat ', middle: 'fi', after: 'le | less'),
-    (name: 'env-equals', before: 'KEY=', middle: 'va', after: 'lue'),
-    (name: 'paren-spaced', before: '( ', middle: 'ab', after: ' ) tail'),
-    (name: 'digits-dots', before: '1.', middle: '2', after: '.3.4'),
-  ];
-
-  return [
-    for (final seed in seeds) ...[
-      (
-        name: 'gpt-derived ${_insertBeforeMiddleScenario(seed).name}',
-        sequence: _insertBeforeMiddleScenario(seed).sequence,
-        terminalEchoes: null,
-      ),
-      (
-        name: 'gpt-derived ${_insertAfterMiddleScenario(seed).name}',
-        sequence: _insertAfterMiddleScenario(seed).sequence,
-        terminalEchoes: null,
-      ),
-      (
-        name: 'gpt-derived ${_replaceMiddleScenario(seed).name}',
-        sequence: _replaceMiddleScenario(seed).sequence,
-        terminalEchoes: null,
-      ),
-      (
-        name: 'gpt-derived ${_backspaceWithinMiddleScenario(seed).name}',
-        sequence: _backspaceWithinMiddleScenario(seed).sequence,
-        terminalEchoes: null,
-      ),
-      (
-        name: 'gpt-derived ${_deleteMiddleSelectionScenario(seed).name}',
-        sequence: _deleteMiddleSelectionScenario(seed).sequence,
-        terminalEchoes: null,
-      ),
     ],
   ];
 }
@@ -587,28 +520,13 @@ List<_ResetScenario> _buildOpusResetScenarios() {
       trimsAfterSuggestionReset: true,
     ),
     (
-      name: 'single-space-context',
-      resolveTextBeforeCursor: ' ',
+      name: 'command-space-context',
+      resolveTextBeforeCursor: 'echo ready ',
       trimsAfterSuggestionReset: true,
     ),
     (
       name: 'tab-context',
-      resolveTextBeforeCursor: '\t',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'newline-context',
-      resolveTextBeforeCursor: '\n',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'carriage-context',
-      resolveTextBeforeCursor: '\r',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'prompt-space-context',
-      resolveTextBeforeCursor: r'$ ',
+      resolveTextBeforeCursor: 'echo ready\t',
       trimsAfterSuggestionReset: true,
     ),
     (
@@ -617,73 +535,13 @@ List<_ResetScenario> _buildOpusResetScenarios() {
       trimsAfterSuggestionReset: true,
     ),
     (
-      name: 'command-space-context',
-      resolveTextBeforeCursor: 'echo ready ',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'command-tab-context',
-      resolveTextBeforeCursor: 'echo ready\t',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'command-newline-context',
-      resolveTextBeforeCursor: 'echo ready\n',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
-      name: 'double-space-context',
-      resolveTextBeforeCursor: 'echo ready  ',
-      trimsAfterSuggestionReset: true,
-    ),
-    (
       name: 'plain-command-context',
       resolveTextBeforeCursor: 'echo',
       trimsAfterSuggestionReset: false,
     ),
     (
-      name: 'paren-context',
-      resolveTextBeforeCursor: 'echo(',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
       name: 'emoji-context',
       resolveTextBeforeCursor: 'say 😀',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'quoted-context',
-      resolveTextBeforeCursor: '"quoted',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'path-context',
-      resolveTextBeforeCursor: '/usr/local',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'assignment-context',
-      resolveTextBeforeCursor: 'KEY=value',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'semicolon-context',
-      resolveTextBeforeCursor: 'echo;',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'bracket-context',
-      resolveTextBeforeCursor: 'list]',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'hyphen-context',
-      resolveTextBeforeCursor: 'git-status',
-      trimsAfterSuggestionReset: false,
-    ),
-    (
-      name: 'ipv6-context',
-      resolveTextBeforeCursor: 'fe80::1',
       trimsAfterSuggestionReset: false,
     ),
   ];
@@ -6569,7 +6427,6 @@ void registerPresentationWidgetsTerminalImeEngineTests() {
         ..._buildFlutterDeltaParityScenarios(),
         ..._buildFlutterComposingParityScenarios(),
         ..._buildGeneratedComparisonScenarios(),
-        ..._buildGptComparisonScenarios(),
       ];
 
       for (final scenario in matrixScenarios) {

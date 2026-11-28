@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
-import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/remote_archive_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
@@ -17,78 +16,9 @@ import 'package:monkeyssh/presentation/models/app_platform_file.dart';
 import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
 import 'package:monkeyssh/presentation/screens/sftp_screen.dart';
 
+import '../../helpers/test_fixtures.dart';
+
 const _home = '/home/demo';
-
-const _freeState = MonetizationState(
-  billingAvailability: MonetizationBillingAvailability.available,
-  entitlements: MonetizationEntitlements.free(),
-  offers: [],
-  debugUnlockAvailable: false,
-  debugUnlocked: false,
-);
-
-class _MockSshClient extends Mock implements SSHClient {
-  @override
-  Future<void> close() async {}
-}
-
-class _MockMonetizationService extends Mock implements MonetizationService {
-  _MockMonetizationService() {
-    when(() => currentState).thenReturn(_freeState);
-  }
-}
-
-class _TestSessions extends ActiveSessionsNotifier {
-  _TestSessions(this.session);
-
-  final SshSession session;
-
-  @override
-  Map<int, SshConnectionState> build() => {
-    session.connectionId: SshConnectionState.connected,
-  };
-
-  @override
-  SshSession? getSession(int connectionId) =>
-      connectionId == session.connectionId ? session : null;
-
-  @override
-  Future<void> syncBackgroundStatus() async {}
-}
-
-class _MemoryViewStore implements SftpBrowserViewStore {
-  final saved = <int, SftpBrowserViewSettings>{};
-
-  @override
-  Future<SftpBrowserViewSettings> load(int hostId) async =>
-      saved[hostId] ?? const SftpBrowserViewSettings();
-
-  @override
-  Future<void> save(int hostId, SftpBrowserViewSettings settings) async {
-    saved[hostId] = settings;
-  }
-
-  final filters = <int, SftpBrowserFilter>{};
-
-  /// Holds the saved-filter read until completed, to play a slow database.
-  Completer<void>? filterReadGate;
-
-  @override
-  Future<SftpBrowserFilter?> loadFilter(int hostId) async {
-    final saved = filters[hostId];
-    await filterReadGate?.future;
-    return saved;
-  }
-
-  @override
-  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) async {
-    if (filter == null) {
-      filters.remove(hostId);
-    } else {
-      filters[hostId] = filter;
-    }
-  }
-}
 
 /// Flat host tree: files with sizes and folders, plus per-path failures.
 class _HostSftp extends Fake implements SftpClient {
@@ -279,11 +209,11 @@ class _Picker extends FilePickerPlatform {
 
 ProviderContainer _container(
   _HostSftp sftp, {
-  required _MemoryViewStore store,
+  required MemorySftpBrowserViewStore store,
   RemoteFileService? files,
   RemoteCommandRunner? runner,
 }) {
-  final ssh = _MockSshClient();
+  final ssh = ClosableMockSshClient();
   when(ssh.sftp).thenAnswer((_) async => sftp);
   final session = SshSession(
     connectionId: 7,
@@ -298,9 +228,15 @@ ProviderContainer _container(
   addTearDown(session.close);
   final container = ProviderContainer(
     overrides: [
-      activeSessionsProvider.overrideWith(() => _TestSessions(session)),
-      monetizationServiceProvider.overrideWithValue(_MockMonetizationService()),
-      monetizationStateProvider.overrideWith((ref) => Stream.value(_freeState)),
+      activeSessionsProvider.overrideWith(
+        () => TestActiveSessionsNotifier(sessions: [session]),
+      ),
+      monetizationServiceProvider.overrideWithValue(
+        createMockMonetizationService(),
+      ),
+      monetizationStateProvider.overrideWith(
+        (ref) => Stream.value(freeMonetizationState),
+      ),
       sftpBrowserViewStoreProvider.overrideWithValue(store),
       if (files != null) remoteFileServiceProvider.overrideWithValue(files),
       if (runner != null)
@@ -410,7 +346,7 @@ void main() {
   testWidgets('filter toggle removes the whole row and reclaims its height', (
     tester,
   ) async {
-    final store = _MemoryViewStore();
+    final store = MemorySftpBrowserViewStore();
     final sftp = _HostSftp(
       files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
     );
@@ -443,7 +379,7 @@ void main() {
       files: {'$_home/.env': 5, '$_home/big.log': 900, '$_home/small.txt': 10},
       directories: {'$_home/src'},
     );
-    final store = _MemoryViewStore();
+    final store = MemorySftpBrowserViewStore();
     final container = _container(sftp, store: store);
     const names = ['src', '.env', 'big.log', 'small.txt'];
     await _pumpBrowser(tester, container);
@@ -505,7 +441,10 @@ void main() {
 
   testWidgets('a filter with no matches offers to clear it', (tester) async {
     final sftp = _HostSftp(files: {'$_home/notes.txt': 1});
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _openFilter(tester);
     await tester.enterText(find.byKey(const ValueKey('sftpFilterField')), 'zz');
@@ -522,7 +461,7 @@ void main() {
     tester,
   ) async {
     final sftp = _HostSftp(files: {'$_home/.env': 5, '$_home/notes.txt': 10});
-    final store = _MemoryViewStore()
+    final store = MemorySftpBrowserViewStore()
       ..saved[1] = const SftpBrowserViewSettings(showHidden: false);
     await _pumpBrowser(tester, _container(sftp, store: store));
 
@@ -547,7 +486,7 @@ void main() {
     tester,
   ) async {
     final sftp = _HostSftp(files: {'$_home/a.txt': 1, '$_home/z.txt': 2});
-    final store = _MemoryViewStore();
+    final store = MemorySftpBrowserViewStore();
     await _pumpBrowser(tester, _container(sftp, store: store));
     expect(_listedNames(tester, ['a.txt', 'z.txt']), ['a.txt', 'z.txt']);
 
@@ -569,7 +508,10 @@ void main() {
       SftpStatusCode.permissionDenied,
       'denied',
     );
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt', 'b.txt']);
     expect(find.text('2 files selected'), findsOneWidget);
@@ -628,7 +570,7 @@ void main() {
       );
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
       platform: TargetPlatform.linux,
     );
 
@@ -670,7 +612,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -696,7 +638,10 @@ void main() {
       files: {'$_home/a.txt': 1, '$_home/b.txt': 2, '$_home/docs/b.txt': 9},
       directories: {'$_home/docs'},
     );
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt', 'b.txt']);
     await tester.tap(_barAction('Move'));
@@ -746,7 +691,7 @@ void main() {
     final sftp = _HostSftp(files: {'$_home/evil.zip': 10});
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), runner: runner),
+      _container(sftp, store: MemorySftpBrowserViewStore(), runner: runner),
     );
 
     await tester.longPress(find.text('evil.zip'));
@@ -790,7 +735,7 @@ void main() {
     final transfers = _TransferService();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await _selectFiles(tester, ['README.md']);
@@ -834,7 +779,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -862,7 +807,10 @@ void main() {
     );
     final gate = Completer<void>();
     sftp.removeGates['$_home/b.txt'] = gate;
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt', 'b.txt', 'c.txt']);
     await tester.tap(_barAction('Delete'));
@@ -887,7 +835,7 @@ void main() {
       files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
       directories: {'/home', '$_home/src'},
     );
-    final store = _MemoryViewStore();
+    final store = MemorySftpBrowserViewStore();
     await _pumpBrowser(tester, _container(sftp, store: store));
     await _openFilter(tester);
     await tester.enterText(
@@ -927,7 +875,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -960,7 +908,7 @@ void main() {
     final sftp = _HostSftp(
       files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
     );
-    final store = _MemoryViewStore()
+    final store = MemorySftpBrowserViewStore()
       ..filters[1] = (directory: _home, query: 'notes')
       ..filterReadGate = Completer<void>();
     await _pumpBrowser(tester, _container(sftp, store: store));
@@ -986,7 +934,7 @@ void main() {
     final sftp = _HostSftp(
       files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
     );
-    final store = _MemoryViewStore()
+    final store = MemorySftpBrowserViewStore()
       ..filters[1] = (directory: _home, query: 'notes')
       ..filterReadGate = Completer<void>();
     await _pumpBrowser(tester, _container(sftp, store: store));
@@ -1009,7 +957,7 @@ void main() {
       files: {'$_home/src/main.dart': 1, '$_home/src/notes.md': 2},
       directories: {'$_home/src'},
     );
-    final store = _MemoryViewStore()
+    final store = MemorySftpBrowserViewStore()
       ..filters[1] = (directory: '$_home/src', query: 'main');
     await _pumpBrowser(tester, _container(sftp, store: store));
 
@@ -1027,7 +975,10 @@ void main() {
     tester,
   ) async {
     final sftp = _HostSftp(files: {'$_home/a.txt': 1});
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt']);
     await tester.tap(_barAction('Move'));
@@ -1058,7 +1009,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1081,7 +1032,10 @@ void main() {
       files: {'$_home/a.txt': 1},
       directories: {'$_home/empty'},
     );
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt']);
     await tester.tap(_barAction('Move'));
@@ -1114,7 +1068,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1149,7 +1103,7 @@ void main() {
     final transfers = _TransferService();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1183,7 +1137,7 @@ void main() {
       ..failAfterGate = SftpStatusError(SftpStatusCode.failure, 'write');
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1216,7 +1170,7 @@ void main() {
       ..failAfterGate = SftpStatusError(SftpStatusCode.failure, 'write');
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1250,7 +1204,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1273,7 +1227,11 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowserRoute(
       tester,
-      _container(_HostSftp(), store: _MemoryViewStore(), files: transfers),
+      _container(
+        _HostSftp(),
+        store: MemorySftpBrowserViewStore(),
+        files: transfers,
+      ),
       showCloseButton: true,
     );
 
@@ -1307,7 +1265,7 @@ void main() {
     );
     await _pumpBrowserRoute(
       tester,
-      _container(sftp, store: _MemoryViewStore()),
+      _container(sftp, store: MemorySftpBrowserViewStore()),
     );
 
     await _selectFiles(tester, ['a.txt']);
@@ -1337,7 +1295,7 @@ void main() {
     );
     await _pumpBrowserRoute(
       tester,
-      _container(sftp, store: _MemoryViewStore()),
+      _container(sftp, store: MemorySftpBrowserViewStore()),
     );
 
     await tester.tap(find.text('src'));
@@ -1382,7 +1340,7 @@ void main() {
     final transfers = _TransferService()..downloadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await _selectFiles(tester, ['a.txt']);
@@ -1418,7 +1376,10 @@ void main() {
       files: {'$_home/a.txt': 1, '$_home/docs/b.txt': 2},
       directories: {'$_home/docs'},
     );
-    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: MemorySftpBrowserViewStore()),
+    );
 
     await _selectFiles(tester, ['a.txt']);
     await tester.tap(find.text('docs'));
@@ -1451,7 +1412,7 @@ void main() {
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), files: transfers),
+      _container(sftp, store: MemorySftpBrowserViewStore(), files: transfers),
     );
 
     await tester.tap(find.byTooltip('Upload files'));
@@ -1510,7 +1471,7 @@ void main() {
 
     await _pumpBrowser(
       tester,
-      _container(sftp, store: _MemoryViewStore(), runner: runner),
+      _container(sftp, store: MemorySftpBrowserViewStore(), runner: runner),
     );
     await tester.longPress(find.text('site.zip'));
     await tester.pumpAndSettle();

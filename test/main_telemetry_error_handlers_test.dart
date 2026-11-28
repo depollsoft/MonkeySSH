@@ -7,10 +7,12 @@ import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
 import 'package:monkeyssh/main.dart' as app;
 
+import 'helpers/telemetry_test_fakes.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  late _CrashReporter reporter;
+  late FakeTelemetryCrashReporter reporter;
   late int previousCalls;
 
   setUp(() {
@@ -28,7 +30,7 @@ void main() {
     FlutterError.onError = (_) {
       previousCalls += 1;
     };
-    reporter = _CrashReporter();
+    reporter = FakeTelemetryCrashReporter();
     app.installTelemetryErrorHandlers(
       TelemetryService(
         status: TelemetryServiceStatus.ready,
@@ -79,12 +81,12 @@ void main() {
         }
         await Future<void>.delayed(Duration.zero);
         expect(previousCalls, 10);
-        expect(reporter.errors, hasLength(3));
-        for (final report in reporter.errors) {
+        expect(reporter.recordedErrors, hasLength(3));
+        for (final report in reporter.recordedErrors) {
           expect(report.fatal, isFalse);
-          expect(report.stack, same(stack));
+          expect(report.stackTrace, same(stack));
         }
-        expect(reporter.keys['error_absorbed'], isTrue);
+        expect(reporter.customKeys['error_absorbed'], isTrue);
       },
     );
   }
@@ -117,10 +119,10 @@ void main() {
         isFalse,
       );
       await Future<void>.delayed(Duration.zero);
-      expect(reporter.errors, hasLength(4));
-      expect(reporter.errors.every((report) => report.fatal), isTrue);
+      expect(reporter.recordedErrors, hasLength(4));
+      expect(reporter.recordedErrors.every((report) => report.fatal), isTrue);
       expect(previousCalls, 4);
-      expect(reporter.keys['error_absorbed'], isFalse);
+      expect(reporter.customKeys['error_absorbed'], isFalse);
     },
   );
 
@@ -138,9 +140,9 @@ void main() {
       );
       await Future<void>.delayed(Duration.zero);
       expect(previousCalls, 1);
-      expect(reporter.flutterErrors.single.stack, same(stack));
+      expect(reporter.recordedFlutterErrors.single.stack, same(stack));
       expect(
-        reporter.flutterErrors.single.context.toString(),
+        reporter.recordedFlutterErrors.single.context.toString(),
         'StateError: Bad state [redacted]',
       );
     },
@@ -164,38 +166,7 @@ void main() {
       isTrue,
     );
     await Future<void>.delayed(Duration.zero);
-    expect(reporter.errors, isEmpty);
-    expect(reporter.keys, isEmpty);
+    expect(reporter.recordedErrors, isEmpty);
+    expect(reporter.customKeys, isEmpty);
   });
-}
-
-class _CrashReporter implements TelemetryCrashReporter {
-  final errors = <({Object error, StackTrace stack, bool fatal})>[];
-  final flutterErrors = <FlutterErrorDetails>[];
-  final keys = <String, Object>{};
-
-  @override
-  Future<void> recordError(
-    Object error,
-    StackTrace stackTrace, {
-    required bool fatal,
-  }) async {
-    errors.add((error: error, stack: stackTrace, fatal: fatal));
-  }
-
-  @override
-  Future<void> recordFlutterError(FlutterErrorDetails details) async {
-    flutterErrors.add(details);
-  }
-
-  @override
-  Future<void> setCustomKey(String key, Object value) async {
-    keys[key] = value;
-  }
-
-  @override
-  Future<void> deleteUnsentReports() async {}
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {}
 }

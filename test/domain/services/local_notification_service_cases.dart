@@ -11,9 +11,9 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/push/push_tap_payload.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 
+import '../../helpers/permission_channel_test_helper.dart';
 import 'acp_notification_location_cases.dart';
 import 'acp_notification_target_cases.dart';
-import 'app_permission_service_cases.dart' show answerPermissionChannel;
 
 /// Registers tests from local_notification_service_test.dart.
 void registerDomainServicesLocalNotificationServiceTests() {

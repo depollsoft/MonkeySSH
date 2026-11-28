@@ -249,24 +249,6 @@ void main() {
       expect(find.text('about'), findsOneWidget);
     });
 
-    testWidgets('displays MonkeySSH Pro subscription section', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      expect(find.text('MonkeySSH Pro'), findsOneWidget);
-      expect(
-        find.text('Subscription status and Pro-only workflows'),
-        findsOneWidget,
-      );
-      expect(find.text('Subscription'), findsOneWidget);
-      expect(
-        find.text('Unlock transfers, automation, and agent launch presets'),
-        findsOneWidget,
-      );
-    });
-
     testWidgets(
       'free users must upgrade before enabling agent update indicators',
       (tester) async {
@@ -464,38 +446,6 @@ void main() {
       );
     });
 
-    testWidgets('shows active subscription state when Pro is unlocked', (
-      tester,
-    ) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      await SettingsService(db)
-          .setBool(SettingKeys.monetizationProUnlocked, value: true);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      expect(find.text('Unlocked on this device'), findsOneWidget);
-      expect(find.text('Active'), findsOneWidget);
-    });
-
-    testWidgets('shows lifetime state when Pro is unlocked via lifetime SKU', (
-      tester,
-    ) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final settings = SettingsService(db);
-      await settings.setBool(SettingKeys.monetizationProUnlocked, value: true);
-      await settings.setString(
-        SettingKeys.monetizationActiveProductId,
-        MonetizationProductIds.iosProLifetimeProd,
-      );
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      expect(find.text('Lifetime — unlocked on this device'), findsOneWidget);
-      expect(find.text('Lifetime'), findsOneWidget);
-    });
-
     for (final (title, labels, setting, saved) in [
       (
         'Theme',
@@ -541,34 +491,6 @@ void main() {
         expect(await SettingsService(db).getString(setting), saved);
       });
     }
-
-    testWidgets('displays theme option', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      expect(find.text('Theme'), findsOneWidget);
-      expect(find.text('System default'), findsOneWidget);
-      expect(find.text('Use terminal themes for app'), findsOneWidget);
-    });
-
-    testWidgets('displays font size option', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Font size'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Font size'), findsOneWidget);
-      expect(find.text('14 pt'), findsOneWidget);
-    });
 
     for (final family in ['monospace', 'JetBrains Mono', 'Custom Mono']) {
       testWidgets('font size preview uses $family', (tester) async {
@@ -662,108 +584,6 @@ void main() {
         tester.element(find.byType(SettingsScreen)),
       );
       expect(container.read(fontFamilyNotifierProvider), 'JetBrains Mono');
-    });
-
-    testWidgets('displays cursor style option', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Cursor style'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Cursor style'), findsOneWidget);
-      expect(find.text('Block'), findsOneWidget);
-    });
-
-    testWidgets('exposes mux close confirmation toggle', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Confirm before closing mux windows'),
-        300,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      final tile = tester.widget<SwitchListTile>(
-        find.widgetWithText(
-          SwitchListTile,
-          'Confirm before closing mux windows',
-        ),
-      );
-      expect(tile.value, isTrue);
-    });
-
-    testWidgets('displays bell sound toggle', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Bell sound'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Bell sound'), findsOneWidget);
-      expect(find.text('Play sound on terminal bell'), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsWidgets);
-    });
-
-    testWidgets('displays terminal wake lock toggle', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Keep screen awake'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Keep screen awake'), findsOneWidget);
-      expect(
-        find.text('Hold a wake lock while a terminal is active'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('displays terminal path link toggles', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Clickable file paths'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Clickable file paths'), findsOneWidget);
-      expect(
-        find.text('Tap terminal file paths to open them in SFTP'),
-        findsOneWidget,
-      );
-      expect(find.text('Path link underlines'), findsOneWidget);
-      expect(
-        find.text('Underline clickable terminal file paths'),
-        findsOneWidget,
-      );
     });
 
     testWidgets('displays about section with version', (tester) async {
@@ -1345,23 +1165,6 @@ void main() {
       expect(tile.onTap, isNull);
     });
 
-    testWidgets('displays import and export actions', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      await tester.scrollUntilVisible(
-        find.text('Export app data'),
-        300,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Export app data'), findsOneWidget);
-      expect(find.text('Import app data'), findsOneWidget);
-    });
-
     testWidgets(
       'app data export shows unreadable secrets without reporting an error',
       (tester) async {
@@ -1448,15 +1251,6 @@ void main() {
       },
       timeout: const Timeout(Duration(seconds: 30)),
     );
-
-    testWidgets('has scrollable ListView', (tester) async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-
-      await _pumpSettingsScreen(tester, db: db);
-
-      expect(find.byType(ListView), findsOneWidget);
-    });
 
     testWidgets('import refreshes settings and shared entity providers', (
       tester,

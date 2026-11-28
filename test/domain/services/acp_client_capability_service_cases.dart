@@ -14,6 +14,7 @@ import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
+import '../../helpers/recording_diagnostics_logger.dart';
 
 /// Registers tests from acp_client_capability_service_test.dart.
 void registerDomainServicesAcpClientCapabilityServiceTests() {
@@ -58,7 +59,7 @@ void registerDomainServicesAcpClientCapabilityServiceTests() {
         );
         late MockSshSession session;
         late Completer<SSHSession> opening;
-        late _MockTerminalSession channel;
+        late MockSessionWithChannel channel;
 
         Future<void> configureSshTerminal() async {
           // Closing inside the fake-async test body would wait on timers that
@@ -73,7 +74,7 @@ void registerDomainServicesAcpClientCapabilityServiceTests() {
           client = AcpClient(AcpJsonRpcConnection(transport: transport));
           session = MockSshSession();
           opening = Completer<SSHSession>();
-          channel = _MockTerminalSession();
+          channel = MockSessionWithChannel();
           final exit = Completer<int?>();
           when(() => session.execute(any())).thenAnswer((_) => opening.future);
           when(() => channel.stdout).thenAnswer((_) => const Stream.empty());
@@ -134,7 +135,7 @@ void registerDomainServicesAcpClientCapabilityServiceTests() {
               verify(() => session.execute(any())).called(2);
 
               if (arrivesLate) {
-                final lateChannel = _MockTerminalSession();
+                final lateChannel = MockSessionWithChannel();
                 opening.complete(lateChannel);
                 await tester.pump();
                 verify(lateChannel.channel.destroy).called(1);
@@ -1863,7 +1864,7 @@ void registerDomainServicesAcpClientCapabilityServiceTests() {
     test('diagnostics retain only safe ACP request metadata', () async {
       final transport = _ServerTransport();
       final client = AcpClient(AcpJsonRpcConnection(transport: transport));
-      final logger = _RecordingLogger();
+      final logger = RecordingDiagnosticsLogger();
       final service = AcpClientCapabilityService(
         fileSystem: const _ThrowingFileSystem(),
         terminalExecutor: null,
@@ -1877,10 +1878,14 @@ void registerDomainServicesAcpClientCapabilityServiceTests() {
       });
       await _settle();
 
-      expect(logger.warningFields.single, containsPair('methodCategory', 'fs'));
-      expect(logger.warningFields.single.keys, isNot(contains('path')));
-      expect(logger.warningFields.single.keys, isNot(contains('content')));
-      expect(logger.warningFields.single.keys, isNot(contains('command')));
+      final warnings = logger.events
+          .where((event) => event.level == DiagnosticsLogLevel.warning)
+          .map((event) => event.fields)
+          .toList();
+      expect(warnings.single, containsPair('methodCategory', 'fs'));
+      expect(warnings.single.keys, isNot(contains('path')));
+      expect(warnings.single.keys, isNot(contains('content')));
+      expect(warnings.single.keys, isNot(contains('command')));
       await service.close();
       await client.close();
     });
@@ -2004,8 +2009,6 @@ final class _FakeFileSystem implements AcpRemoteFileSystem {
     files[path] = bytes;
   }
 }
-
-class _MockTerminalSession extends MockSessionWithChannel {}
 
 final class _FakeTerminalExecutor implements AcpTerminalExecutor {
   final processes = <_FakeTerminalProcess>[];
@@ -2156,36 +2159,4 @@ final class _ModePreservingFile implements SftpFile {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-final class _RecordingLogger implements DiagnosticsLogger {
-  final warningFields = <Map<String, Object?>>[];
-
-  @override
-  void debug(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) {}
-
-  @override
-  void error(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) {}
-
-  @override
-  void info(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) {}
-
-  @override
-  void warning(
-    String category,
-    String message, {
-    Map<String, Object?> fields = const <String, Object?>{},
-  }) => warningFields.add(Map<String, Object?>.from(fields));
 }

@@ -20,8 +20,6 @@ import 'package:monkeyssh/domain/services/tmux_service.dart'
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 
-class _MockSshExecSession extends MockSessionWithChannel {}
-
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
 
 /// Registers tests from terminal_connection_backend_service_test.dart.
@@ -119,7 +117,7 @@ void registerDomainServicesTerminalConnectionBackendServiceTests() {
         tester,
       ) async {
         final client = MockSshClient();
-        final exec = _MockSshExecSession();
+        final exec = MockSessionWithChannel();
         final stdout = StreamController<Uint8List>();
         when(() => exec.stdout).thenAnswer((_) => stdout.stream);
         when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
@@ -258,7 +256,7 @@ SSHSession _buildExecSession({
   String stderr = '',
   int? exitCode,
 }) {
-  final exec = _MockSshExecSession();
+  final exec = MockSessionWithChannel();
   when(() => exec.exitCode).thenReturn(exitCode);
   when(() => exec.stdout).thenAnswer(
     (_) => Stream<Uint8List>.fromIterable([

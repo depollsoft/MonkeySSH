@@ -35,6 +35,7 @@ import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
 import '../helpers/mocks.dart';
+import '../helpers/test_fixtures.dart';
 import '../support/fake_acp_session_manager.dart';
 import '../support/fake_agent_worktree.dart';
 
@@ -60,14 +61,6 @@ class _FakeActiveSessions extends ActiveSessionsNotifier {
     return result;
   }
 }
-
-class _MockSshService extends Mock implements SshService {}
-
-class _MockAgentLaunchPresetService extends Mock
-    implements AgentLaunchPresetService {}
-
-class _MockHostCliLaunchPreferencesService extends Mock
-    implements HostCliLaunchPreferencesService {}
 
 /// A connected session whose provider probe resolves Cursor Agent.
 SshSession _cursorSession() {
@@ -159,40 +152,10 @@ Host _host({
   int id = 1,
   String? tmuxWorkingDirectory,
   String? remoteMuxBackend,
-}) => Host(
+}) => testHost(
   id: id,
-  label: 'Alpha',
-  hostname: 'alpha.example.com',
-  port: 22,
-  username: 'root',
-  password: null,
-  keyId: null,
-  groupId: null,
-  jumpHostId: null,
-  isFavorite: false,
-  color: null,
-  notes: null,
-  tags: null,
-  createdAt: DateTime(2026),
-  updatedAt: DateTime(2026),
-  lastConnectedAt: null,
-  terminalThemeLightId: null,
-  terminalThemeDarkId: null,
-  terminalFontFamily: null,
-  autoConnectCommand: null,
-  autoConnectSnippetId: null,
-  autoConnectRequiresConfirmation: false,
-  tmuxSessionName: null,
   tmuxWorkingDirectory: tmuxWorkingDirectory,
-  tmuxExtraFlags: null,
   remoteMuxBackend: remoteMuxBackend,
-  autoForwardPorts: false,
-  sortOrder: 0,
-  notifyAgentAttention: true,
-  notifyAgentFinished: true,
-  notifyWindowAlerts: true,
-  notifyShellNotifications: true,
-  pushWhenClosed: true,
 );
 
 /// Pumps a launcher button that opens the new-session sheet, capturing the
@@ -219,9 +182,9 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
 }) async {
   AcpSessionKey? returned;
   var completed = false;
-  final ssh = _MockSshService();
-  final presetService = _MockAgentLaunchPresetService();
-  final launchPreferencesService = _MockHostCliLaunchPreferencesService();
+  final ssh = MockSshService();
+  final presetService = MockAgentLaunchPresetService();
+  final launchPreferencesService = MockHostCliLaunchPreferencesService();
   when(() => ssh.allSessions).thenReturn(<SshSession>[?activeSession]);
   when(() => ssh.getSessionsForHost(any()))
       .thenReturn(<SshSession>[?activeSession]);
@@ -694,8 +657,8 @@ void main() {
     'defaults to the host saved agent provider and working directory',
     (tester) async {
       final manager = FakeAcpSessionManager();
-      final ssh = _MockSshService();
-      final presetService = _MockAgentLaunchPresetService();
+      final ssh = MockSshService();
+      final presetService = MockAgentLaunchPresetService();
       final host = _host(
         tmuxWorkingDirectory: '/mux-default',
         remoteMuxBackend: RemoteMuxBackend.monkeyMux.storageValue,

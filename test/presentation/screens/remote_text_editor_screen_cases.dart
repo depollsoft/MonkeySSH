@@ -75,6 +75,7 @@ void registerPresentationScreensRemoteTextEditorScreenTests() {
         (16.0, 1.0, 1.5, closeTo(24.0, 0.01)),
         (16.0, 2.0, 1.0, closeTo(8.0, 0.01)),
         (16.0, 0.0, 1.0, closeTo(16.0, 0.01)),
+        (16.0, -1.0, 0.5, closeTo(8.0, 0.01)),
         (32.0, 1.0, 2.0, 32.0),
         (8.0, 2.0, 1.0, 8.0),
       ]) {
@@ -479,30 +480,6 @@ void registerPresentationScreensRemoteTextEditorScreenTests() {
         expect(
           secondLineCaret.top,
           lessThan(renderEditable.preferredLineHeight * 1.5),
-        );
-      });
-    });
-
-    group('remote editor zoom helpers', () {
-      test('clamps remote editor font size to the supported range', () {
-        expect(clampRemoteEditorFontSize(2), 8);
-        expect(clampRemoteEditorFontSize(18), 18);
-        expect(clampRemoteEditorFontSize(64), 32);
-      });
-
-      test(
-        'applies pinch scale deltas safely when previous scale is nonpositive',
-        () {
-          expect(applyRemoteEditorScaleDelta(16, 0, 2), 32);
-          expect(applyRemoteEditorScaleDelta(16, -1, 0.5), 8);
-        },
-      );
-
-      test('resolves the transient visual editor scale from pinch sizing', () {
-        expect(resolveRemoteEditorVisualScale(fontSize: 14), 1);
-        expect(
-          resolveRemoteEditorVisualScale(fontSize: 14, pinchFontSize: 21),
-          1.5,
         );
       });
     });

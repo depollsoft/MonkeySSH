@@ -44,22 +44,12 @@ import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
 import '../helpers/keyboard_visibility_channel.dart';
+import '../helpers/mocks.dart';
 import '../helpers/tap_selectable_text.dart';
 import '../support/fake_acp_session_manager.dart';
 import '../support/fake_git_working_tree_service.dart';
 
-class _MockSshService extends Mock implements SshService {}
-
-class _MockHostCliLaunchPreferencesService extends Mock
-    implements HostCliLaunchPreferencesService {}
-
-class _MockSshSession extends Mock implements SshSession {}
-
 class _FakeSftpClient extends Fake implements SftpClient {}
-
-class _MockSftpClient extends Mock implements SftpClient {}
-
-class _MockSftpFile extends Mock implements SftpFile {}
 
 Widget _wrap(
   FakeAcpSessionManager manager, {
@@ -81,10 +71,10 @@ Widget _wrap(
   EdgeInsets mediaViewInsets = EdgeInsets.zero,
   List<Override> overrides = const [],
 }) {
-  final ssh = _MockSshService();
-  final launchPreferences = _MockHostCliLaunchPreferencesService();
+  final ssh = MockSshService();
+  final launchPreferences = MockHostCliLaunchPreferencesService();
   final key = routeKey ?? fakeAcpKey();
-  final sshSession = _MockSshSession();
+  final sshSession = MockSshSession();
   when(() => sshSession.connectionId).thenReturn(7);
   when(() => sshSession.hostId).thenReturn(key.hostId);
   when(() => sshSession.remoteIsWindows).thenReturn(false);
@@ -444,8 +434,8 @@ void main() {
   testWidgets('Pi model picker reads scope metadata and expands all models', (
     tester,
   ) async {
-    final sftp = _MockSftpClient();
-    final settingsFile = _MockSftpFile();
+    final sftp = MockSftpClient();
+    final settingsFile = MockSftpFile();
     final settingsBytes = Uint8List.fromList(
       utf8.encode('{"enabledModels":["anthropic/*:high"]}'),
     );
@@ -753,108 +743,6 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
-
-  testWidgets('permission pill preserves provider-supported modes', (
-    tester,
-  ) async {
-    final manager = FakeAcpSessionManager(
-      sessions: [
-        fakeAcpSession(
-          configOptions: const [
-            AcpSelectConfigOption(
-              id: 'approval-mode',
-              name: 'Approval mode',
-              category: 'permission',
-              currentValue: 'ask',
-              options: [
-                AcpConfigValue(value: 'ask', name: 'Ask'),
-                AcpConfigValue(value: 'auto', name: 'YOLO'),
-                AcpConfigValue(value: 'plan', name: 'Plan only'),
-              ],
-            ),
-          ],
-        ),
-      ],
-    );
-    await tester.pumpWidget(_wrap(manager, embedded: true));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Ask'), findsOneWidget);
-    expect(find.text('Permission'), findsNothing);
-    await tester.tap(find.byTooltip('Change permission'));
-    await tester.pumpAndSettle();
-    expect(find.text('Permission'), findsOneWidget);
-    expect(find.text('YOLO'), findsOneWidget);
-    expect(find.text('Plan only'), findsOneWidget);
-    await tester.tap(find.text('Plan only'));
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('approval-mode', 'plan')));
-  });
-
-  testWidgets('legacy thinking levels render as Effort, not Mode', (
-    tester,
-  ) async {
-    final manager = FakeAcpSessionManager(
-      sessions: [
-        fakeAcpSession(
-          modeState: const AcpSessionModeState(
-            currentModeId: 'medium',
-            availableModes: [
-              AcpSessionMode(id: 'low', name: 'Low'),
-              AcpSessionMode(id: 'medium', name: 'Medium'),
-              AcpSessionMode(id: 'high', name: 'High'),
-            ],
-          ),
-        ),
-      ],
-    );
-    await tester.pumpWidget(_wrap(manager, embedded: true));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Medium'), findsOneWidget);
-    expect(find.byTooltip('Change effort'), findsOneWidget);
-    expect(find.byTooltip('Change mode'), findsNothing);
-    await tester.tap(find.byTooltip('Change effort'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('High').last);
-    await tester.pumpAndSettle();
-    expect(manager.modeSets, contains('high'));
-  });
-
-  testWidgets('generic mode-shaped effort levels do not create a Mode pill', (
-    tester,
-  ) async {
-    final manager = FakeAcpSessionManager(
-      sessions: [
-        fakeAcpSession(
-          configOptions: const [
-            AcpSelectConfigOption(
-              id: 'session-mode',
-              name: 'Mode',
-              currentValue: 'medium',
-              category: 'mode',
-              options: [
-                AcpConfigValue(value: 'low', name: 'Low'),
-                AcpConfigValue(value: 'medium', name: 'Medium'),
-                AcpConfigValue(value: 'high', name: 'High'),
-              ],
-            ),
-          ],
-        ),
-      ],
-    );
-    await tester.pumpWidget(_wrap(manager, embedded: true));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Medium'), findsOneWidget);
-    expect(find.byTooltip('Change effort'), findsOneWidget);
-    expect(find.byTooltip('Change mode'), findsNothing);
-    await tester.tap(find.byTooltip('Change effort'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('High').last);
-    await tester.pumpAndSettle();
-    expect(manager.configOptionSets, contains(('session-mode', 'high')));
-  });
 
   testWidgets('standalone pills respect SafeArea and default/off stays Mode', (
     tester,

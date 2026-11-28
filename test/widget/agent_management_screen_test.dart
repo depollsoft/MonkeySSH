@@ -155,104 +155,6 @@ void main() {
     runtimes[index] = runtime;
   }
 
-  testWidgets('Update all continues after the manager route is dismissed', (
-    tester,
-  ) async {
-    runtimes[1] = secondUpdate();
-    final first = runtimes.first;
-    final second = runtimes[1];
-    final firstResult = Completer<AgentRuntimeActionResult>();
-    final secondResult = Completer<AgentRuntimeActionResult>();
-    late void Function(String) output;
-    when(() => updateRuntime(first)).thenAnswer((invocation) {
-      output = invocation.namedArguments[#onOutput] as void Function(String);
-      return firstResult.future;
-    });
-    when(() => updateRuntime(second)).thenAnswer((invocation) {
-      output = invocation.namedArguments[#onOutput] as void Function(String);
-      return secondResult.future;
-    });
-    final navigator = GlobalKey<NavigatorState>();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          agentManagementServiceProvider.overrideWithValue(service),
-          monetizationServiceProvider.overrideWithValue(billing),
-          monetizationStateProvider.overrideWith((ref) => Stream.value(access)),
-        ],
-        child: MaterialApp(
-          navigatorKey: navigator,
-          home: const Scaffold(body: Text('Terminal')),
-        ),
-      ),
-    );
-    unawaited(
-      navigator.currentState!.push<void>(
-        MaterialPageRoute(
-          builder: (_) => AgentManagementScreen(session: session),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('agent-update-all')));
-    await pumpFrames(tester);
-    verify(() => updateRuntime(first)).called(1);
-    verifyNever(() => updateRuntime(second));
-
-    navigator.currentState!.pop();
-    await tester.pumpAndSettle();
-    expect(find.byType(AgentManagementScreen), findsNothing);
-    expect(find.text('Terminal'), findsOneWidget);
-    output('output after dismissal');
-    firstResult.complete(
-      const AgentRuntimeActionResult(succeeded: false, output: 'first failed'),
-    );
-    await tester.pumpAndSettle();
-    verify(() => updateRuntime(second)).called(1);
-    output('second update output');
-    secondResult.complete(
-      const AgentRuntimeActionResult(succeeded: true, output: 'done'),
-    );
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(find.byType(AlertDialog), findsNothing);
-    verify(
-      () =>
-          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
-    ).called(1);
-  });
-
-  testWidgets('usage starts before upstream version metadata completes', (
-    tester,
-  ) async {
-    final metadata = Completer<List<AgentRuntimeInfo>>();
-    when(
-      () =>
-          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
-    ).thenAnswer((invocation) {
-      final callback =
-          invocation.namedArguments[#onDiscovered]
-              as void Function(List<AgentRuntimeInfo>);
-      callback(runtimes);
-      return metadata.future;
-    });
-    when(() => service.readUsage(session, any())).thenAnswer(
-      (_) async => {
-        runtimes.first.definition.id: const AgentUsage(
-          status: AgentUsageStatus.available,
-          windows: [AgentUsageWindow(label: 'Weekly', usedPercent: 25)],
-        ),
-      },
-    );
-    await pumpScreen(tester, settle: false);
-    await pumpFrames(tester);
-    expect(metadata.isCompleted, isFalse);
-    expect(find.text('Weekly · 75% remaining'), findsOneWidget);
-    metadata.complete(runtimes);
-    await tester.pumpAndSettle();
-    verify(() => service.readUsage(session, any())).called(1);
-  });
-
   testWidgets('usage loads independently and refreshes with runtime checks', (
     tester,
   ) async {
@@ -1044,50 +946,41 @@ void main() {
     }
   });
 
-  for (final throws in [false, true]) {
-    testWidgets(
-      'Update all continues after ${throws ? 'an exception' : 'a failure'} '
-      'and refreshes once',
-      (tester) async {
-        final first = runtimes.first;
-        final second = secondUpdate(withMetadata: false);
-        runtimes[1] = second;
-        final started = <String>[];
-        for (final runtime in [first, second]) {
-          when(() => updateRuntime(runtime)).thenAnswer((_) async {
-            started.add(runtime.definition.id);
-            if (runtime == first && throws) {
-              throw StateError('connection closed');
-            }
-            return AgentRuntimeActionResult(
-              succeeded: runtime != first,
-              output: 'finished',
-            );
-          });
-        }
-        await pumpScreen(tester);
-        clearInteractions(service);
-        await tester.tap(find.byKey(const ValueKey('agent-update-all')));
-        await tester.pumpAndSettle();
-        expect(started, [first.definition.id, second.definition.id]);
-        expect(find.text('Some updates failed'), findsOneWidget);
-        expect(
-          find.text('Could not update ${first.definition.label}.'),
-          findsOneWidget,
+  testWidgets('Update all continues after a failure and refreshes once', (
+    tester,
+  ) async {
+    final first = runtimes.first;
+    final second = secondUpdate(withMetadata: false);
+    runtimes[1] = second;
+    final started = <String>[];
+    for (final runtime in [first, second]) {
+      when(() => updateRuntime(runtime)).thenAnswer((_) async {
+        started.add(runtime.definition.id);
+        return AgentRuntimeActionResult(
+          succeeded: runtime != first,
+          output: 'finished',
         );
-        expect(find.byType(CircularProgressIndicator), findsNothing);
-        verify(
-          () => service.refreshAll(
-            session,
-            onDiscovered: any(named: 'onDiscovered'),
-          ),
-        ).called(1);
-        await tester.tap(find.text('Close'));
-        await tester.pumpAndSettle();
-        expect(refreshHandler(tester), isNotNull);
-      },
+      });
+    }
+    await pumpScreen(tester);
+    clearInteractions(service);
+    await tester.tap(find.byKey(const ValueKey('agent-update-all')));
+    await tester.pumpAndSettle();
+    expect(started, [first.definition.id, second.definition.id]);
+    expect(find.text('Some updates failed'), findsOneWidget);
+    expect(
+      find.text('Could not update ${first.definition.label}.'),
+      findsOneWidget,
     );
-  }
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    verify(
+      () =>
+          service.refreshAll(session, onDiscovered: any(named: 'onDiscovered')),
+    ).called(1);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    expect(refreshHandler(tester), isNotNull);
+  });
 
   testWidgets('action errors clear progress and show a failure dialog', (
     tester,

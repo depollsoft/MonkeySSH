@@ -538,36 +538,6 @@ void registerDomainModelsAgentLaunchPresetTests() {
     });
 
     group('AgentLaunchTool presentation', () {
-      test('all tools have labels', () {
-        for (final tool in AgentLaunchTool.values) {
-          expect(tool.label, isNotEmpty, reason: '${tool.name} missing label');
-        }
-      });
-
-      test('all tools have command names', () {
-        for (final tool in AgentLaunchTool.values) {
-          expect(
-            tool.commandName,
-            isNotEmpty,
-            reason: '${tool.name} missing commandName',
-          );
-        }
-      });
-
-      test('new tool labels are correct', () {
-        expect(AgentLaunchTool.codex.label, 'Codex');
-        expect(AgentLaunchTool.openCode.label, 'OpenCode');
-        expect(AgentLaunchTool.antigravity.label, 'Antigravity');
-        expect(AgentLaunchTool.cursorAgent.label, 'Cursor Agent');
-      });
-
-      test('new tool command names are correct', () {
-        expect(AgentLaunchTool.codex.commandName, 'codex');
-        expect(AgentLaunchTool.openCode.commandName, 'opencode');
-        expect(AgentLaunchTool.antigravity.commandName, 'agy');
-        expect(AgentLaunchTool.cursorAgent.commandName, 'cursor-agent');
-      });
-
       group('command name lookup', () {
         for (final (input, expected) in const [
           ('claude', AgentLaunchTool.claudeCode),
@@ -682,7 +652,7 @@ void registerDomainModelsAgentLaunchPresetTests() {
       },
     );
 
-    group('agentArgumentsEnableYolo', () {
+    group('agentYoloSwitchesInArguments', () {
       for (final (tool, arguments) in [
         (AgentLaunchTool.copilotCli, '--allow-all-tools'),
         (AgentLaunchTool.copilotCli, '--model gpt-6 --allow-all'),
@@ -698,7 +668,7 @@ void registerDomainModelsAgentLaunchPresetTests() {
         (AgentLaunchTool.grokBuild, '--always-approve'),
       ]) {
         test('flags ${tool.name} $arguments', () {
-          expect(agentArgumentsEnableYolo(tool, arguments), isTrue);
+          expect(agentYoloSwitchesInArguments(tool, arguments), isNotEmpty);
         });
       }
 
@@ -715,18 +685,18 @@ void registerDomainModelsAgentLaunchPresetTests() {
         (AgentLaunchTool.pi, '--yolo'),
       ]) {
         test('ignores ${tool.name} $arguments', () {
-          expect(agentArgumentsEnableYolo(tool, arguments), isFalse);
+          expect(agentYoloSwitchesInArguments(tool, arguments), isEmpty);
         });
       }
 
       test('never throws on unbalanced quotes', () {
         expect(
-          () => agentArgumentsEnableYolo(AgentLaunchTool.codex, "'--yolo"),
+          () => agentYoloSwitchesInArguments(AgentLaunchTool.codex, "'--yolo"),
           returnsNormally,
         );
         expect(
-          agentArgumentsEnableYolo(AgentLaunchTool.codex, '"--yolo'),
-          isTrue,
+          agentYoloSwitchesInArguments(AgentLaunchTool.codex, '"--yolo'),
+          isNotEmpty,
         );
       });
     });

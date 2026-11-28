@@ -1,12 +1,20 @@
 // ignore_for_file: public_member_api_docs
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/models/acp_attachment.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
+import 'package:monkeyssh/presentation/widgets/acp_auth_method_sheet.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_diff.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
@@ -740,6 +748,220 @@ void main() {}
         await settleImage(tester);
         expect(find.byType(Image), findsOneWidget);
         expect(find.text('Image failed to load'), findsNothing);
+      });
+
+      Uint8List displayedImageBytes(WidgetTester tester) {
+        final image = tester.widget<Image>(find.byType(Image));
+        return ((image.image as ResizeImage).imageProvider as MemoryImage)
+            .bytes;
+      }
+
+      Future<void> pumpInlineImage(
+        WidgetTester tester,
+        AcpImageContent image, {
+        AcpImageResolver? resolver,
+      }) async {
+        await tester.pumpWidget(
+          wrap(AcpInlineImage(image: image, resolver: resolver)),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('reuses data-image decode across remounts', (tester) async {
+        final dataUri = 'data:image/png;base64,${base64Encode(_pngBytes)}';
+        final image = AcpImageContent(uri: dataUri, label: 'diagram');
+
+        await pumpInlineImage(tester, image);
+        expect(acpInlineDataImageDecodeCount, 1);
+        expect(acpInlineImageCacheEntryCount, 1);
+
+        await tester.pumpWidget(wrap(const SizedBox.shrink()));
+        await tester.pump();
+        await tester.pumpWidget(wrap(AcpInlineImage(image: image)));
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        expect(find.byType(Image), findsOneWidget);
+        await tester.pumpAndSettle();
+
+        expect(acpInlineDataImageDecodeCount, 1);
+        expect(acpInlineImageCacheEntryCount, 1);
+      });
+
+      for (final changeResolver in [false, true]) {
+        testWidgets(
+          'resolves file images again on remount, new resolver: $changeResolver',
+          (tester) async {
+            var firstCalls = 0;
+            var secondCalls = 0;
+            final firstBytes = Uint8List.fromList(_pngBytes);
+            final secondBytes = Uint8List.fromList([..._pngBytes, 0]);
+            var currentBytes = firstBytes;
+            final image = AcpImageContent(uri: 'file:///tmp/result.png');
+            Future<Uint8List?> firstResolver(AcpImageContent _) async {
+              firstCalls++;
+              return currentBytes;
+            }
+
+            Future<Uint8List?> secondResolver(AcpImageContent _) async {
+              secondCalls++;
+              return secondBytes;
+            }
+
+            for (var frame = 0; frame < 2; frame++) {
+              await pumpInlineImage(tester, image, resolver: firstResolver);
+              expect(displayedImageBytes(tester), firstBytes);
+              expect(firstCalls, 1);
+              expect(acpInlineImageCacheEntryCount, 0);
+            }
+            await tester.pumpWidget(wrap(const SizedBox.shrink()));
+            currentBytes = secondBytes;
+            await pumpInlineImage(
+              tester,
+              image,
+              resolver: changeResolver ? secondResolver : firstResolver,
+            );
+
+            expect(firstCalls, changeResolver ? 1 : 2);
+            expect(secondCalls, changeResolver ? 1 : 0);
+            expect(displayedImageBytes(tester), secondBytes);
+            expect(acpInlineImageCacheEntryCount, 0);
+          },
+        );
+      }
+
+      testWidgets(
+        'malformed inline data resolves its original URI without caching remote bytes',
+        (tester) async {
+          final image = AcpImageContent(
+            dataUri: 'data:image/png;base64,not-base64!!!',
+            uri: 'file:///tmp/fallback.png',
+          );
+          var calls = 0;
+          Future<Uint8List?> resolve(AcpImageContent fallback) async {
+            calls++;
+            expect(fallback.uri, image.uri);
+            expect(fallback.sourceKind, AcpImageSourceKind.fileUri);
+            return _pngBytes;
+          }
+
+          await pumpInlineImage(tester, image, resolver: resolve);
+          expect(displayedImageBytes(tester), _pngBytes);
+          expect(calls, 1);
+          expect(acpInlineImageCacheEntryCount, 0);
+        },
+      );
+
+      testWidgets(
+        'encoded image cache follows data even when the original URI is unchanged',
+        (tester) async {
+          for (final payload in [
+            _pngBytes,
+            Uint8List.fromList([..._pngBytes, 0]),
+          ]) {
+            await pumpInlineImage(
+              tester,
+              AcpImageContent(
+                dataUri: 'data:image/png;base64,${base64Encode(payload)}',
+                uri: 'file:///tmp/result.png',
+              ),
+            );
+            expect(displayedImageBytes(tester), payload);
+          }
+          expect(acpInlineDataImageDecodeCount, 2);
+          expect(acpInlineImageCacheEntryCount, 2);
+        },
+      );
+
+      testWidgets('decodes a max-size data image through the worker', (
+        tester,
+      ) async {
+        const size = kAcpAttachmentImageDisplayMaxBytes;
+        final bytes = Uint8List(size)..setRange(0, _pngBytes.length, _pngBytes);
+        final image = AcpImageContent(
+          dataUri: 'data:image/png;base64,${base64Encode(bytes)}',
+          uri: 'attachment://local/large.png',
+        );
+        var resolveCalls = 0;
+        await tester.runAsync(() async {
+          await tester.pumpWidget(
+            wrap(
+              AcpInlineImage(
+                image: image,
+                resolver: (_) async {
+                  resolveCalls++;
+                  return null;
+                },
+              ),
+            ),
+          );
+          for (
+            var attempt = 0;
+            attempt < 200 && find.byType(Image).evaluate().isEmpty;
+            attempt++
+          ) {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+            await tester.pump();
+          }
+        });
+        expect(find.text('Image too large to display'), findsNothing);
+        expect(displayedImageBytes(tester).length, size);
+        expect(acpInlineDataImageDecodeCount, 1);
+        expect(resolveCalls, 0);
+      });
+    });
+
+    group('AcpAuthMethodSheet', () {
+      testWidgets('cancelling an agent sign-in cancels its request', (
+        tester,
+      ) async {
+        final pending = Completer<AcpSessionError?>();
+        AcpRequestCancellation? captured;
+        final request = AcpAuthenticationRequest(
+          hostId: 1,
+          providerId: 'copilot',
+          providerLabel: 'Copilot CLI',
+          methods: const [
+            AcpAuthMethod(id: 'agent-login', name: 'Agent login'),
+          ],
+          authenticate: (_, {cancellation}) {
+            captured = cancellation;
+            return pending.future;
+          },
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            child: MaterialApp(
+              theme: FluttyTheme.dark,
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => showModalBottomSheet<void>(
+                      context: context,
+                      isScrollControlled: true,
+                      builder: (_) => AcpAuthMethodSheet(request: request),
+                    ),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Agent login'));
+        await tester.pump();
+        expect(captured, isNotNull);
+        expect(captured!.isCancelled, isFalse);
+
+        await tester.tap(find.text('Cancel sign-in'));
+        await tester.pumpAndSettle();
+        expect(captured!.isCancelled, isTrue);
+        expect(find.byType(AcpAuthMethodSheet), findsNothing);
+
+        pending.complete(null);
+        await tester.pumpAndSettle();
+        expect(find.byType(AcpAuthMethodSheet), findsNothing);
       });
     });
 

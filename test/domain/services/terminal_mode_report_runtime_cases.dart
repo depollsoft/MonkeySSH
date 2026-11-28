@@ -10,8 +10,6 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 
-class _MockExecSession extends MockSessionWithChannel {}
-
 /// Registers tests from terminal_mode_report_runtime_test.dart.
 void registerDomainServicesTerminalModeReportRuntimeTests() {
   group('terminal_mode_report_runtime', () {
@@ -21,7 +19,7 @@ void registerDomainServicesTerminalModeReportRuntimeTests() {
 
     group('session runtime terminal replies', () {
       late MockSshClient client;
-      late _MockExecSession shell;
+      late MockSessionWithChannel shell;
       late StreamController<Uint8List> stdout;
       late SshSession session;
       late List<String> writes;
@@ -33,7 +31,7 @@ void registerDomainServicesTerminalModeReportRuntimeTests() {
 
       Future<void> start() async {
         client = MockSshClient();
-        shell = _MockExecSession();
+        shell = MockSessionWithChannel();
         stdout = StreamController<Uint8List>();
         writes = [];
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');

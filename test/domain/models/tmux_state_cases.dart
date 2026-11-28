@@ -1280,20 +1280,6 @@ void registerDomainModelsTmuxStateTests() {
     });
 
     group('ToolSessionInfo', () {
-      test('constructs with all fields', () {
-        final info = ToolSessionInfo(
-          toolName: 'Claude Code',
-          sessionId: 'abc123',
-          workingDirectory: '/home/user/project',
-          lastActive: DateTime(2026, 4, 12),
-          summary: 'Fix auth middleware',
-        );
-
-        expect(info.toolName, 'Claude Code');
-        expect(info.sessionId, 'abc123');
-        expect(info.summary, 'Fix auth middleware');
-      });
-
       test('timeAgoLabel formats correctly', () {
         final now = DateTime.now();
 

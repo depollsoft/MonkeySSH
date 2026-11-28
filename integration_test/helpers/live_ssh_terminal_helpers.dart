@@ -61,19 +61,19 @@ Future<void> waitForTerminalText(
   try {
     await pumpUntil(
       tester,
-      () => terminalBufferText(terminal()).contains(expected),
+      () => _terminalBufferText(terminal()).contains(expected),
       description: description,
       timeout: timeout,
     );
   } on TestFailure {
     // Report the buffer as it was at the timeout, not when the wait began.
     fail(
-      'Timed out waiting for $description\n${terminalBufferText(terminal())}',
+      'Timed out waiting for $description\n${_terminalBufferText(terminal())}',
     );
   }
 }
 
-String terminalBufferText(Terminal terminal) {
+String _terminalBufferText(Terminal terminal) {
   final lines = <String>[];
   for (var index = 0; index < terminal.buffer.lines.length; index += 1) {
     lines.add(

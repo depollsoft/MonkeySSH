@@ -46,10 +46,6 @@ void registerTerminalOscColorOverridesTests() {
 
       expect(effective.id, TerminalThemes.dracula.id);
       expect(effective, isNot(equals(TerminalThemes.dracula)));
-      expect(
-        terminalThemesMatchForColors(effective, TerminalThemes.dracula),
-        isFalse,
-      );
       overrides.handle('111', const []);
       expect(overrides.applyTo(TerminalThemes.dracula), TerminalThemes.dracula);
     });

@@ -1,6 +1,5 @@
 // ignore_for_file: public_member_api_docs
 
-import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -13,108 +12,15 @@ import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
-import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
-import 'package:monkeyssh/domain/services/acp_client.dart';
 import 'package:monkeyssh/domain/services/acp_client_capability_service.dart';
-import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_mcp_server_service.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
-import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
-import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
-/// Minimal ACP agent that records every session-setup request's params.
-class _RecordingAgent implements AcpTransport {
-  _RecordingAgent({
-    required this.http,
-    required this.sse,
-    required this.additionalDirectories,
-  });
-
-  final bool http;
-  final bool sse;
-  final bool additionalDirectories;
-
-  final _incoming = StreamController<List<int>>(sync: true);
-  final Map<String, List<Map<String, Object?>>> params = {};
-  final Map<Object, Object?> responses = {};
-  var _sessions = 0;
-  var _serverRequests = 0;
-  var _closed = false;
-
-  @override
-  Stream<List<int>> get incoming => _incoming.stream;
-
-  List<Map<String, Object?>> paramsFor(String method) =>
-      params[method] ?? const [];
-
-  @override
-  Future<void> write(List<int> bytes) async {
-    final message = (jsonDecode(utf8.decode(bytes).trim())! as Map)
-        .cast<String, Object?>();
-    final method = message['method'];
-    final id = message['id'];
-    if (method == null && id != null) {
-      responses[id] = message['result'] ?? message['error'];
-      return;
-    }
-    if (method is! String || id == null) return;
-    params
-        .putIfAbsent(method, () => [])
-        .add((message['params'] as Map?)?.cast<String, Object?>() ?? {});
-    switch (method) {
-      case 'initialize':
-        _reply(id, {
-          'protocolVersion': 1,
-          'agentCapabilities': {
-            'loadSession': true,
-            'mcpCapabilities': {'http': http, 'sse': sse},
-            'sessionCapabilities': {
-              'resume': <String, Object?>{},
-              'fork': <String, Object?>{},
-              if (additionalDirectories)
-                'additionalDirectories': <String, Object?>{},
-            },
-          },
-        });
-      case 'session/new':
-        _reply(id, {'sessionId': 'session-${++_sessions}'});
-      case 'session/fork':
-        _reply(id, {'sessionId': 'fork-${++_sessions}'});
-      default:
-        _reply(id, <String, Object?>{});
-    }
-  }
-
-  Object request(String method, Map<String, Object?> requestParams) {
-    final id = 'srv-${++_serverRequests}';
-    _push({
-      'jsonrpc': '2.0',
-      'id': id,
-      'method': method,
-      'params': requestParams,
-    });
-    return id;
-  }
-
-  void _reply(Object id, Object? result) =>
-      _push({'jsonrpc': '2.0', 'id': id, 'result': result});
-
-  void _push(Map<String, Object?> message) {
-    if (_closed) return;
-    _incoming.add(utf8.encode('${jsonEncode(message)}\n'));
-  }
-
-  @override
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    await _incoming.close();
-  }
-}
+import '../../helpers/acp_test_fakes.dart';
 
 class _MemoryFileSystem implements AcpRemoteFileSystem {
   final files = <String, String>{};
@@ -148,54 +54,28 @@ class _NoTerminals implements AcpTerminalExecutor {
       throw UnimplementedError();
 }
 
-class _Connector implements AcpBridgeConnector {
+class _Connector extends FakeAcpBridgeConnector {
   _Connector({
-    this.http = false,
-    this.additionalDirectories = true,
-    this.binding,
-  });
+    bool http = false,
+    bool additionalDirectories = true,
+    super.capabilityBinding,
+  }) : super(
+         transportFactory: (_, _, _, {required takeOver}) => FakeAcpTransport(
+           agentCapabilities: <String, Object?>{
+             'loadSession': true,
+             'mcpCapabilities': <String, Object?>{'http': http, 'sse': false},
+             'sessionCapabilities': <String, Object?>{
+               'resume': <String, Object?>{},
+               'fork': <String, Object?>{},
+               if (additionalDirectories)
+                 'additionalDirectories': <String, Object?>{},
+             },
+           },
+         ),
+       );
 
-  final bool http;
-  final bool additionalDirectories;
-  final AcpHostCapabilityBinding? binding;
-  final Map<String, _RecordingAgent> agents = {};
-  final Set<String> bridges = {};
+  Set<String> get bridges => availableBridges;
   final Set<String> unresolvable = {};
-  var _counter = 0;
-
-  @override
-  Future<MonkeyMuxAcpBridgeStartResult> startBridge({
-    required int hostId,
-    required String providerId,
-    required String providerLabel,
-    required List<String> launchArgv,
-    required String cwd,
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async {
-    final bridgeId = 'bridge-${++_counter}';
-    bridges.add(bridgeId);
-    return MonkeyMuxAcpBridgeStartResult(bridgeId: bridgeId);
-  }
-
-  MonkeyMuxAcpBridgeMetadata _metadata(String bridgeId) =>
-      MonkeyMuxAcpBridgeMetadata(
-        id: bridgeId,
-        provider: 'Copilot CLI',
-        commandHash: 'hash',
-        state: MonkeyMuxAcpProviderState.running,
-        clientCount: 0,
-        pendingRequestCount: 0,
-        inFlightTurnCount: 0,
-        lastActivity: DateTime.now(),
-        startedAt: DateTime.now(),
-        nextSequence: 1,
-      );
-
-  @override
-  Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
-    int hostId, {
-    MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => [for (final bridgeId in bridges) _metadata(bridgeId)];
 
   @override
   Future<String> resolveWorkingDirectory(
@@ -208,54 +88,9 @@ class _Connector implements AcpBridgeConnector {
     if (cwd.startsWith('~/')) return '/home/test/${cwd.substring(2)}';
     return cwd.startsWith('/') ? cwd : '/home/test/$cwd';
   }
-
-  @override
-  Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
-    int hostId,
-    String bridgeId,
-  ) async => _metadata(bridgeId);
-
-  @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {
-    bridges.remove(bridgeId);
-  }
-
-  @override
-  AcpBridgeSession connect({
-    required int hostId,
-    required String bridgeId,
-    required String providerId,
-    int lastAcknowledgedSequence = 0,
-    bool takeOver = false,
-  }) {
-    final agent = _RecordingAgent(
-      http: http,
-      sse: false,
-      additionalDirectories: additionalDirectories,
-    );
-    agents[bridgeId] = agent;
-    final client = AcpClient(AcpJsonRpcConnection(transport: agent));
-    final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();
-    final errors = StreamController<MonkeyMuxAcpBridgeException>.broadcast();
-    return AcpBridgeSession(
-      client: client,
-      transportStates: states.stream,
-      transportErrors: errors.stream,
-      onClose: () async {
-        await client.close();
-        await states.close();
-        await errors.close();
-      },
-    );
-  }
-
-  @override
-  Future<AcpHostCapabilityBinding?> resolveCapabilityBinding(
-    int hostId,
-  ) async => binding;
 }
 
-Future<void> _pump() => Future<void>.delayed(const Duration(milliseconds: 20));
+Future<void> _pump() => pumpAcpEventLoop();
 
 final _stdio = AcpMcpServerConfig(
   id: 'mcp-stdio',
@@ -345,7 +180,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         ),
       );
 
-      final params = connector.agents[key.bridgeId]!
+      final params = connector.transports[key.bridgeId]!
           .paramsFor('session/new')
           .single;
       expect(params['cwd'], '/repo');
@@ -367,7 +202,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
           ),
         );
 
-        final params = connector.agents[key.bridgeId]!
+        final params = connector.transports[key.bridgeId]!
             .paramsFor('session/new')
             .single;
         expect(params['mcpServers'], [_stdio.toAcpJson()]);
@@ -387,7 +222,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         manager,
         workspace: AcpSessionWorkspaceOptions(mcpServerIds: const []),
       );
-      final params = connector.agents[key.bridgeId]!
+      final params = connector.transports[key.bridgeId]!
           .paramsFor('session/new')
           .single;
       expect(params['mcpServers'], isEmpty);
@@ -436,7 +271,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         cwd: '/repo',
       );
       expect(result, isA<AcpSessionLaunchStarted>());
-      final resume = connector.agents[key.bridgeId]!
+      final resume = connector.transports[key.bridgeId]!
           .paramsFor('session/resume')
           .single;
       expect(resume['sessionId'], key.acpSessionId);
@@ -458,7 +293,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         ),
       );
       final key = (result as AcpSessionLaunchStarted).key;
-      final load = connector.agents[key.bridgeId]!
+      final load = connector.transports[key.bridgeId]!
           .paramsFor('session/load')
           .single;
       expect(load['sessionId'], 'discovered-1');
@@ -479,7 +314,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
       );
       final result = await manager.forkSession(key);
       expect(result, isA<AcpSessionLaunchStarted>());
-      final fork = connector.agents[key.bridgeId]!
+      final fork = connector.transports[key.bridgeId]!
           .paramsFor('session/fork')
           .single;
       expect(fork['mcpServers'], [_stdio.toAcpJson()]);
@@ -499,7 +334,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         // A root that vanished must not make the other roots unusable.
         ..missing.add('/missing-root');
       final connector = _Connector(
-        binding: AcpHostCapabilityBinding(
+        capabilityBinding: AcpHostCapabilityBinding(
           fileSystem: fileSystem,
           terminalExecutor: _NoTerminals(),
         ),
@@ -511,18 +346,18 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
           additionalDirectories: const ['/docs', '/missing-root'],
         ),
       );
-      final agent = connector.agents[key.bridgeId]!;
-      final allowed = agent.request('fs/read_text_file', {
+      final agent = connector.transports[key.bridgeId]!;
+      final allowed = agent.sendServerRequest('fs/read_text_file', {
         'sessionId': key.acpSessionId,
         'path': '/docs/guide.md',
       });
-      final refused = agent.request('fs/read_text_file', {
+      final refused = agent.sendServerRequest('fs/read_text_file', {
         'sessionId': key.acpSessionId,
         'path': '/etc/passwd',
       });
       await _pump();
-      expect((agent.responses[allowed]! as Map)['content'], 'guide');
-      expect((agent.responses[refused]! as Map).containsKey('code'), isTrue);
+      expect((agent.responses[allowed]!['result']! as Map)['content'], 'guide');
+      expect(agent.responses[refused]!.containsKey('error'), isTrue);
     });
 
     test('directories an agent was not sent are not opened to it', () async {
@@ -531,7 +366,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
         ..files['/docs/guide.md'] = 'guide';
       final connector = _Connector(
         additionalDirectories: false,
-        binding: AcpHostCapabilityBinding(
+        capabilityBinding: AcpHostCapabilityBinding(
           fileSystem: fileSystem,
           terminalExecutor: _NoTerminals(),
         ),
@@ -543,7 +378,7 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
           additionalDirectories: const ['/docs'],
         ),
       );
-      final agent = connector.agents[key.bridgeId]!;
+      final agent = connector.transports[key.bridgeId]!;
       expect(
         agent
             .paramsFor('session/new')
@@ -551,17 +386,20 @@ void registerDomainServicesAcpSessionManagerWorkspaceTests() {
             .containsKey('additionalDirectories'),
         isFalse,
       );
-      final cwdRead = agent.request('fs/read_text_file', {
+      final cwdRead = agent.sendServerRequest('fs/read_text_file', {
         'sessionId': key.acpSessionId,
         'path': '/repo/readme.md',
       });
-      final extraRead = agent.request('fs/read_text_file', {
+      final extraRead = agent.sendServerRequest('fs/read_text_file', {
         'sessionId': key.acpSessionId,
         'path': '/docs/guide.md',
       });
       await _pump();
-      expect((agent.responses[cwdRead]! as Map)['content'], 'readme');
-      expect((agent.responses[extraRead]! as Map).containsKey('code'), isTrue);
+      expect(
+        (agent.responses[cwdRead]!['result']! as Map)['content'],
+        'readme',
+      );
+      expect(agent.responses[extraRead]!.containsKey('error'), isTrue);
     });
   });
 }

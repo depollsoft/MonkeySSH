@@ -19,22 +19,7 @@ import 'package:monkeyssh/domain/services/ssh_config_parser.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
 
 import '../../helpers/recording_diagnostics_logger.dart';
-
-class _RecordingAnalyticsClient implements TelemetryAnalyticsClient {
-  final events = <(String, Map<String, Object>)>[];
-
-  @override
-  Future<void> logEvent({
-    required String name,
-    required Map<String, Object> parameters,
-  }) async => events.add((name, parameters));
-
-  @override
-  Future<void> resetAnalyticsData() async {}
-
-  @override
-  Future<void> setCollectionEnabled({required bool enabled}) async {}
-}
+import '../../helpers/telemetry_test_fakes.dart';
 
 /// An analytics client whose calls never finish, like a stalled channel.
 class _StalledAnalyticsClient implements TelemetryAnalyticsClient {
@@ -76,7 +61,7 @@ void registerDomainServicesSshConfigImportServiceTests() {
     late AppDatabase db;
     late HostRepository hosts;
     late PortForwardRepository forwards;
-    late _RecordingAnalyticsClient analytics;
+    late FakeTelemetryAnalyticsClient analytics;
     late RecordingDiagnosticsLogger diagnostics;
     late SshConfigImportService service;
 
@@ -84,7 +69,7 @@ void registerDomainServicesSshConfigImportServiceTests() {
       db = AppDatabase.forTesting(NativeDatabase.memory());
       hosts = HostRepository(db, SecretEncryptionService.forTesting());
       forwards = PortForwardRepository(db);
-      analytics = _RecordingAnalyticsClient();
+      analytics = FakeTelemetryAnalyticsClient();
       diagnostics = RecordingDiagnosticsLogger();
       service = SshConfigImportService(
         db: db,
@@ -285,20 +270,20 @@ Host secret-alias
         defaultUsername: 'fallback-user',
       );
       expect(analytics.events, hasLength(2));
-      for (final (name, parameters) in analytics.events) {
-        expect(name, 'host_created');
-        expect(parameters['method'], sshConfigHostCreationMethod);
+      for (final event in analytics.events) {
+        expect(event.name, 'host_created');
+        expect(event.parameters['method'], sshConfigHostCreationMethod);
       }
       expect(
-        analytics.events.map((event) => event.$2['has_jump_host']),
+        analytics.events.map((event) => event.parameters['has_jump_host']),
         containsAll(<Object>[0, 1]),
       );
       final event = diagnostics.events.single;
       expect(event.fields['createdCount'], 2);
       for (final secret in ['secret', 'hidden', 'fallback', 'example.com']) {
         expect(event.searchableText, isNot(contains(secret)));
-        for (final (_, parameters) in analytics.events) {
-          expect(parameters.values.join(' '), isNot(contains(secret)));
+        for (final logged in analytics.events) {
+          expect(logged.parameters.values.join(' '), isNot(contains(secret)));
         }
       }
     });

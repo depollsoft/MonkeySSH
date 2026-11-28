@@ -148,23 +148,6 @@ void registerDomainModelsTerminalThemeTests() {
         expect(updated.copyWithAnsiColors(testTheme.ansiColors), testTheme);
       });
 
-      test('copyWith creates new theme with modified fields', () {
-        final original = testTheme.copyWith(
-          id: 'original-id',
-          name: 'Original Theme',
-        );
-
-        final modified = original.copyWith(
-          id: 'modified-id',
-          name: 'Modified Theme',
-        );
-
-        expect(modified.id, 'modified-id');
-        expect(modified.name, 'Modified Theme');
-        expect(modified.isDark, original.isDark);
-        expect(modified.foreground, original.foreground);
-      });
-
       test('buildTerminalThemeOscResponse answers special color queries', () {
         const theme = TerminalThemes.githubLightDefault;
 
@@ -399,19 +382,6 @@ void registerDomainModelsTerminalThemeTests() {
         expect(ids.length, themes.length);
       });
 
-      test('contains expected themes', () {
-        expect(TerminalThemes.getById('iterm2-dracula'), isNotNull);
-        expect(
-          TerminalThemes.getById('iterm2-github-light-default'),
-          isNotNull,
-        );
-        expect(TerminalThemes.getById('iterm2-catppuccin-mocha'), isNotNull);
-        expect(
-          TerminalThemes.getById('iterm2-iterm2-solarized-light'),
-          isNotNull,
-        );
-      });
-
       test(
         'all built-in themes use a recognised MonkeySSH or iTerm2 scheme ID',
         () {
@@ -427,24 +397,6 @@ void registerDomainModelsTerminalThemeTests() {
           }
         },
       );
-
-      test('default themes are the MonkeySSH-branded built-ins', () {
-        expect(TerminalThemes.defaultDarkTheme.id, 'monkeyssh-dark');
-        expect(TerminalThemes.defaultDarkTheme.name, 'MonkeySSH Dark');
-        expect(TerminalThemes.defaultLightTheme.id, 'monkeyssh-light');
-        expect(TerminalThemes.defaultLightTheme.name, 'MonkeySSH Light');
-      });
-
-      test('defaultThemeForBrightness returns built-in defaults', () {
-        expect(
-          TerminalThemes.defaultThemeForBrightness(Brightness.dark),
-          TerminalThemes.defaultDarkTheme,
-        );
-        expect(
-          TerminalThemes.defaultThemeForBrightness(Brightness.light),
-          TerminalThemes.defaultLightTheme,
-        );
-      });
 
       test(
         'resolveById falls back by brightness when the id is unavailable',

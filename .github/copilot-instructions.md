@@ -22,7 +22,7 @@ dart format .
 flutter test
 
 # Run a single test file
-flutter test test/unit/database_test.dart
+flutter test test/data/database/database_test.dart
 
 # Run tests matching a name pattern
 flutter test --name "insert and retrieve host"

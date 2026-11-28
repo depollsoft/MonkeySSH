@@ -1,13 +1,11 @@
 import 'dart:convert';
 
-import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
-import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
@@ -16,45 +14,9 @@ import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
 import 'package:monkeyssh/presentation/screens/sftp_screen.dart';
 
 import '../../helpers/in_memory_sftp.dart';
+import '../../helpers/test_fixtures.dart';
 
 const _notes = '/home/demo/notes.txt';
-
-const _freeMonetizationState = MonetizationState(
-  billingAvailability: MonetizationBillingAvailability.available,
-  entitlements: MonetizationEntitlements.free(),
-  offers: [],
-  debugUnlockAvailable: false,
-  debugUnlocked: false,
-);
-
-class _MockSshClient extends Mock implements SSHClient {
-  @override
-  Future<void> close() async {}
-}
-
-class _MockMonetizationService extends Mock implements MonetizationService {
-  _MockMonetizationService() {
-    when(() => currentState).thenReturn(_freeMonetizationState);
-  }
-}
-
-class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
-  _TestActiveSessionsNotifier(this.session);
-
-  final SshSession session;
-
-  @override
-  Map<int, SshConnectionState> build() => <int, SshConnectionState>{
-    session.connectionId: SshConnectionState.connected,
-  };
-
-  @override
-  SshSession? getSession(int connectionId) =>
-      connectionId == session.connectionId ? session : null;
-
-  @override
-  Future<void> syncBackgroundStatus() async {}
-}
 
 String _text(InMemorySftpClient server, String path) =>
     utf8.decode(server.files[path]!);
@@ -70,7 +32,7 @@ Future<InMemorySftpClient> _openNotesInEditor(
 }) async {
   final server = InMemorySftpClient()
     ..writeFile(filePath, utf8.encode('line one\n'));
-  final ssh = _MockSshClient();
+  final ssh = ClosableMockSshClient();
   when(ssh.sftp).thenAnswer((_) async => server);
   final session = SshSession(
     connectionId: 7,
@@ -95,13 +57,13 @@ Future<InMemorySftpClient> _openNotesInEditor(
       overrides: [
         databaseProvider.overrideWithValue(db),
         activeSessionsProvider.overrideWith(
-          () => _TestActiveSessionsNotifier(session),
+          () => TestActiveSessionsNotifier(sessions: [session]),
         ),
         monetizationServiceProvider.overrideWithValue(
-          _MockMonetizationService(),
+          createMockMonetizationService(),
         ),
         monetizationStateProvider.overrideWith(
-          (ref) => Stream.value(_freeMonetizationState),
+          (ref) => Stream.value(freeMonetizationState),
         ),
       ],
       child: MaterialApp(

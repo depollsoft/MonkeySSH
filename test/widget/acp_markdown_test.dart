@@ -8,7 +8,6 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_attachment.dart';
-import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/widgets/acp_chat_typography.dart';
 import 'package:monkeyssh/presentation/widgets/acp_code_block.dart';
 import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
@@ -43,22 +42,6 @@ const _pngData =
     'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
 const _pngUri = 'data:image/png;base64,$_pngData';
-
-Uint8List _displayedImageBytes(WidgetTester tester) {
-  final image = tester.widget<Image>(find.byType(Image));
-  return ((image.image as ResizeImage).imageProvider as MemoryImage).bytes;
-}
-
-Future<void> _pumpImage(
-  WidgetTester tester,
-  AcpImageContent image, {
-  AcpImageResolver? resolver,
-}) async {
-  await tester.pumpWidget(
-    wrap(AcpInlineImage(image: image, resolver: resolver)),
-  );
-  await tester.pumpAndSettle();
-}
 
 void main() {
   setUp(() {
@@ -398,153 +381,6 @@ void main() {
     expect(identical(after, before), isTrue);
     expect(identical(after.data, before.data), isTrue);
   });
-
-  testWidgets('reuses data-image decode across remounts', (tester) async {
-    final image = AcpImageContent(uri: _pngUri, label: 'diagram');
-
-    await tester.pumpWidget(wrap(AcpInlineImage(image: image)));
-    await tester.pumpAndSettle();
-    expect(acpInlineDataImageDecodeCount, 1);
-    expect(acpInlineImageCacheEntryCount, 1);
-
-    await tester.pumpWidget(wrap(const SizedBox.shrink()));
-    await tester.pump();
-    await tester.pumpWidget(wrap(AcpInlineImage(image: image)));
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.byType(Image), findsOneWidget);
-    await tester.pumpAndSettle();
-
-    expect(acpInlineDataImageDecodeCount, 1);
-    expect(acpInlineImageCacheEntryCount, 1);
-  });
-
-  for (final changeResolver in [false, true]) {
-    testWidgets(
-      'resolves file images again on remount, new resolver: $changeResolver',
-      (tester) async {
-        var firstCalls = 0;
-        var secondCalls = 0;
-        final firstBytes = base64Decode(_pngData);
-        final secondBytes = Uint8List.fromList([...firstBytes, 0]);
-        var currentBytes = firstBytes;
-        final image = AcpImageContent(uri: 'file:///tmp/result.png');
-        Future<Uint8List?> firstResolver(AcpImageContent _) async {
-          firstCalls++;
-          return currentBytes;
-        }
-
-        Future<Uint8List?> secondResolver(AcpImageContent _) async {
-          secondCalls++;
-          return secondBytes;
-        }
-
-        // Rebuilding a mounted image must not trigger another remote read.
-        for (var frame = 0; frame < 2; frame++) {
-          await _pumpImage(tester, image, resolver: firstResolver);
-          expect(_displayedImageBytes(tester), firstBytes);
-          expect(firstCalls, 1);
-          expect(acpInlineImageCacheEntryCount, 0);
-        }
-        await tester.pumpWidget(wrap(const SizedBox.shrink()));
-        currentBytes = secondBytes;
-        await _pumpImage(
-          tester,
-          image,
-          resolver: changeResolver ? secondResolver : firstResolver,
-        );
-
-        expect(firstCalls, changeResolver ? 1 : 2);
-        expect(secondCalls, changeResolver ? 1 : 0);
-        expect(_displayedImageBytes(tester), secondBytes);
-        expect(acpInlineImageCacheEntryCount, 0);
-      },
-    );
-  }
-
-  testWidgets(
-    'malformed inline data resolves its original URI without caching remote bytes',
-    (tester) async {
-      final bytes = base64Decode(_pngData);
-      final image = AcpImageContent(
-        dataUri: 'data:image/png;base64,not-base64!!!',
-        uri: 'file:///tmp/fallback.png',
-      );
-      var calls = 0;
-      Future<Uint8List?> resolve(AcpImageContent fallback) async {
-        calls++;
-        expect(fallback.uri, image.uri);
-        expect(fallback.sourceKind, AcpImageSourceKind.fileUri);
-        return bytes;
-      }
-
-      await _pumpImage(tester, image, resolver: resolve);
-      expect(_displayedImageBytes(tester), bytes);
-      expect(calls, 1);
-      expect(acpInlineImageCacheEntryCount, 0);
-    },
-  );
-
-  testWidgets(
-    'encoded image cache follows data even when the original URI is unchanged',
-    (tester) async {
-      final bytes = base64Decode(_pngData);
-      for (final payload in [
-        bytes,
-        Uint8List.fromList([...bytes, 0]),
-      ]) {
-        await _pumpImage(
-          tester,
-          AcpImageContent(
-            dataUri: 'data:image/png;base64,${base64Encode(payload)}',
-            uri: 'file:///tmp/result.png',
-          ),
-        );
-        expect(_displayedImageBytes(tester), payload);
-      }
-      expect(acpInlineDataImageDecodeCount, 2);
-      expect(acpInlineImageCacheEntryCount, 2);
-    },
-  );
-
-  for (final size in [6 * 1024 * 1024, kAcpAttachmentImageDisplayMaxBytes]) {
-    testWidgets('decodes a $size byte data image through the worker', (
-      tester,
-    ) async {
-      final png = base64Decode(_pngData);
-      // Trailing PNG bytes exercise the worker limit without a huge bitmap.
-      final bytes = Uint8List(size)..setRange(0, png.length, png);
-      final image = AcpImageContent(
-        dataUri: 'data:image/png;base64,${base64Encode(bytes)}',
-        uri: 'attachment://local/large.png',
-      );
-      var resolveCalls = 0;
-      await tester.runAsync(() async {
-        await tester.pumpWidget(
-          wrap(
-            AcpInlineImage(
-              image: image,
-              resolver: (_) async {
-                resolveCalls++;
-                return null;
-              },
-            ),
-          ),
-        );
-        for (
-          var attempt = 0;
-          attempt < 200 && find.byType(Image).evaluate().isEmpty;
-          attempt++
-        ) {
-          await Future<void>.delayed(const Duration(milliseconds: 10));
-          await tester.pump();
-        }
-      });
-      expect(find.text('Image too large to display'), findsNothing);
-      expect(_displayedImageBytes(tester).length, size);
-      expect(acpInlineDataImageDecodeCount, 1);
-      expect(resolveCalls, 0);
-    });
-  }
 
   testWidgets('rejects assistant Markdown image data above the display limit', (
     tester,

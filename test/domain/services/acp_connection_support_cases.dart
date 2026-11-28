@@ -16,8 +16,6 @@ import '../../helpers/mock_ssh_exec_session.dart';
 import '../../helpers/mocks.dart';
 import '../../helpers/powershell_test_helpers.dart';
 
-class _MockExecChannel extends MockSessionWithChannel {}
-
 void registerAcpConnectionSupportTests() {
   group('acp_connection_support', () {
     tearDown(resetQueuedSshExecsForTesting);
@@ -97,7 +95,7 @@ void registerAcpConnectionSupportTests() {
         when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
         when(() => client.execute(any(), pty: any(named: 'pty')))
             .thenAnswer((_) async {
-              final channel = _MockExecChannel();
+              final channel = MockSessionWithChannel();
               when(() => channel.stdout).thenAnswer(
                 (_) => Stream<Uint8List>.value(
                   Uint8List.fromList(
@@ -373,7 +371,7 @@ void registerAcpConnectionSupportTests() {
         invocation,
       ) async {
         final command = invocation.positionalArguments.single as String;
-        final channel = _MockExecChannel();
+        final channel = MockSessionWithChannel();
         var stdout = '';
         var done = Future<void>.value();
         if (command.contains('__monkeyssh_acp_support__')) {
@@ -457,11 +455,11 @@ void registerAcpConnectionSupportTests() {
       final hungStdout = StreamController<Uint8List>();
       addTearDown(hungStdout.close);
       final hungDone = Completer<void>();
-      _MockExecChannel? checkChannel;
+      MockSessionWithChannel? checkChannel;
       when(() => client.execute(any(), pty: any(named: 'pty')))
           .thenAnswer((invocation) async {
             final command = invocation.positionalArguments.single as String;
-            final channel = _MockExecChannel();
+            final channel = MockSessionWithChannel();
             if (command.contains('__monkeyssh_acp_support__')) {
               checkChannel = channel;
               when(() => channel.stdout).thenAnswer((_) => hungStdout.stream);

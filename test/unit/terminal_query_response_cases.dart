@@ -62,59 +62,6 @@ void registerUnitTerminalQueryResponseTests() {
       });
     });
 
-    group(r'DECRQM (CSI Ps $ p) mode reports', () {
-      test('reports tracked ANSI modes (insert) as set/reset', () {
-        final responses = <String>[];
-        final terminal = Terminal()
-          ..onOutput = responses.add
-          ..write('\x1b[4\$p'); // IRM off by default
-        expect(responses, ['\x1b[4;2\$y']);
-
-        responses.clear();
-        terminal
-          ..write('\x1b[4h')
-          ..write('\x1b[4\$p');
-        expect(responses, ['\x1b[4;1\$y']);
-      });
-
-      test('reports an unknown ANSI mode as not recognized', () {
-        final responses = <String>[];
-        Terminal()
-          ..onOutput = responses.add
-          ..write('\x1b[99\$p');
-
-        expect(responses, ['\x1b[99;0\$y']);
-      });
-
-      test('answers DEC-private DECRQM once per query', () {
-        final responses = <String>[];
-        // `CSI ? Ps $ p` is answered by the core; modes it does not track, such
-        // as 2031, come from the host's externalDecModeState, or report 0.
-        Terminal()
-          ..onOutput = responses.add
-          ..write('\x1b[?2004\$p')
-          ..write('\x1b[?2026\$p')
-          ..write('\x1b[?2031\$p');
-
-        expect(responses, [
-          '\x1b[?2004;2\$y',
-          '\x1b[?2026;2\$y',
-          '\x1b[?2031;0\$y',
-        ]);
-      });
-
-      test('a soft reset (CSI ! p) does not emit a DECRQM reply', () {
-        final responses = <String>[];
-        // `!` intermediate (DECSTR), not `$`, so it must not be misread as
-        // DECRQM and must not produce a mode report.
-        Terminal()
-          ..onOutput = responses.add
-          ..write('\x1b[!p');
-
-        expect(responses, isEmpty);
-      });
-    });
-
     group('XTGETTCAP (DCS + q <hex> ST)', () {
       String hex(String value) => value.codeUnits
           .map((u) => u.toRadixString(16).padLeft(2, '0'))

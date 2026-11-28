@@ -22,17 +22,17 @@ import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 
-class FakeAcpConnector extends Fake implements AcpBridgeConnector {}
+class _FakeAcpConnector extends Fake implements AcpBridgeConnector {}
 
-class FakeAcpRecentSessions extends Fake implements AcpRecentSessionsService {}
+class _FakeAcpRecentSessions extends Fake implements AcpRecentSessionsService {}
 
 /// A real [AcpSessionManager] that records composer prompts and cancels
 /// instead of sending them.
 class RecordingAcpSessionManager extends AcpSessionManager {
   RecordingAcpSessionManager()
     : super(
-        connector: FakeAcpConnector(),
-        recentSessions: FakeAcpRecentSessions(),
+        connector: _FakeAcpConnector(),
+        recentSessions: _FakeAcpRecentSessions(),
         isProUnlocked: () => true,
       );
 
@@ -79,8 +79,8 @@ class FakeAcpSessionManager extends AcpSessionManager {
     bool isProUnlocked = false,
   }) : _current = AcpSessionManagerState(sessions: sessions),
        super(
-         connector: FakeAcpConnector(),
-         recentSessions: FakeAcpRecentSessions(),
+         connector: _FakeAcpConnector(),
+         recentSessions: _FakeAcpRecentSessions(),
          isProUnlocked: () => isProUnlocked,
        );
 

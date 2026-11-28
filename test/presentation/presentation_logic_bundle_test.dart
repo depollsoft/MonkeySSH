@@ -15,7 +15,7 @@ import 'shortcuts/app_shortcuts_host_cases.dart';
 import 'shortcuts/terminal_shortcut_precedence_cases.dart';
 import 'view_models/agent_management_view_model_cases.dart';
 import 'view_models/host_edit_view_model_cases.dart';
-import 'view_models/mux_badge_controller_hold_cases.dart';
+import 'view_models/mux_badge_controller_cases.dart';
 
 void main() {
   registerPresentationBrowserBrowserFilePickerTests();
@@ -33,5 +33,5 @@ void main() {
   registerPresentationShortcutsTerminalShortcutPrecedenceTests();
   registerPresentationViewModelsAgentManagementViewModelTests();
   registerPresentationViewModelsHostEditViewModelTests();
-  registerPresentationViewModelsMuxBadgeControllerHoldTests();
+  registerPresentationViewModelsMuxBadgeControllerTests();
 }

@@ -26,8 +26,8 @@ import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:xterm/src/ui/palette_builder.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
-import '../test/helpers/live_ssh_terminal_helpers.dart';
-import '../test/helpers/terminal_theme_assertion_helpers.dart';
+import 'helpers/live_ssh_terminal_helpers.dart';
+import 'helpers/terminal_theme_assertion_helpers.dart';
 
 const _sshPort = int.fromEnvironment('TUI_THEME_PROOF_SSH_PORT');
 const _sshUser = String.fromEnvironment('TUI_THEME_PROOF_SSH_USER');

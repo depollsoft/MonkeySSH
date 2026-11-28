@@ -10,9 +10,9 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/services/socks5_protocol.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
-const _timeout = Duration(seconds: 5);
+import '../../helpers/mocks.dart';
 
-class _MockSshClient extends Mock implements SSHClient {}
+const _timeout = Duration(seconds: 5);
 
 /// SSH channel stand-in that relays to a real socket on this machine.
 class _SocketForwardChannel implements SSHForwardChannel {
@@ -250,11 +250,11 @@ void registerDomainServicesSshDynamicForwardTests() {
   group('ssh_dynamic_forward', () {
     TestWidgetsFlutterBinding.ensureInitialized();
 
-    late _MockSshClient client;
+    late MockSshClient client;
     late _BindRecordingSession session;
 
     setUp(() {
-      client = _MockSshClient();
+      client = MockSshClient();
       session = _BindRecordingSession(client: client);
       addTearDown(session.stopAllForwards);
     });
