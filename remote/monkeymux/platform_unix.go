@@ -695,23 +695,34 @@ func programResumeRunnable(resume programResumeState) bool {
 	return isPosixShell(defaultShellPath())
 }
 
+// programResumeLauncher is run by /bin/sh with the directory and then the
+// command as its parameters. A separate, non-interactive sh has read no
+// startup file, so its cd and exec are the real ones, and it changes to the
+// directory after the user's shell has finished initialising, which may have
+// moved elsewhere. env starts the program because it only ever runs a file
+// found on PATH: a shell's own lookup would let a function, an alias or a
+// builtin named like the program, such as eval, run in its place (zsh's exec
+// runs builtins too). env reads a leading NAME=value as an assignment, which
+// is why isProgramResumeProgram refuses a program with `=` in its name.
+const programResumeLauncher = `[ -z "$1" ] || cd -- "$1" || exit 1; shift; exec /usr/bin/env "$@"`
+
 // programResumeCommand runs a reported OSC 7577 command in the user's shell
-// environment: a login, interactive shell that has read its startup files.
-// The elements are the shell's positional parameters, never shell source, so
-// each reaches the program as one argument whatever it contains. env starts
-// the program, because it only ever runs a file found on PATH: the shell's
-// own lookup would let a function, an alias or a builtin named like the
-// program, such as eval, run in its place (zsh's exec runs builtins too).
-// env reads a leading NAME=value as an assignment, which is why
-// isProgramResumeProgram refuses a program with `=` in its name. A shell
-// window's program runs in a subshell and the shell takes over when it ends,
-// as it did before.
-func programResumeCommand(shell string, resume programResumeState) (cmd *exec.Cmd, direct bool) {
-	script := `\exec /usr/bin/env "$@"`
+// environment: a login, interactive shell that has read its startup files and
+// then hands over to programResumeLauncher. The directory and the elements
+// are positional parameters, never shell source, so each reaches the program
+// as one argument whatever it contains. The command is not run when the
+// directory cannot be entered. A shell window's program runs in a subshell
+// and the shell takes over when it ends, as it did before.
+func programResumeCommand(
+	shell string,
+	resume programResumeState,
+	directory string,
+) (cmd *exec.Cmd, direct bool) {
+	script := `\exec /bin/sh -c '` + programResumeLauncher + `' sh "$@"`
 	if resume.ShellWindow {
-		script = `(\exec /usr/bin/env "$@"); \exec "$0" -i`
+		script = `(` + script + `); \exec "$0" -i`
 	}
-	arguments := append([]string{"-i", "-c", script, shell}, resume.Argv...)
+	arguments := append([]string{"-i", "-c", script, shell, directory}, resume.Argv...)
 	cmd = exec.Command(shell, arguments...)
 	if base := filepath.Base(shell); base != "" {
 		cmd.Args[0] = "-" + base

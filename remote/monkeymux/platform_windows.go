@@ -1001,8 +1001,13 @@ func programResumeRunnable(resume programResumeState) bool {
 // process, with each element as one argument. No shell reads it, and a bare
 // name is found on PATH but never in the current directory. The window closes
 // when the program ends.
-func programResumeCommand(shell string, resume programResumeState) (cmd *exec.Cmd, direct bool) {
-	_ = shell
+func programResumeCommand(
+	shell string,
+	resume programResumeState,
+	directory string,
+) (cmd *exec.Cmd, direct bool) {
+	// The caller sets the process's directory; nothing runs before the program.
+	_, _ = shell, directory
 	// The command is one the user's own program reported under the window's token.
 	return exec.Command(resume.Argv[0], resume.Argv[1:]...), true // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 }

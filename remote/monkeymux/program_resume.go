@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,11 @@ type programResumeRecord struct {
 	cwd      string
 	time     int64
 	accepted uint64
+	// started is when the owning process started, read after the report
+	// (identified). A process with the same pid and another start time is a
+	// different program, not the owner.
+	started    time.Time
+	identified bool
 }
 
 // programResumeState is the command a restored window runs: the record chosen
@@ -67,9 +73,11 @@ type programResumeState struct {
 // programResumeCandidate is one live owner's record, kept until the restore
 // snapshot can pick between a window's owners off the server lock.
 type programResumeCandidate struct {
-	pid      int
-	accepted uint64
-	state    programResumeState
+	pid        int
+	accepted   uint64
+	started    time.Time
+	identified bool
+	state      programResumeState
 }
 
 type programResumeVerdict int
@@ -102,12 +110,20 @@ func newProgramResumeToken() string {
 
 // withProgramResumeToken replaces any inherited token with the window's own.
 // A token from the terminal MonkeyMux itself runs in belongs to that terminal
-// and is never passed on.
+// and is never passed on. Windows matches variable names without regard to
+// case, so every spelling of the name is removed there.
 func withProgramResumeToken(env []string, token string) []string {
+	return withProgramResumeTokenFor(runtime.GOOS, env, token)
+}
+
+func withProgramResumeTokenFor(goos string, env []string, token string) []string {
 	prefix := programResumeTokenEnv + "="
 	result := make([]string, 0, len(env)+1)
 	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
+		name, _, _ := strings.Cut(entry, "=")
+		inherited := name == programResumeTokenEnv ||
+			goos == "windows" && strings.EqualFold(name, programResumeTokenEnv)
+		if !inherited {
 			result = append(result, entry)
 		}
 	}
@@ -159,7 +175,7 @@ func parseProgramResumeBody(
 			malformed = true
 			continue
 		}
-		if _, repeated := fields[key]; repeated || key == "mac" {
+		if _, repeated := fields[key]; repeated || key == "mac" || !isProgramResumeValue(value) {
 			malformed = true
 			continue
 		}
@@ -245,6 +261,21 @@ func isProgramResumeKey(key string) bool {
 	return true
 }
 
+// isProgramResumeValue reports whether a value keeps to the characters the
+// protocol sends: base64, digits, commas and key names.
+func isProgramResumeValue(value string) bool {
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case strings.IndexByte("_.,+/=-", char) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func isLowerHex(value string) bool {
 	for index := 0; index < len(value); index++ {
 		char := value[index]
@@ -303,7 +334,9 @@ func isProgramResumeProgram(program string) bool {
 	if filepath.IsAbs(program) {
 		return true
 	}
-	return !strings.ContainsAny(program, `/\`)
+	// A Windows drive-relative name such as C:nvim.exe has no separator but
+	// is still a path, resolved against that drive's current directory.
+	return filepath.VolumeName(program) == "" && !strings.ContainsAny(program, `/\`)
 }
 
 // applyProgramResumePayloadLocked applies the body of an OSC 7577 report.
@@ -362,8 +395,10 @@ func (w *muxWindow) programResumeCandidatesLocked() []programResumeCandidate {
 			continue
 		}
 		candidates = append(candidates, programResumeCandidate{
-			pid:      pid,
-			accepted: record.accepted,
+			pid:        pid,
+			accepted:   record.accepted,
+			started:    record.started,
+			identified: record.identified,
 			state: programResumeState{
 				Argv:        append([]string(nil), record.argv...),
 				Cwd:         record.cwd,
@@ -374,14 +409,79 @@ func (w *muxWindow) programResumeCandidatesLocked() []programResumeCandidate {
 	return candidates
 }
 
-// processTableForProgramResume reads the process table; tests replace it.
-var processTableForProgramResume = readProcessTable
+// processTableForProgramResume reads the process table and
+// inspectProgramResumeOwner one process; tests replace them.
+var (
+	processTableForProgramResume = readProcessTable
+	inspectProgramResumeOwner    = inspectProcess
+)
+
+// identifyProgramResumeOwners reads the start time of each owner whose report
+// is new, off the server lock because that can run ps. kill(2) alone cannot
+// tell an owner from a zombie or from a later process with the same pid; the
+// start time lets the restore snapshot tell them apart.
+func (s *muxServer) identifyProgramResumeOwners() {
+	type pending struct {
+		window   *muxWindow
+		pid      int
+		accepted uint64
+	}
+	var owners []pending
+	s.mu.Lock()
+	for _, window := range s.windows {
+		if window.closed {
+			continue
+		}
+		for pid, record := range window.programResume {
+			if len(record.argv) > 0 && !record.identified {
+				owners = append(owners, pending{window, pid, record.accepted})
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, owner := range owners {
+		snapshot := inspectProgramResumeOwner(owner.pid)
+		if !snapshot.known {
+			continue
+		}
+		s.mu.Lock()
+		record, kept := owner.window.programResume[owner.pid]
+		if kept && record.accepted == owner.accepted && !owner.window.closed {
+			if snapshot.running {
+				record.started, record.identified = snapshot.started, true
+				owner.window.programResume[owner.pid] = record
+			} else {
+				delete(owner.window.programResume, owner.pid)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// programResumeOwnerRuns reports whether a candidate's owner is still the
+// process that reported: running, not a zombie, and not a later process that
+// was given its pid.
+func programResumeOwnerRuns(candidate programResumeCandidate) bool {
+	snapshot := inspectProgramResumeOwner(candidate.pid)
+	if !snapshot.known {
+		return true
+	}
+	return snapshot.running &&
+		(!candidate.identified || snapshot.started.Equal(candidate.started))
+}
 
 // chooseProgramResume picks the one command a window resumes. A terminal has
 // one foreground job, so only one owner can come back: an ancestor wins over
 // its descendants, since resuming it brings back what it runs, and otherwise
 // the most recent report wins.
 func chooseProgramResume(candidates []programResumeCandidate) *programResumeState {
+	running := candidates[:0:0]
+	for _, candidate := range candidates {
+		if programResumeOwnerRuns(candidate) {
+			running = append(running, candidate)
+		}
+	}
+	candidates = running
 	if len(candidates) == 0 {
 		return nil
 	}

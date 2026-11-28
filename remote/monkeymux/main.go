@@ -7039,7 +7039,16 @@ func (s *muxServer) createWindowWithStarter(
 		name = filepath.Base(options.args[0])
 	} else if options.programResume != nil {
 		options.command = ""
-		cmd, resumedDirectly = programResumeCommand(shell, *options.programResume)
+		// The reported directory was validated as it is; resolving it again
+		// as typed text would trim it or settle for an ancestor.
+		resumeDirectory := cwd
+		if reported := options.programResume.Cwd; reported != "" {
+			resumeDirectory = reported
+			if directoryExists(reported) {
+				cwd = reported
+			}
+		}
+		cmd, resumedDirectly = programResumeCommand(shell, *options.programResume, resumeDirectory)
 		name = filepath.Base(options.programResume.Argv[0])
 	} else if strings.TrimSpace(options.command) != "" {
 		cmd = shellCommandForScript(shell, strings.TrimSpace(options.command))
@@ -7171,6 +7180,19 @@ func (s *muxServer) createWindowWithStarter(
 		cursorVisibilityKnown:     options.cursorVisibilityKnown,
 		privateModes:              copyPrivateModes(options.privateModes),
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
+	}
+	if resume := options.programResume; resume != nil && (resumedDirectly || !resume.ShellWindow) {
+		// The window's process becomes the resumed program, which owns the
+		// command until it reports, clears or exits, so a second upgrade
+		// before its first report still brings it back. A shell window's
+		// program is a child whose pid is not known here; it reports when it
+		// starts.
+		window.programResumeClock = 1
+		window.programResume = map[int]programResumeRecord{proc.Pid(): {
+			argv:     append([]string(nil), resume.Argv...),
+			cwd:      resume.Cwd,
+			accepted: 1,
+		}}
 	}
 	s.windows = append(s.windows, window)
 	// The pty started with the cell size known then; a client may have
@@ -19746,6 +19768,7 @@ func (s *muxServer) startAgentSessionTitleRefresher() {
 				return
 			}
 			s.dropExitedProgramStatus()
+			s.identifyProgramResumeOwners()
 		}
 	}()
 }

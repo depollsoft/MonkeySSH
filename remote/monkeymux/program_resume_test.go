@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -91,6 +92,11 @@ func TestParseProgramResumeBody(t *testing.T) {
 			body:    signedProgramResume(base+":future=x:"+programResumeArgv("vi"), programResumeTestToken),
 			verdict: programResumeAccepted,
 			argv:    []string{"vi"},
+		},
+		{
+			name:    "value outside the protocol's characters",
+			body:    signedProgramResume(base+":future=hello world:"+programResumeArgv("vi"), programResumeTestToken),
+			verdict: programResumeRejected,
 		},
 		{
 			name:    "need naming known keys",
@@ -284,6 +290,15 @@ func TestProgramResumeTokenReplacesAnInheritedOne(t *testing.T) {
 	if len(env) != 0 {
 		t.Fatalf("the outer terminal's token was passed on: %q", env)
 	}
+	// Windows reads osc7577_token as the same variable.
+	env = withProgramResumeTokenFor("windows", []string{"osc7577_token=outer", "A=1"}, "")
+	if want := []string{"A=1"}; !reflect.DeepEqual(env, want) {
+		t.Fatalf("environment = %q, want %q", env, want)
+	}
+	env = withProgramResumeTokenFor("linux", []string{"osc7577_token=other", "A=1"}, "inner")
+	if want := []string{"osc7577_token=other", "A=1", "OSC7577_TOKEN=inner"}; !reflect.DeepEqual(env, want) {
+		t.Fatalf("environment = %q, want %q", env, want)
+	}
 }
 
 // reportProgramResume sends a report through the window's output scan in two
@@ -380,8 +395,22 @@ func TestWindowKeepsABoundedNumberOfProgramResumeOwners(t *testing.T) {
 }
 
 func TestChooseProgramResumePrefersAnAncestor(t *testing.T) {
-	previous := processTableForProgramResume
-	t.Cleanup(func() { processTableForProgramResume = previous })
+	previous, previousInspect := processTableForProgramResume, inspectProgramResumeOwner
+	t.Cleanup(func() {
+		processTableForProgramResume, inspectProgramResumeOwner = previous, previousInspect
+	})
+	started := time.Unix(1795543200, 0)
+	inspectProgramResumeOwner = func(pid int) processSnapshot {
+		switch pid {
+		case 50: // a zombie
+			return processSnapshot{known: true, started: started}
+		case 60: // a later process with the owner's pid
+			return processSnapshot{known: true, running: true, started: started.Add(time.Hour)}
+		case 70: // nothing can be learned
+			return processSnapshot{}
+		}
+		return processSnapshot{known: true, running: true, started: started}
+	}
 	processTableForProgramResume = func() map[int]processInfo {
 		return map[int]processInfo{
 			10: {pid: 10, ppid: 1},
@@ -406,6 +435,25 @@ func TestChooseProgramResumePrefersAnAncestor(t *testing.T) {
 	got = chooseProgramResume([]programResumeCandidate{candidate(20, 3, "first"), candidate(40, 4, "second")})
 	if got == nil || got.Argv[0] != "second" {
 		t.Fatalf("chose %+v, want the most recent report", got)
+	}
+	// An owner that is a zombie, or whose pid now names another process, has
+	// exited; one that cannot be inspected is taken at kill(2)'s word.
+	identified := func(pid int, name string) programResumeCandidate {
+		entry := candidate(pid, 9, name)
+		entry.started, entry.identified = started, true
+		return entry
+	}
+	got = chooseProgramResume([]programResumeCandidate{
+		identified(50, "zombie"), identified(60, "reused"), candidate(20, 1, "running"),
+	})
+	if got == nil || got.Argv[0] != "running" {
+		t.Fatalf("chose %+v, want the owner that still runs", got)
+	}
+	if got = chooseProgramResume([]programResumeCandidate{identified(60, "reused")}); got != nil {
+		t.Fatalf("chose %+v for a pid that names another process", got)
+	}
+	if got = chooseProgramResume([]programResumeCandidate{identified(70, "unknown")}); got == nil {
+		t.Fatal("dropped an owner that could not be inspected")
 	}
 }
 
@@ -475,12 +523,9 @@ func exitedProcessID(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	process, err := os.StartProcess(executable, []string{executable, "-test.run=^$"}, &os.ProcAttr{})
-	if err != nil {
+	command := exec.Command(executable, "-test.run=^$")
+	if err := command.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := process.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	return process.Pid
+	return command.Process.Pid
 }

@@ -317,19 +317,26 @@ before reading anything else, so output that does not hold the token (a file
 printed to the terminal, a remote host) cannot create or remove a command.
 Parsing is strict: a report that passes those checks but breaks a rule (a
 relative program or directory, both `argv` and `clear`, a `need` key MonkeyMux
-lacks, bad base64 or control characters, more than 256 arguments) removes the
+lacks, a value with a character the protocol does not send, bad base64 or
+control characters, more than 256 arguments) removes the
 owner's command instead of leaving an older one in place. A command ends when
 its owning process exits or sends `clear=1`; RIS, prompt marks and screen
-switches leave it alone.
+switches leave it alone. MonkeyMux records when each owner started, so a
+zombie or a later process that was given the owner's pid does not keep the
+command alive.
 
 The upgrade restore snapshot carries one command per window, never the token.
 When several processes of a window reported, an ancestor wins over what it
 started, then the most recent report. The restored window runs the command in
 the reported directory (or the window's own when none was reported) from a
 login, interactive shell that has read its startup files, with a new token.
-The arguments are passed as arguments, never as shell text, and `env` starts
-the program so that no shell function, alias or builtin can stand in for it;
-a program name containing `=` is refused for that reason. A window that was a
+That shell hands the directory and the arguments, as arguments and never as
+shell text, to a plain `/bin/sh` that changes to the directory (so a startup
+file that moved elsewhere does not matter) and lets `env` start the program,
+so that no shell function, alias or builtin can stand in for it; a program
+name containing `=` is refused for that reason. The resumed program owns the
+command until it reports, clears or exits, so a second upgrade still brings
+it back (a shell window's program has to report first). A window that was a
 shell returns to a shell when the program ends. The command is not run when
 its directory is gone, when the default shell is not a POSIX shell, or when
 MonkeyMux already knows the agent session to resume, which also restores the

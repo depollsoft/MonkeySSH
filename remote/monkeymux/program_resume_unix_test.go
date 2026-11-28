@@ -41,7 +41,14 @@ func programResumeTestShells() []string {
 func TestProgramResumeSurvivesARestore(t *testing.T) {
 	for _, shell := range programResumeTestShells() {
 		t.Run(filepath.Base(shell), func(t *testing.T) {
-			setTestHomeDir(t, t.TempDir())
+			// A startup file that changes directory must not move the program.
+			home := t.TempDir()
+			for _, startup := range []string{".profile", ".bash_profile", ".zshrc"} {
+				if err := os.WriteFile(filepath.Join(home, startup), []byte("cd /\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setTestHomeDir(t, home)
 			t.Setenv("SHELL", shell)
 			t.Setenv("ENV", "")
 			t.Setenv("BASH_ENV", "")
@@ -172,6 +179,16 @@ func TestProgramResumeNeverRunsAShellBuiltin(t *testing.T) {
 			}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			// The resumed program owns its command until it reports, so a
+			// second upgrade before then still brings it back.
+			restore := server.restoreSnapshot()
+			if len(restore.Windows) == 0 {
+				t.Fatal("no window to restore")
+			}
+			last := restore.Windows[len(restore.Windows)-1].ProgramResume
+			if last == nil || len(last.Argv) != 3 || last.Argv[0] != "/bin/sh" {
+				t.Fatalf("the resumed program's command was not carried over: %+v", last)
 			}
 			waitForFile(t, done)
 			if _, err := os.Stat(pwned); err == nil {
