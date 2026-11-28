@@ -13,8 +13,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/acp_protocol.dart';
 import '../models/acp_provider.dart';
-import 'acp_client.dart';
-import 'acp_json_rpc_connection.dart';
 import 'acp_ssh_exec_transport.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_acp_bridge_service.dart';
@@ -259,58 +257,27 @@ class AcpCustomProviderHostService {
       session.execute(command),
       _sessionListTimeout,
     );
-    final client = AcpClient(
-      AcpJsonRpcConnection(transport: AcpSshExecTransport(exec)),
+    final outcome = await listRemoteAcpSessionsOverExec(
+      exec,
+      timeout: _sessionListTimeout,
+      max: max,
+      maxPagesPerDirectory: _maxSessionListPages,
+      destroyAbandonedExec: true,
     );
-    try {
-      final initialization = await client.initialize(
-        capabilities: const AcpClientCapabilities(
-          fileSystem: AcpFileSystemCapabilities(),
-          booleanConfigOptions: false,
-        ),
-        timeout: _sessionListTimeout,
+    if (!outcome.supported) {
+      return const AcpCustomAgentSessionListing(
+        AcpCustomAgentSessionListStatus.unsupportedAgent,
       );
-      if (!initialization.agentCapabilities.session.list) {
-        return const AcpCustomAgentSessionListing(
-          AcpCustomAgentSessionListStatus.unsupportedAgent,
-        );
-      }
-      final sessions = <String, AcpSessionInfo>{};
-      final seenCursors = <String>{};
-      String? cursor;
-      for (var page = 0; page < _maxSessionListPages; page++) {
-        final result = await client.listSessions(
-          cursor: cursor,
-          timeout: _sessionListTimeout,
-        );
-        for (final info in result.sessions) {
-          sessions.putIfAbsent(info.sessionId, () => info);
-        }
-        cursor = result.nextCursor;
-        if (cursor == null ||
-            sessions.length >= max ||
-            !seenCursors.add(cursor)) {
-          break;
-        }
-      }
-      final ordered = sessions.values.toList()
-        ..sort(
-          (a, b) =>
-              acpSessionInfoUpdatedAt(b).compareTo(acpSessionInfoUpdatedAt(a)),
-        );
-      return AcpCustomAgentSessionListing(
-        AcpCustomAgentSessionListStatus.listed,
-        List<AcpSessionInfo>.unmodifiable(ordered.take(max)),
-      );
-    } finally {
-      try {
-        await client.close();
-      } finally {
-        // Closing the client only sends EOF; an agent that ignores it would
-        // keep the channel and its process. Destroy it after a short grace.
-        await closeAbandonedSshExec(exec);
-      }
     }
+    final ordered = outcome.sessions.toList()
+      ..sort(
+        (a, b) =>
+            acpSessionInfoUpdatedAt(b).compareTo(acpSessionInfoUpdatedAt(a)),
+      );
+    return AcpCustomAgentSessionListing(
+      AcpCustomAgentSessionListStatus.listed,
+      List<AcpSessionInfo>.unmodifiable(ordered.take(max)),
+    );
   }
 }
 

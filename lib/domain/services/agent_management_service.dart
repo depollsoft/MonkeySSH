@@ -19,6 +19,7 @@ import 'agent_usage_posix_command.dart';
 import 'agent_usage_windows_command.dart';
 import 'diagnostics_log_service.dart';
 import 'monetization_service.dart';
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -663,8 +664,8 @@ String? buildAgentInstallCommand(
         plainTextOutput: true,
       );
     }
-    return '${_profilePrefix}node -e ${_shellQuote(repairScript)} '
-        '${_shellQuote(executablePath)}';
+    return '${_profilePrefix}node -e ${shellEscapePosix(repairScript)} '
+        '${shellEscapePosix(executablePath)}';
   }
   if (update &&
       definition.launcherOwnsUpdates &&
@@ -681,7 +682,7 @@ String? buildAgentInstallCommand(
       );
     }
     return '$_profilePrefix${_posixEnvironment(definition.syncUpdateEnvironment)}'
-        '${_shellQuote(executablePath)} ${arguments.join(' ')}';
+        '${shellEscapePosix(executablePath)} ${arguments.join(' ')}';
   }
   // Homebrew owns the files of a copy it installed, and some updaters refuse
   // one (`hermes update`).
@@ -704,14 +705,14 @@ String? buildAgentInstallCommand(
     final environment = definition.updateEnvironment.isEmpty
         ? ''
         : 'env ${_posixEnvironment(definition.updateEnvironment)}';
-    return '$_profilePrefix$environment${_shellQuote(executablePath)} '
-        '${definition.selfUpdateArguments.map(_shellQuote).join(' ')}';
+    return '$_profilePrefix$environment${shellEscapePosix(executablePath)} '
+        '${definition.selfUpdateArguments.map(shellEscapePosix).join(' ')}';
   }
   if (update && detectionSource == 'PATH') return null;
   if (update && homebrewCopy) {
     return windows
         ? null
-        : '$_profilePrefix brew upgrade ${_shellQuote(formula)}';
+        : '$_profilePrefix brew upgrade ${shellEscapePosix(formula)}';
   }
   final installerUrl = windows
       ? definition.windowsInstallerUrl
@@ -781,18 +782,18 @@ String? buildAgentInstallCommand(
   }
   final npmInstall =
       'npm install -g --foreground-scripts --ignore-scripts=false '
-      '${_shellQuote('--allow-scripts=$package')} ${_shellQuote(package)}@latest';
+      '${shellEscapePosix('--allow-scripts=$package')} ${shellEscapePosix(package)}@latest';
   return switch (definition.registry) {
     AgentPackageRegistry.npm =>
       repair
-          ? '$_profilePrefix npm uninstall -g ${_shellQuote(package)} && $npmInstall'
+          ? '$_profilePrefix npm uninstall -g ${shellEscapePosix(package)} && $npmInstall'
           : '$_profilePrefix $npmInstall',
     AgentPackageRegistry.pipx =>
       repair
-          ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${_shellQuote(spec)}' : 'pipx reinstall ${_shellQuote(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
+          ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${shellEscapePosix(spec)}' : 'pipx reinstall ${shellEscapePosix(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${shellEscapePosix(spec)}'
           : update
-          ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(spec)}'
-          : '$_profilePrefix pipx install ${_shellQuote(spec)} || python3 -m pip install --user ${_shellQuote(spec)}',
+          ? '$_profilePrefix pipx upgrade ${shellEscapePosix(package)} || python3 -m pip install --user --upgrade ${shellEscapePosix(spec)}'
+          : '$_profilePrefix pipx install ${shellEscapePosix(spec)} || python3 -m pip install --user ${shellEscapePosix(spec)}',
     null => null,
   };
 }
@@ -2262,10 +2263,10 @@ String buildAgentBatchProbeCommand(
   for (var index = 0; index < definitions.length; index += 1) {
     final definition = definitions[index];
     command
-      ..write('( printf ${_shellQuote('$_runtimeMarker%s\\n')} ')
-      ..write('${_shellQuote(definition.id)}; ')
+      ..write('( printf ${shellEscapePosix('$_runtimeMarker%s\\n')} ')
+      ..write('${shellEscapePosix(definition.id)}; ')
       ..write(_buildPosixProbeBody(definition))
-      ..write('; printf ${_shellQuote('$_runtimeEndMarker\\n')} ) ')
+      ..write('; printf ${shellEscapePosix('$_runtimeEndMarker\\n')} ) ')
       ..write('> "\$__fl_probe_dir/$index" 2>&1 & ')
       ..write('__fl_probe_pids="\$__fl_probe_pids \$!"; ');
   }
@@ -2276,7 +2277,7 @@ String buildAgentBatchProbeCommand(
     command.write('cat "\$__fl_probe_dir/$index"; ');
   }
   command.write(r'rm -rf "$__fl_probe_dir"; ');
-  return '${_profilePrefix}sh -c ${_shellQuote(command.toString())}';
+  return '${_profilePrefix}sh -c ${shellEscapePosix(command.toString())}';
 }
 
 /// Builds one remote command for package ownership and upstream versions.
@@ -2399,8 +2400,8 @@ String buildAgentMetadataProbeCommand(
     final package = definition.packageName;
     final formula = definition.homebrewFormula;
     command
-      ..write('printf ${_shellQuote('$_runtimeMarker%s\\n')} ')
-      ..write('${_shellQuote(definition.id)}; ')
+      ..write('printf ${shellEscapePosix('$_runtimeMarker%s\\n')} ')
+      ..write('${shellEscapePosix(definition.id)}; ')
       ..write('__fl_source=; __fl_installed=; __fl_latest=; __fl_line=; ');
     if (definition.installerLayout case final layout?) {
       command.write(_posixInstallerLayoutSource(definition, layout));
@@ -2411,31 +2412,31 @@ String buildAgentMetadataProbeCommand(
       // copy ahead on PATH updates its own way.
       command.write(
         'if [ -z "\$__fl_source" ]; then '
-        '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_brew_global" | '
-        'grep -E ${_shellQuote('^$formula([[:space:]]|\$)')} | head -n 1); '
+        '__fl_line=\$(printf ${shellEscapePosix(r'%s\n')} "\$__fl_brew_global" | '
+        'grep -E ${shellEscapePosix('^$formula([[:space:]]|\$)')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
         '${_posixResolvedLauncher(definition)}'
-        'case "\$__fl_launcher" in */Cellar/${_shellQuote(formula)}/*|*/Caskroom/${_shellQuote(formula)}/*) '
-        '__fl_source=${_shellQuote('Homebrew')}; '
-        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')});; '
+        'case "\$__fl_launcher" in */Cellar/${shellEscapePosix(formula)}/*|*/Caskroom/${shellEscapePosix(formula)}/*) '
+        '__fl_source=${shellEscapePosix('Homebrew')}; '
+        '__fl_installed=\$(printf ${shellEscapePosix(r'%s\n')} "\$__fl_line" | awk ${shellEscapePosix('{print \u00242}')});; '
         'esac; fi; fi; ',
       );
     }
     if (package != null && definition.registry == AgentPackageRegistry.npm) {
       command.write(
         'if [ -z "\$__fl_source" ]; then '
-        '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_npm_global" | '
-        'grep -F -- ${_shellQuote('$package@')} | head -n 1); '
+        '__fl_line=\$(printf ${shellEscapePosix(r'%s\n')} "\$__fl_npm_global" | '
+        'grep -F -- ${shellEscapePosix('$package@')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
-        '__fl_source=${_shellQuote('npm global')}; '
-        '__fl_prefix=${_shellQuote('$package@')}; '
+        '__fl_source=${shellEscapePosix('npm global')}; '
+        '__fl_prefix=${shellEscapePosix('$package@')}; '
         '__fl_installed=\u0024{__fl_line##*"\$__fl_prefix"}; '
         '__fl_installed=\u0024{__fl_installed%% *}; '
         'fi; fi; ',
       );
       if (definition.officialVersionLookup == null) {
         command.write(
-          '__fl_latest=\$(__fl_agent_version npm view ${_shellQuote(package)} version '
+          '__fl_latest=\$(__fl_agent_version npm view ${shellEscapePosix(package)} version '
           '--fetch-retries=0 --fetch-timeout=2500 2>/dev/null | head -n 1); ',
         );
       }
@@ -2443,22 +2444,22 @@ String buildAgentMetadataProbeCommand(
         definition.registry == AgentPackageRegistry.pipx) {
       command.write(
         'if [ -z "\$__fl_source" ]; then '
-        '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_pipx_global" | '
-        'grep -F -- ${_shellQuote(package)} | head -n 1); '
+        '__fl_line=\$(printf ${shellEscapePosix(r'%s\n')} "\$__fl_pipx_global" | '
+        'grep -F -- ${shellEscapePosix(package)} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
-        '__fl_source=${_shellQuote('pipx')}; '
-        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')}); '
+        '__fl_source=${shellEscapePosix('pipx')}; '
+        '__fl_installed=\$(printf ${shellEscapePosix(r'%s\n')} "\$__fl_line" | awk ${shellEscapePosix('{print \u00242}')}); '
         'fi; fi; ',
       );
       if (definition.officialVersionLookup == null) {
         command.write(
-          '__fl_latest=\$(__fl_agent_version python3 -m pip index versions ${_shellQuote(package)} 2>/dev/null | head -n 1); ',
+          '__fl_latest=\$(__fl_agent_version python3 -m pip index versions ${shellEscapePosix(package)} 2>/dev/null | head -n 1); ',
         );
       }
     }
     final official = _fallbackVersionLookup(definition);
     if (official != null) {
-      var uri = _shellQuote(official.url);
+      var uri = shellEscapePosix(official.url);
       if (definition.latestVersionUrlPlatformSuffix) {
         command.write(
           r'__fl_os=$(uname -s | tr "[:upper:]" "[:lower:]"); '
@@ -2471,20 +2472,20 @@ String buildAgentMetadataProbeCommand(
       }
       command.write(
         'if [ -z "\$__fl_latest" ]; then __fl_latest=\$(curl -fsSL --max-time 5 $uri 2>/dev/null | '
-        'grep -Eo ${_shellQuote(official.pattern)} | head -n 1); fi; ',
+        'grep -Eo ${shellEscapePosix(official.pattern)} | head -n 1); fi; ',
       );
     }
     command
       ..write(
-        '[ -n "\$__fl_source" ] && printf ${_shellQuote('$_sourceMarker%s\\n')} "\$__fl_source"; ',
+        '[ -n "\$__fl_source" ] && printf ${shellEscapePosix('$_sourceMarker%s\\n')} "\$__fl_source"; ',
       )
       ..write(
-        '[ -n "\$__fl_installed" ] && printf ${_shellQuote('$_installedMarker%s\\n')} "\$__fl_installed"; ',
+        '[ -n "\$__fl_installed" ] && printf ${shellEscapePosix('$_installedMarker%s\\n')} "\$__fl_installed"; ',
       )
       ..write(
-        '[ -n "\$__fl_latest" ] && printf ${_shellQuote('$_latestMarker%s\\n')} "\$__fl_latest"; ',
+        '[ -n "\$__fl_latest" ] && printf ${shellEscapePosix('$_latestMarker%s\\n')} "\$__fl_latest"; ',
       )
-      ..write('printf ${_shellQuote('$_runtimeEndMarker\\n')}; ')
+      ..write('printf ${shellEscapePosix('$_runtimeEndMarker\\n')}; ')
       ..write(') > "\$__fl_meta_dir/$index" 2>/dev/null & ');
     if ((index + 1) % 4 == 0) command.write('wait; ');
   }
@@ -2525,9 +2526,9 @@ String _buildWindowsProbeBody(AgentRuntimeDefinition definition) {
 }
 
 String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
-  final candidates = definition.executableNames.map(_shellQuote).join(' ');
+  final candidates = definition.executableNames.map(shellEscapePosix).join(' ');
   final versionArguments = definition.versionArguments
-      .map(_shellQuote)
+      .map(shellEscapePosix)
       .join(' ');
   final versionEnvironment = definition.versionEnvironment.isEmpty
       ? ''
@@ -2537,23 +2538,23 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
             'if [ -n "\$__fl_version_file" ]; then '
             'version_output=; '
             'if __fl_agent_version $versionEnvironment"\$resolved" $versionArguments >"\$__fl_version_file" 2>&1; then '
-            'version_output=\$(head -n 4 "\$__fl_version_file" | tr ${_shellQuote(r'\r\n')} ${_shellQuote('  ')}); '
-            'elif grep -Eiq ${_shellQuote(_skippedPostinstallPattern)} "\$__fl_version_file"; then '
-            'printf ${_shellQuote('$_repairMarker\n')}; '
+            'version_output=\$(head -n 4 "\$__fl_version_file" | tr ${shellEscapePosix(r'\r\n')} ${shellEscapePosix('  ')}); '
+            'elif grep -Eiq ${shellEscapePosix(_skippedPostinstallPattern)} "\$__fl_version_file"; then '
+            'printf ${shellEscapePosix('$_repairMarker\n')}; '
             'fi; '
             'rm -f "\$__fl_version_file"; '
             '${definition.posixVersionFallback ?? ''}'
-            'printf ${_shellQuote('$_versionMarker%s\\n')} "\$version_output"; '
+            'printf ${shellEscapePosix('$_versionMarker%s\\n')} "\$version_output"; '
             'fi; '
       : definition.packageName != null &&
             definition.registry == AgentPackageRegistry.npm
-      ? 'version_output=\$(__fl_agent_version node -e ${_shellQuote(_agentPackageVersionScript)} "\$resolved" ${_shellQuote(definition.packageName!)} 2>/dev/null); '
-            'printf ${_shellQuote('$_versionMarker%s\\n')} "\$version_output"; '
+      ? 'version_output=\$(__fl_agent_version node -e ${shellEscapePosix(_agentPackageVersionScript)} "\$resolved" ${shellEscapePosix(definition.packageName!)} 2>/dev/null); '
+            'printf ${shellEscapePosix('$_versionMarker%s\\n')} "\$version_output"; '
       : '';
   return 'for candidate in $candidates; do '
       r'resolved=$(command -v "$candidate" 2>/dev/null || true); '
       r'[ -z "$resolved" ] && continue; '
-      'printf ${_shellQuote('$_pathMarker%s\\n')} "\$resolved"; '
+      'printf ${shellEscapePosix('$_pathMarker%s\\n')} "\$resolved"; '
       '$versionProbe'
       'break; done';
 }
@@ -2646,8 +2647,8 @@ String _posixInstallerLayoutSource(
 ) =>
     '${_posixResolvedLauncher(definition)}'
     r'case "$__fl_launcher" in */bin/*) '
-    'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
-    '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
+    'if [ -f "\${__fl_launcher%/bin/*}"${shellEscapePosix('/${layout.marker}')} ]; then '
+    '__fl_source=${shellEscapePosix(layout.source)}; fi;; esac; ';
 
 /// Sets `__fl_launcher` to the physical path of the first of [definition]'s
 /// executables on PATH. Symlinks are followed by hand, as the launchers do,
@@ -2655,7 +2656,7 @@ String _posixInstallerLayoutSource(
 /// directory, so a symlinked `bin` directory resolves too.
 String _posixResolvedLauncher(AgentRuntimeDefinition definition) =>
     '__fl_launcher=; for __fl_name in '
-    '${definition.executableNames.map(_shellQuote).join(' ')}; do '
+    '${definition.executableNames.map(shellEscapePosix).join(' ')}; do '
     r'__fl_launcher=$(command -v "$__fl_name" 2>/dev/null) && break; done; '
     r'__fl_hops=0; while [ -n "$__fl_launcher" ] && [ "$__fl_hops" -lt 16 ]; do '
     r'__fl_dir=$(CDPATH= cd -P "${__fl_launcher%/*}" 2>/dev/null && pwd -P) || break; '
@@ -2690,8 +2691,6 @@ String _windowsInstallerLayoutSource(
     '${powerShellSingleQuote(layout.marker.replaceAll('/', r'\'))})}}catch{};break};'
     'if(\$__flManaged){[void]\$__flOut.AppendLine('
     '${powerShellSingleQuote('$_sourceMarker${layout.source}')})};';
-
-String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
 
 /// `K=V K2=V2 ` assignments for a POSIX command prefix. Keys are identifiers
 /// and values plain tokens, so no quoting is needed.
@@ -2730,10 +2729,11 @@ String _buildOfficialAgentInstallerCommand(
   }
   final script =
       r'__fl_file=$(mktemp "${TMPDIR:-/tmp}/monkeyssh-install.XXXXXX") || exit 1; '
-      'if curl -fLsS --connect-timeout 15 --max-time 60 ${_shellQuote(url)} -o "\$__fl_file"; then '
+      'if curl -fLsS --connect-timeout 15 --max-time 60 ${shellEscapePosix(url)} -o "\$__fl_file"; then '
       r'bash "$__fl_file"; __fl_code=$?; else __fl_code=$?; fi; '
       r'rm -f "$__fl_file"; exit "$__fl_code"';
-  final run = '${_posixEnvironment(environment)}sh -c ${_shellQuote(script)}';
+  final run =
+      '${_posixEnvironment(environment)}sh -c ${shellEscapePosix(script)}';
   if (!userPath) return '$_profilePrefix$run';
   // Debian and Ubuntu profiles add ~/.local/bin only once it exists, so it
   // exists while they are read and is removed again if nothing went in.

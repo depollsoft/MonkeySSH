@@ -48,18 +48,15 @@ void openPushNotificationStack({
   required GoRouter router,
   required PushNavigationTarget? target,
   required String notificationTapId,
-}) {
-  router.go(buildTmuxAlertHomeLocation());
-  if (target == null || target.kind == PushEventKind.test) return;
-  unawaited(
-    router.push<void>(
-      buildPushNotificationTerminalLocation(
-        target,
-        notificationTapId: notificationTapId,
-      ),
-    ),
-  );
-}
+}) => openNotificationStack(
+  router: router,
+  targetLocation: target == null || target.kind == PushEventKind.test
+      ? null
+      : buildPushNotificationTerminalLocation(
+          target,
+          notificationTapId: notificationTapId,
+        ),
+);
 
 /// Snackbar text for a push that arrived while the app was open.
 String pushForegroundMessage(PushEventKind kind) => switch (kind) {

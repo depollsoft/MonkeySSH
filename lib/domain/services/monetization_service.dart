@@ -1076,6 +1076,46 @@ _CatalogOfferCandidate? _buildCatalogOfferCandidate(ProductDetails details) {
   };
 }
 
+_CatalogOfferCandidate _buildOfferCandidate({
+  required ProductDetails details,
+  required String groupKey,
+  required int preferenceRank,
+  required MonetizationBillingPeriod billingPeriod,
+  String? id,
+  String? priceLabel,
+  double? rawPrice,
+  String? currencyCode,
+  String? currencySymbol,
+  String? introductoryOfferLabel,
+  String? offerToken,
+}) {
+  final effectivePriceLabel = priceLabel ?? details.price;
+  return _CatalogOfferCandidate(
+    groupKey: groupKey,
+    preferenceRank: preferenceRank,
+    offer: MonetizationOffer(
+      id: id ?? details.id,
+      productId: details.id,
+      billingPeriod: billingPeriod,
+      planLabel: billingPeriod.label,
+      priceLabel: effectivePriceLabel,
+      displayPriceLabel: _buildDisplayPriceLabel(
+        effectivePriceLabel,
+        billingPeriod,
+      ),
+      rawPrice: rawPrice ?? details.rawPrice,
+      currencyCode: currencyCode ?? details.currencyCode,
+      currencySymbol: currencySymbol ?? details.currencySymbol,
+      detailLabel: _defaultOfferDetailLabel(billingPeriod),
+      introductoryOfferLabel: introductoryOfferLabel,
+    ),
+    purchaseOption: _MonetizationPurchaseOption(
+      productDetails: details,
+      offerToken: offerToken,
+    ),
+  );
+}
+
 _CatalogOfferCandidate? _buildGooglePlayOfferCandidate(
   GooglePlayProductDetails details,
 ) {
@@ -1083,10 +1123,7 @@ _CatalogOfferCandidate? _buildGooglePlayOfferCandidate(
   final offerDetails = subscriptionIndex == null
       ? null
       : details.productDetails.subscriptionOfferDetails?[subscriptionIndex];
-  if (offerDetails == null) {
-    return null;
-  }
-  if (offerDetails.pricingPhases.isEmpty) {
+  if (offerDetails == null || offerDetails.pricingPhases.isEmpty) {
     return null;
   }
 
@@ -1097,65 +1134,42 @@ _CatalogOfferCandidate? _buildGooglePlayOfferCandidate(
     recurringIsoPeriod: recurringPhase.billingPeriod,
   );
   final groupKey = '${details.id}:${offerDetails.basePlanId}';
-  final offerId = '$groupKey:${offerDetails.offerId ?? 'base'}';
   final priceLabel = recurringPhase.formattedPrice;
 
-  return _CatalogOfferCandidate(
+  return _buildOfferCandidate(
+    details: details,
     groupKey: groupKey,
     preferenceRank: _googlePlayOfferPriority(offerDetails),
-    offer: MonetizationOffer(
-      id: offerId,
-      productId: details.id,
-      billingPeriod: billingPeriod,
-      planLabel: billingPeriod.label,
-      priceLabel: priceLabel,
-      displayPriceLabel: _buildDisplayPriceLabel(priceLabel, billingPeriod),
-      rawPrice: recurringPhase.priceAmountMicros / 1000000,
-      currencyCode: recurringPhase.priceCurrencyCode,
-      currencySymbol: _extractCurrencySymbol(
-        priceLabel,
-        recurringPhase.priceCurrencyCode,
-      ),
-      detailLabel: _defaultOfferDetailLabel(billingPeriod),
-      introductoryOfferLabel: _buildGooglePlayIntroductoryOfferLabel(
-        offerDetails.pricingPhases,
-      ),
+    billingPeriod: billingPeriod,
+    id: '$groupKey:${offerDetails.offerId ?? 'base'}',
+    priceLabel: priceLabel,
+    rawPrice: recurringPhase.priceAmountMicros / 1000000,
+    currencyCode: recurringPhase.priceCurrencyCode,
+    currencySymbol: _extractCurrencySymbol(
+      priceLabel,
+      recurringPhase.priceCurrencyCode,
     ),
-    purchaseOption: _MonetizationPurchaseOption(
-      productDetails: details,
-      offerToken: details.offerToken,
+    introductoryOfferLabel: _buildGooglePlayIntroductoryOfferLabel(
+      offerDetails.pricingPhases,
     ),
+    offerToken: details.offerToken,
   );
 }
 
 _CatalogOfferCandidate _buildAppStoreOfferCandidate(
   AppStoreProductDetails details,
-) {
-  final billingPeriod = _billingPeriodFromIdentifiers(
+) => _buildOfferCandidate(
+  details: details,
+  groupKey: details.id,
+  preferenceRank: details.skProduct.introductoryPrice == null ? 0 : 1,
+  billingPeriod: _billingPeriodFromIdentifiers(
     productId: details.id,
     storeKitPeriod: details.skProduct.subscriptionPeriod,
-  );
-  return _CatalogOfferCandidate(
-    groupKey: details.id,
-    preferenceRank: details.skProduct.introductoryPrice == null ? 0 : 1,
-    offer: MonetizationOffer(
-      id: details.id,
-      productId: details.id,
-      billingPeriod: billingPeriod,
-      planLabel: billingPeriod.label,
-      priceLabel: details.price,
-      displayPriceLabel: _buildDisplayPriceLabel(details.price, billingPeriod),
-      rawPrice: details.rawPrice,
-      currencyCode: details.currencyCode,
-      currencySymbol: details.currencySymbol,
-      detailLabel: _defaultOfferDetailLabel(billingPeriod),
-      introductoryOfferLabel: _buildStoreKitIntroductoryOfferLabel(
-        details.skProduct.introductoryPrice,
-      ),
-    ),
-    purchaseOption: _MonetizationPurchaseOption(productDetails: details),
-  );
-}
+  ),
+  introductoryOfferLabel: _buildStoreKitIntroductoryOfferLabel(
+    details.skProduct.introductoryPrice,
+  ),
+);
 
 _CatalogOfferCandidate _buildAppStore2OfferCandidate(
   AppStoreProduct2Details details,
@@ -1164,53 +1178,28 @@ _CatalogOfferCandidate _buildAppStore2OfferCandidate(
   final introductoryOffer = subscription?.promotionalOffers.firstWhereOrNull(
     (offer) => offer.type == SK2SubscriptionOfferType.introductory,
   );
-  final billingPeriod = _billingPeriodFromIdentifiers(
-    productId: details.id,
-    storeKit2Period: subscription?.subscriptionPeriod,
-  );
-  return _CatalogOfferCandidate(
+  return _buildOfferCandidate(
+    details: details,
     groupKey: details.id,
     preferenceRank: introductoryOffer == null ? 0 : 1,
-    offer: MonetizationOffer(
-      id: details.id,
+    billingPeriod: _billingPeriodFromIdentifiers(
       productId: details.id,
-      billingPeriod: billingPeriod,
-      planLabel: billingPeriod.label,
-      priceLabel: details.price,
-      displayPriceLabel: _buildDisplayPriceLabel(details.price, billingPeriod),
-      rawPrice: details.rawPrice,
-      currencyCode: details.currencyCode,
-      currencySymbol: details.currencySymbol,
-      detailLabel: _defaultOfferDetailLabel(billingPeriod),
-      introductoryOfferLabel: _buildStoreKit2IntroductoryOfferLabel(
-        introductoryOffer,
-        details.currencySymbol,
-      ),
+      storeKit2Period: subscription?.subscriptionPeriod,
     ),
-    purchaseOption: _MonetizationPurchaseOption(productDetails: details),
+    introductoryOfferLabel: _buildStoreKit2IntroductoryOfferLabel(
+      introductoryOffer,
+      details.currencySymbol,
+    ),
   );
 }
 
-_CatalogOfferCandidate _buildFallbackOfferCandidate(ProductDetails details) {
-  final billingPeriod = _billingPeriodFromIdentifiers(productId: details.id);
-  return _CatalogOfferCandidate(
-    groupKey: details.id,
-    preferenceRank: 0,
-    offer: MonetizationOffer(
-      id: details.id,
-      productId: details.id,
-      billingPeriod: billingPeriod,
-      planLabel: billingPeriod.label,
-      priceLabel: details.price,
-      displayPriceLabel: _buildDisplayPriceLabel(details.price, billingPeriod),
-      rawPrice: details.rawPrice,
-      currencyCode: details.currencyCode,
-      currencySymbol: details.currencySymbol,
-      detailLabel: _defaultOfferDetailLabel(billingPeriod),
-    ),
-    purchaseOption: _MonetizationPurchaseOption(productDetails: details),
-  );
-}
+_CatalogOfferCandidate _buildFallbackOfferCandidate(ProductDetails details) =>
+    _buildOfferCandidate(
+      details: details,
+      groupKey: details.id,
+      preferenceRank: 0,
+      billingPeriod: _billingPeriodFromIdentifiers(productId: details.id),
+    );
 
 int _compareCatalogOfferCandidates(
   _CatalogOfferCandidate left,

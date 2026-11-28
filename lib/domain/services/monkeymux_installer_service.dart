@@ -12,6 +12,7 @@ import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_windows_cleanup.dart';
 import 'remote_file_service.dart';
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -569,13 +570,13 @@ class MonkeyMuxInstallerService {
             await _runRemoteCommand(
               session,
               r'__monkeymux_sha__=$(sha256sum '
-              '${_shellQuote(temporaryExecutablePath)} 2>/dev/null || '
-              'shasum -a 256 ${_shellQuote(temporaryExecutablePath)} '
+              '${shellEscapePosixArg(temporaryExecutablePath)} 2>/dev/null || '
+              'shasum -a 256 ${shellEscapePosixArg(temporaryExecutablePath)} '
               '2>/dev/null) && '
-              '[ "\${__monkeymux_sha__%% *}" = ${_shellQuote(entry.sha256)} ] && '
-              'chmod 700 ${_shellQuote(temporaryExecutablePath)} && '
-              'mv -f ${_shellQuote(temporaryExecutablePath)} '
-              '${_shellQuote(executableSftpPath)}',
+              '[ "\${__monkeymux_sha__%% *}" = ${shellEscapePosixArg(entry.sha256)} ] && '
+              'chmod 700 ${shellEscapePosixArg(temporaryExecutablePath)} && '
+              'mv -f ${shellEscapePosixArg(temporaryExecutablePath)} '
+              '${shellEscapePosixArg(executableSftpPath)}',
               priority: priority,
             );
           }
@@ -782,18 +783,18 @@ class MonkeyMuxInstallerService {
       );
       await _runRemoteCommand(
         session,
-        'mkdir -p ${_shellQuote(launcherDirectory)} && '
-        'if [ ! -e ${_shellQuote(launcherSftpPath)} ] && '
-        '[ ! -L ${_shellQuote(launcherSftpPath)} ]; then '
-        'ln -s ${_shellQuote(executablePath)} '
-        '${_shellQuote(launcherSftpPath)}; '
-        'elif [ -L ${_shellQuote(launcherSftpPath)} ]; then '
+        'mkdir -p ${shellEscapePosixArg(launcherDirectory)} && '
+        'if [ ! -e ${shellEscapePosixArg(launcherSftpPath)} ] && '
+        '[ ! -L ${shellEscapePosixArg(launcherSftpPath)} ]; then '
+        'ln -s ${shellEscapePosixArg(executablePath)} '
+        '${shellEscapePosixArg(launcherSftpPath)}; '
+        'elif [ -L ${shellEscapePosixArg(launcherSftpPath)} ]; then '
         r'__monkeymux_link="$(readlink '
-        '${_shellQuote(launcherSftpPath)} 2>/dev/null || true)"; '
+        '${shellEscapePosixArg(launcherSftpPath)} 2>/dev/null || true)"; '
         r'case "$__monkeymux_link" in '
-        '${_shellQuote(managedPrefix)}*) '
-        'ln -sfn ${_shellQuote(executablePath)} '
-        '${_shellQuote(launcherSftpPath)} ;; '
+        '${shellEscapePosixArg(managedPrefix)}*) '
+        'ln -sfn ${shellEscapePosixArg(executablePath)} '
+        '${shellEscapePosixArg(launcherSftpPath)} ;; '
         'esac; fi',
         priority: priority,
       );
@@ -1013,8 +1014,8 @@ class MonkeyMuxInstallerService {
       }
       final output = await _runRemoteCommand(
         session,
-        '(sha256sum ${_shellQuote(executablePath)} 2>/dev/null || '
-        'shasum -a 256 ${_shellQuote(executablePath)} 2>/dev/null) | '
+        '(sha256sum ${shellEscapePosixArg(executablePath)} 2>/dev/null || '
+        'shasum -a 256 ${shellEscapePosixArg(executablePath)} 2>/dev/null) | '
         r"awk '{print $1}'",
         priority: priority,
       );
@@ -1158,7 +1159,7 @@ Future<String> _runRawRemoteCommand(
 
 String _markRemoteCommandDone(String command) =>
     '{ $command; __monkeymux_status__=\$?; '
-    'printf ${_shellQuote('\n$_monkeyMuxExecMarker:%s\n')} '
+    'printf ${shellEscapePosixArg('\n$_monkeyMuxExecMarker:%s\n')} '
     r'"$__monkeymux_status__"; }';
 
 Future<String> _readStdoutUntilMarker(SSHSession execSession) async {
@@ -1190,5 +1191,3 @@ Future<String> _readStdoutUntilMarker(SSHSession execSession) async {
     chunks.cancel().ignore();
   }
 }
-
-String _shellQuote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";

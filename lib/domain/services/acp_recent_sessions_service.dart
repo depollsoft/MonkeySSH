@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_json.dart';
 import '../models/acp_recent_session.dart';
 import '../models/acp_session_keys.dart';
+import 'serial_task_queue.dart';
 import 'settings_json_list.dart';
 import 'settings_service.dart';
 
@@ -30,7 +31,7 @@ class AcpRecentSessionsService {
   final SettingsService _settings;
   final int _maxEntries;
 
-  final _mutations = SerializedMutations();
+  final _mutations = SerialTaskQueue();
   final _revision = ValueNotifier<int>(0);
   var _disposed = false;
 

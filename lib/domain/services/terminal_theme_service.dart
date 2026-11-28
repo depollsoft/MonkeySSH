@@ -6,7 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/database/database.dart';
 import '../models/terminal_theme.dart';
 import '../models/terminal_themes.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
+
+/// Decodes custom terminal themes persisted under [SettingKeys.customTerminalThemes].
+List<TerminalThemeData> decodeCustomTerminalThemes(String? raw) => [
+  for (final item in decodeJsonList(raw)) ?TerminalThemeData.tryFromJson(item),
+];
 
 /// Theme IDs from the foreground terminal connection that should drive app UI.
 @immutable
@@ -145,23 +151,10 @@ class TerminalThemeService {
   }
 
   /// Gets all custom themes.
-  Future<List<TerminalThemeData>> getCustomThemes() async {
-    final json = await _settings.getString(SettingKeys.customTerminalThemes);
-    if (json == null || json.isEmpty) {
-      return [];
-    }
-
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! List) {
-        return [];
-      }
-
-      return [for (final item in decoded) ?TerminalThemeData.tryFromJson(item)];
-    } on FormatException {
-      return [];
-    }
-  }
+  Future<List<TerminalThemeData>> getCustomThemes() async =>
+      decodeCustomTerminalThemes(
+        await _settings.getString(SettingKeys.customTerminalThemes),
+      );
 
   /// Saves a custom theme.
   Future<void> saveCustomTheme(TerminalThemeData theme) async {

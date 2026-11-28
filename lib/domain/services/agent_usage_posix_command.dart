@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'shell_quoting.dart';
+
 /// Marker emitted on stdout when the remote cached usage probe is missing,
 /// unreadable, symlinked, has unsafe permissions, or fails SHA-256 validation.
 const posixAgentUsageCacheMissMarker = '__monkeyssh_usage_cache_miss__';
@@ -9,15 +11,14 @@ String buildPosixAgentUsageCommand(
   String bootstrap,
   Map<String, String> agents,
 ) {
-  String quote(String value) => "'${value.replaceAll("'", r"'\''")}'";
   final input = base64.encode(utf8.encode(jsonEncode(agents)));
   final missing = agents.keys.map(
-    (id) => quote(
+    (id) => shellEscapePosix(
       '__monkeyssh_usage__=${jsonEncode({'id': id, 'status': 'runtimeUnavailable'})}',
     ),
   );
   return 'if command -v node >/dev/null 2>&1; then '
-      'node -e ${quote(bootstrap)} ${quote(input)} 2>/dev/null; '
+      'node -e ${shellEscapePosix(bootstrap)} ${shellEscapePosix(input)} 2>/dev/null; '
       "else printf '%s\\n' ${missing.join(' ')}; fi";
 }
 

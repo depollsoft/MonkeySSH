@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'serial_task_queue.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 
 /// The setting that lists hosts still to be offered MonkeyMux.
@@ -42,16 +43,10 @@ class MonkeyMuxOfferService {
     return true;
   });
 
-  Future<Set<int>> _read() async {
-    final raw = await _settings.getString(monkeyMuxOfferPendingSettingKey);
-    if (raw == null) return <int>{};
-    try {
-      final decoded = jsonDecode(raw);
-      return decoded is List ? decoded.whereType<int>().toSet() : <int>{};
-    } on FormatException {
-      return <int>{};
-    }
-  }
+  Future<Set<int>> _read() async =>
+      decodeJsonList(await _settings.getString(monkeyMuxOfferPendingSettingKey))
+          .whereType<int>()
+          .toSet();
 
   Future<void> _write(Set<int> pending) => _settings.setString(
     monkeyMuxOfferPendingSettingKey,

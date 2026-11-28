@@ -400,7 +400,7 @@ class RemoteFileEditSession {
     final mode = SftpFileMode.value(source.mode ?? remoteUploadFileMode.value);
     for (var attempt = 1; attempt <= _maxCopyAttempts; attempt++) {
       final candidate = remoteFileCopyPath(remotePath, attempt);
-      if (await _exists(sftp, candidate)) continue;
+      if (await RemoteFileService.exists(sftp, candidate)) continue;
       final SftpFile placeholder;
       try {
         placeholder = await sftp.open(
@@ -413,7 +413,7 @@ class RemoteFileEditSession {
       } on SftpStatusError catch (error) {
         // SFTP v3 reports an existing name as a generic failure.
         if (error.code == SftpStatusCode.failure &&
-            await _exists(sftp, candidate)) {
+            await RemoteFileService.exists(sftp, candidate)) {
           continue;
         }
         rethrow;
@@ -503,7 +503,7 @@ class RemoteFileEditSession {
   }
 
   Future<void> _removeIfPresent(SftpClient sftp, String path) async {
-    if (await _exists(sftp, path)) await sftp.remove(path);
+    if (await RemoteFileService.exists(sftp, path)) await sftp.remove(path);
   }
 
   Future<void> _quietly(Future<void> cleanup) async {
@@ -539,16 +539,6 @@ class RemoteFileEditSession {
       return (await file.readBytes(length: 1)).isEmpty;
     } finally {
       await file.close();
-    }
-  }
-
-  Future<bool> _exists(SftpClient sftp, String path) async {
-    try {
-      await sftp.stat(path, followLink: false);
-      return true;
-    } on SftpStatusError catch (error) {
-      if (error.code == SftpStatusCode.noSuchFile) return false;
-      rethrow;
     }
   }
 

@@ -417,7 +417,15 @@ class TmuxWindow {
     return _tmuxDisplayTitle;
   }
 
-  String get _tmuxDisplayTitle {
+  ({
+    String? normalizedPaneTitle,
+    String? normalizedName,
+    String? normalizedCommand,
+    String? agentTitle,
+    AgentLaunchTool? foregroundTool,
+    String? agentFallback,
+  })
+  get _baseTitleContext {
     final normalizedPaneTitle = _normalizedTmuxTitle(
       paneTitle,
       stripPlaceholderPrefix: true,
@@ -432,22 +440,40 @@ class TmuxWindow {
     );
     final agentTitle = _agentFallbackContextTitle;
     final foregroundTool = foregroundAgentTool;
-    if (agentTitle != null &&
-        foregroundTool != null &&
-        _isUnhelpfulAgentTitle(
-          normalizedPaneTitle,
-          tool: foregroundTool,
-          contextLabel: _windowContextLabelFromPath(currentPath),
-        )) {
-      return agentTitle;
+    final agentFallback =
+        agentTitle != null &&
+            foregroundTool != null &&
+            _isUnhelpfulAgentTitle(
+              normalizedPaneTitle,
+              tool: foregroundTool,
+              contextLabel: _windowContextLabelFromPath(currentPath),
+            )
+        ? agentTitle
+        : null;
+    return (
+      normalizedPaneTitle: normalizedPaneTitle,
+      normalizedName: normalizedName,
+      normalizedCommand: normalizedCommand,
+      agentTitle: agentTitle,
+      foregroundTool: foregroundTool,
+      agentFallback: agentFallback,
+    );
+  }
+
+  String get _tmuxDisplayTitle {
+    final ctx = _baseTitleContext;
+    if (ctx.agentFallback != null) {
+      return ctx.agentFallback!;
     }
+    final normalizedPaneTitle = ctx.normalizedPaneTitle;
+    final normalizedName = ctx.normalizedName;
     if (normalizedPaneTitle == null ||
         _isUnhelpfulTmuxTitle(
           normalizedPaneTitle,
           normalizedName: normalizedName,
-          normalizedCommand: normalizedCommand,
+          normalizedCommand: ctx.normalizedCommand,
         )) {
-      return agentTitle ?? normalizedName ?? name;
+      return ctx.agentTitle ?? normalizedName ?? name;
     }
     if (normalizedName == null) return normalizedPaneTitle;
     if (_hasPlaceholderPrefix(name)) return normalizedPaneTitle;
@@ -469,35 +495,20 @@ class TmuxWindow {
   String get handleTitle {
     final sessionTitle = agentSessionDisplayTitle;
     if (sessionTitle != null) return sessionTitle;
-    final normalizedPaneTitle = _normalizedTmuxTitle(
-      paneTitle,
-      stripPlaceholderPrefix: true,
-    );
-    final normalizedName = _normalizedTmuxTitle(
-      name,
-      stripPlaceholderPrefix: true,
-    );
-    final normalizedCommand = _normalizedTmuxTitle(
-      currentCommand,
-      stripPlaceholderPrefix: true,
-    );
-    final agentTitle = _agentFallbackContextTitle;
-    final foregroundTool = foregroundAgentTool;
-    if (agentTitle != null &&
-        foregroundTool != null &&
-        _isUnhelpfulAgentTitle(
-          normalizedPaneTitle,
-          tool: foregroundTool,
-          contextLabel: _windowContextLabelFromPath(currentPath),
-        )) {
-      return agentTitle;
+    final ctx = _baseTitleContext;
+    if (ctx.agentFallback != null) {
+      return ctx.agentFallback!;
     }
+    final normalizedPaneTitle = ctx.normalizedPaneTitle;
+    final normalizedName = ctx.normalizedName;
+    final normalizedCommand = ctx.normalizedCommand;
+    final foregroundTool = ctx.foregroundTool;
     if (_isUnhelpfulTmuxTitle(
       normalizedPaneTitle,
       normalizedName: normalizedName,
       normalizedCommand: normalizedCommand,
     )) {
-      return agentTitle ?? normalizedName ?? displayTitle;
+      return ctx.agentTitle ?? normalizedName ?? displayTitle;
     }
     if (normalizedPaneTitle != null &&
         normalizedName != null &&

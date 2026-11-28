@@ -10,7 +10,10 @@ import 'package:path/path.dart' as path;
 import '../models/auto_connect_command.dart'
     show terminalControlCharacterPattern;
 import 'diagnostics_log_service.dart';
+import 'shell_quoting.dart';
 import 'ssh_error_policy.dart';
+
+export 'shell_quoting.dart' show shellEscapePosix;
 
 final _sftpWindowsDriveRootPattern = RegExp(r'^/?[A-Za-z]:(?:/|$)');
 final _windowsDriveSftpPathPattern = RegExp(r'^/?[A-Za-z]:(?:[/\\]|$)');
@@ -410,9 +413,6 @@ bool looksLikeBinaryContent(Uint8List bytes) {
   final sample = bytes.length > 1024 ? bytes.sublist(0, 1024) : bytes;
   return sample.contains(0);
 }
-
-/// Escapes a path so it can be pasted directly into a POSIX shell.
-String shellEscapePosix(String value) => "'${value.replaceAll("'", r"'\''")}'";
 
 /// Escapes a path so it can be pasted directly into a Windows shell.
 String shellEscapeWindows(String value) {
@@ -953,6 +953,17 @@ class RemoteFileService {
         'cleanup_failed',
         fields: {'errorType': error.runtimeType},
       );
+    }
+  }
+
+  /// Whether [remotePath] exists on the host without following symlinks.
+  static Future<bool> exists(SftpClient sftp, String remotePath) async {
+    try {
+      await sftp.stat(remotePath, followLink: false);
+      return true;
+    } on SftpStatusError catch (error) {
+      if (error.code == SftpStatusCode.noSuchFile) return false;
+      rethrow;
     }
   }
 

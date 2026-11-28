@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/acp_provider.dart';
+import 'shell_quoting.dart';
 import 'windows_remote_powershell.dart';
 
 const _profileMarker = '__MONKEYSSH_ACP_PROFILE__';
@@ -106,7 +107,17 @@ List<AcpLaunchProfile> parseAcpLaunchProfiles(
   return List.unmodifiable(result);
 }
 
-String _buildPosixNestedProfilesCommand(AcpLaunchProfileSupport support) {
+typedef _NestedProfileMetadata = ({
+  String environment,
+  String homeDirectory,
+  String profilesDirectory,
+  String activeFile,
+  String defaultArgument,
+});
+
+_NestedProfileMetadata _requireNestedProfileMetadata(
+  AcpLaunchProfileSupport support,
+) {
   final environment = support.profileHomeEnvironmentVariable;
   final homeDirectory = support.defaultProfileHomeDirectory;
   final profilesDirectory = support.nestedProfilesDirectory;
@@ -119,12 +130,25 @@ String _buildPosixNestedProfilesCommand(AcpLaunchProfileSupport support) {
       defaultArgument == null) {
     throw const FormatException('Nested profile metadata is incomplete');
   }
-  final quotedMarker = _posixShellQuote(_profileMarker);
-  final quotedEnvironment = _posixShellQuote(environment);
-  final quotedHomeDirectory = _posixShellQuote(homeDirectory);
-  final quotedProfilesDirectory = _posixShellQuote(profilesDirectory);
-  final quotedActiveFile = _posixShellQuote(activeFile);
-  final quotedDefault = _posixShellQuote(defaultArgument);
+  return (
+    environment: environment,
+    homeDirectory: homeDirectory,
+    profilesDirectory: profilesDirectory,
+    activeFile: activeFile,
+    defaultArgument: defaultArgument,
+  );
+}
+
+String _buildPosixNestedProfilesCommand(AcpLaunchProfileSupport support) {
+  final metadata = _requireNestedProfileMetadata(support);
+  final quotedMarker = shellEscapePosixArg(_profileMarker);
+  final quotedEnvironment = shellEscapePosixArg(metadata.environment);
+  final quotedHomeDirectory = shellEscapePosixArg(metadata.homeDirectory);
+  final quotedProfilesDirectory = shellEscapePosixArg(
+    metadata.profilesDirectory,
+  );
+  final quotedActiveFile = shellEscapePosixArg(metadata.activeFile);
+  final quotedDefault = shellEscapePosixArg(metadata.defaultArgument);
   return '__fl_profile_root=\$(printenv $quotedEnvironment 2>/dev/null || :); '
       r'[ -n "$__fl_profile_root" ] || '
       '__fl_profile_root="\$HOME"/$quotedHomeDirectory; '
@@ -155,8 +179,8 @@ String _buildPosixHomePrefixCommand(AcpLaunchProfileSupport support) {
   if (prefix == null || prefix.isEmpty) {
     throw const FormatException('Profile directory prefix is required');
   }
-  final quotedPrefix = _posixShellQuote(prefix);
-  final quotedMarker = _posixShellQuote(_profileMarker);
+  final quotedPrefix = shellEscapePosixArg(prefix);
+  final quotedMarker = shellEscapePosixArg(_profileMarker);
   return 'for __fl_profile_dir in "\$HOME"/$quotedPrefix*; do '
       r'[ -d "$__fl_profile_dir" ] || continue; '
       r'__fl_profile_base=${__fl_profile_dir##*/}; '
@@ -167,23 +191,12 @@ String _buildPosixHomePrefixCommand(AcpLaunchProfileSupport support) {
 }
 
 String _buildWindowsNestedProfilesCommand(AcpLaunchProfileSupport support) {
-  final environment = support.profileHomeEnvironmentVariable;
-  final homeDirectory = support.defaultProfileHomeDirectory;
-  final profilesDirectory = support.nestedProfilesDirectory;
-  final activeFile = support.activeProfileFile;
-  final defaultArgument = support.defaultProfileArgument;
-  if (environment == null ||
-      homeDirectory == null ||
-      profilesDirectory == null ||
-      activeFile == null ||
-      defaultArgument == null) {
-    throw const FormatException('Nested profile metadata is incomplete');
-  }
-  final env = powerShellSingleQuote(environment);
-  final home = powerShellSingleQuote(homeDirectory);
-  final nested = powerShellSingleQuote(profilesDirectory);
-  final active = powerShellSingleQuote(activeFile);
-  final defaultValue = powerShellSingleQuote(defaultArgument);
+  final metadata = _requireNestedProfileMetadata(support);
+  final env = powerShellSingleQuote(metadata.environment);
+  final home = powerShellSingleQuote(metadata.homeDirectory);
+  final nested = powerShellSingleQuote(metadata.profilesDirectory);
+  final active = powerShellSingleQuote(metadata.activeFile);
+  final defaultValue = powerShellSingleQuote(metadata.defaultArgument);
   final marker = powerShellSingleQuote(_profileMarker);
   final body =
       '\$__flRoot=[Environment]::GetEnvironmentVariable($env); '
@@ -228,6 +241,3 @@ String _buildWindowsHomePrefixCommand(AcpLaunchProfileSupport support) {
 
 String _posixParameterPrefix(String value) =>
     value.replaceAll(RegExp(r'([][\\*?])'), r'\\$1');
-
-String _posixShellQuote(String value) =>
-    "'${value.replaceAll("'", "'\"'\"'")}'";

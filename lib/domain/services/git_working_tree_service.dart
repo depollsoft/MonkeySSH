@@ -25,14 +25,13 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/git_working_tree.dart';
 import 'diagnostics_log_service.dart';
-import 'remote_file_service.dart' show shellEscapePosix;
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 
@@ -352,83 +351,19 @@ Future<GitCommandOutput> collectCappedSshExecOutput(
   required Duration timeout,
   List<int>? stdin,
 }) async {
-  final bytes = BytesBuilder(copy: false);
-  var truncated = false;
-  var finished = false;
-  final capReached = Completer<void>();
-  final stdoutDone = Completer<void>();
-  final stdout = exec.stdout.listen(null, cancelOnError: true)
-    ..onData((chunk) {
-      if (truncated) {
-        return;
-      }
-      final remaining = maxBytes - bytes.length;
-      if (chunk.length <= remaining) {
-        bytes.add(chunk);
-        return;
-      }
-      if (remaining > 0) {
-        bytes.add(Uint8List.sublistView(chunk, 0, remaining));
-      }
-      truncated = true;
-      if (!capReached.isCompleted) {
-        capReached.complete();
-      }
-    })
-    ..onDone(() {
-      if (!stdoutDone.isCompleted) {
-        stdoutDone.complete();
-      }
-    })
-    ..onError((Object error, StackTrace stackTrace) {
-      if (!stdoutDone.isCompleted) {
-        stdoutDone.completeError(error, stackTrace);
-      }
-    });
-  final stderr = exec.stderr.listen(
-    (_) {},
-    onError: (Object _) {},
-    cancelOnError: true,
+  final result = await readCappedSshExecOutput(
+    exec,
+    maxBytes: maxBytes,
+    timeout: timeout,
+    stdin: stdin,
   );
-  if (stdin != null) {
-    exec.stdin.add(Uint8List.fromList(stdin));
-    unawaited(exec.stdin.close().then<void>((_) {}, onError: (Object _) {}));
-  }
-  try {
-    await Future.any<void>([
-      Future.wait<void>([stdoutDone.future, exec.done]),
-      capReached.future,
-    ]).timeout(timeout);
-    finished = !truncated;
-  } finally {
-    await stdout.cancel();
-    await stderr.cancel();
-    if (finished) {
-      exec.close();
-    } else {
-      await closeAbandonedSshExec(exec, grace: Duration.zero);
-    }
-  }
-  return GitCommandOutput(
-    stdout: const Utf8Decoder(allowMalformed: true).convert(bytes.takeBytes()),
-    truncated: truncated,
-  );
+  return GitCommandOutput(stdout: result.stdout, truncated: result.truncated);
 }
 
 /// Quotes a host directory for a POSIX shell, expanding a leading `~` to
 /// `$HOME` (quoted) the way an interactive shell would.
-String gitShellPathArgument(String path) {
-  if (path == '~') {
-    return r'"$HOME"';
-  }
-  if (path.startsWith('~/')) {
-    return r'"$HOME"' + shellEscapePosix(path.substring(1));
-  }
-  if (path.startsWith('-')) {
-    return shellEscapePosix('./$path');
-  }
-  return shellEscapePosix(path);
-}
+String gitShellPathArgument(String path) =>
+    shellEscapePosixPath(path, guardLeadingDash: true);
 
 const _gitPrelude = <String>[
   r'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"',

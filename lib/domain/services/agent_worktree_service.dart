@@ -18,6 +18,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_worktree.dart';
 import 'diagnostics_log_service.dart';
+import 'shell_quoting.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
@@ -445,20 +446,12 @@ mssh_delete_branch() {
 
 /// Quotes [value] as one literal POSIX shell word.
 @visibleForTesting
-String quoteAgentWorktreeShellWord(String value) =>
-    "'${value.replaceAll("'", r"'\''")}'";
+String quoteAgentWorktreeShellWord(String value) => shellEscapePosix(value);
 
 /// Quotes a remote path, expanding only a leading `~` to `$HOME`.
 @visibleForTesting
-String quoteAgentWorktreeRemotePath(String path) {
-  if (path == '~' || path == '~/') {
-    return r'"$HOME"';
-  }
-  if (path.startsWith('~/')) {
-    return '"\$HOME"/${quoteAgentWorktreeShellWord(path.substring(2))}';
-  }
-  return quoteAgentWorktreeShellWord(path);
-}
+String quoteAgentWorktreeRemotePath(String path) =>
+    shellEscapePosixPath(path, slashOutsideQuotes: true);
 
 /// Shell condition that is true while `$cand_branch` or `$cand_wt` is taken:
 /// an existing branch, a branch nested under it, a file or folder, or a

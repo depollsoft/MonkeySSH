@@ -142,15 +142,7 @@ class PendingHostTrustUpdate {
         !_persistBeforeAuthentication) {
       return;
     }
-
-    await repository.upsertTrustedHost(
-      hostname: _presentedHostKey.hostname,
-      port: _presentedHostKey.port,
-      keyType: _presentedHostKey.trustedKeyType,
-      fingerprint: _presentedHostKey.fingerprint,
-      encodedHostKey: _presentedHostKey.encodedHostKey,
-      resetFirstSeen: _resetFirstSeen,
-    );
+    await _upsertPresentedHost(repository);
   }
 
   /// Applies the remaining trusted-host update after authentication succeeds.
@@ -172,16 +164,18 @@ class PendingHostTrustUpdate {
         _persistBeforeAuthentication) {
       return;
     }
-
-    await repository.upsertTrustedHost(
-      hostname: _presentedHostKey.hostname,
-      port: _presentedHostKey.port,
-      keyType: _presentedHostKey.trustedKeyType,
-      fingerprint: _presentedHostKey.fingerprint,
-      encodedHostKey: _presentedHostKey.encodedHostKey,
-      resetFirstSeen: _resetFirstSeen,
-    );
+    await _upsertPresentedHost(repository);
   }
+
+  Future<void> _upsertPresentedHost(KnownHostsRepository repository) =>
+      repository.upsertTrustedHost(
+        hostname: _presentedHostKey.hostname,
+        port: _presentedHostKey.port,
+        keyType: _presentedHostKey.trustedKeyType,
+        fingerprint: _presentedHostKey.fingerprint,
+        encodedHostKey: _presentedHostKey.encodedHostKey,
+        resetFirstSeen: _resetFirstSeen,
+      );
 }
 
 /// Error thrown when SSH host-key verification fails.

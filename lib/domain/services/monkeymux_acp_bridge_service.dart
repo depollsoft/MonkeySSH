@@ -22,7 +22,7 @@ import 'acp_transport.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_installer_service.dart';
 import 'monkeymux_service.dart';
-import 'remote_file_service.dart' show shellEscapePosix;
+import 'shell_quoting.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
@@ -32,14 +32,6 @@ const _maxBridgeListEntries = 1024;
 const _helperTimeout = Duration(seconds: 15);
 const _wireInputByteBudget = 32 * 1024;
 const _wireInputTimeBudget = Duration(milliseconds: 4);
-const _profileSourcingPrefix =
-    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
-    '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
-    r'case "${SHELL##*/}" in '
-    'zsh) { . ~/.zshrc; } >/dev/null 2>&1;; '
-    'bash) { . ~/.bashrc; } >/dev/null 2>&1;; '
-    'esac; '
-    r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 final _bridgeIdPattern = RegExp(r'^[a-f0-9]{32}$');
 final _commandHashPattern = RegExp(r'^[a-f0-9]{64}$');
 final _environmentNamePattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
@@ -123,7 +115,7 @@ String buildMonkeyMuxAcpProviderCommand(
   ].join();
   final command = isWindows
       ? buildCompactWindowsPowerShellCommand(windowsScript)
-      : '$_profileSourcingPrefix'
+      : '$remoteProfileSourcingPrefix'
             '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
             '$_terminalProgramPreamble'
             '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
@@ -346,7 +338,7 @@ String buildMonkeyMuxAcpExecutableProbeCommand(
       r'%s\n" "$c" "$p";; esac; '
       'done';
   final quotedInner = "'${inner.replaceAll("'", "'\"'\"'")}'";
-  return '$_profileSourcingPrefix'
+  return '$remoteProfileSourcingPrefix'
       r'SH="${SHELL:-/bin/sh}"; "$SH" -ic '
       '$quotedInner 2>/dev/null || true';
 }
@@ -457,7 +449,7 @@ String buildAcpSupportCheckCommand(
       ),
     );
   }
-  return '$_profileSourcingPrefix'
+  return '$remoteProfileSourcingPrefix'
       // A startup file can turn on errexit, which would end the shell at
       // exit status 1 before the verdict is printed.
       'set +e; '
@@ -563,7 +555,7 @@ String buildAcpSupportRepairCommand(
     );
   }
   final selfInstallArguments = selfInstall.map(shellEscapePosix).join(' ');
-  return '$_profileSourcingPrefix'
+  return '$remoteProfileSourcingPrefix'
       'set +e; e=${shellEscapePosix(executable)}; p=\$e; '
       // Follow the launcher's links to the script that pip, pipx or uv wrote.
       r'while [ -L "$p" ]; do l=$(readlink "$p"); '
