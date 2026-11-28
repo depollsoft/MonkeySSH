@@ -277,8 +277,6 @@ func (p *winPty) Resize(cols int, rows int) error {
 	return p.backend.resize(p.hpc, conPtyCoord(cols, rows))
 }
 
-func (p *winPty) Fd() uintptr { return 0 }
-
 func (p *winPty) Close() error {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()

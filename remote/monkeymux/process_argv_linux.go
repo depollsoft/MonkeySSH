@@ -57,20 +57,10 @@ func processGroupMembers(group int) []int {
 		if err != nil || !entry.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-		// The command name is parenthesized and may hold spaces, so the
-		// fields are counted from its closing parenthesis: state, ppid,
-		// pgrp, and starttime as the 20th.
-		text := string(data)
-		end := strings.LastIndex(text, ")")
-		if end < 0 {
-			continue
-		}
-		fields := strings.Fields(text[end+1:])
-		if len(fields) < 20 || fields[0] == "Z" || fields[0] == "X" {
+		// Fields after the parenthesized command name: state, ppid, pgrp, ...,
+		// starttime as the 20th.
+		_, fields, ok := readProcStat(pid)
+		if !ok || len(fields) < 20 || fields[0] == "Z" || fields[0] == "X" {
 			continue
 		}
 		if memberGroup, err := strconv.Atoi(fields[2]); err != nil || memberGroup != group {

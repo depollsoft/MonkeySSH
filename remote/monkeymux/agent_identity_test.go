@@ -387,7 +387,7 @@ func TestWithPaneTTYEnvironment(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			original := append([]string(nil), tc.env...)
-			if got := withPaneTTYEnvironment(tc.env, "/dev/test"); !reflect.DeepEqual(got, tc.want) {
+			if got := withAgentLaunchEnvironment(tc.env, "MONKEYMUX_PANE_TTY", "/dev/test"); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 			if !reflect.DeepEqual(tc.env, original) {
@@ -456,7 +456,7 @@ func TestAgentIdentityPaneTTYTransport(t *testing.T) {
 		t.Skip("Unix pane tty transport")
 	}
 	pane := exec.Command("/bin/sh", "-c", `exec cat`)
-	pane.Env = withPaneTTYEnvironment(os.Environ(), "/dev/stale")
+	pane.Env = withAgentLaunchEnvironment(os.Environ(), "MONKEYMUX_PANE_TTY", "/dev/stale")
 	master, process, err := startWindow(pane, 91, 37)
 	if err != nil {
 		t.Fatal(err)
@@ -474,7 +474,7 @@ func TestAgentIdentityPaneTTYTransport(t *testing.T) {
 		t.Fatal("missing slave environment")
 	}
 	cmd := identityHookTestCommand(t, "--tool", "claude")
-	cmd.Env = withPaneTTYEnvironment(cmd.Env, ttyPath)
+	cmd.Env = withAgentLaunchEnvironment(cmd.Env, "MONKEYMUX_PANE_TTY", ttyPath)
 	cmd.Env = append(cmd.Env, "MONKEYMUX_AGENT_PID="+strconv.Itoa(os.Getpid()))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"SessionStart","session_id":"` + identityTestID + `","source":"startup"}`)
 	output, err := cmd.CombinedOutput()

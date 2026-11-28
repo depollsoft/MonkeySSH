@@ -455,89 +455,69 @@ func TestSessionServerOwnerKeepsCurrentOwner(t *testing.T) {
 	}
 }
 
-func TestSessionServerOwnerClearsDeadOwner(t *testing.T) {
-	isolateTestRuntime(t)
-
-	session := fmt.Sprintf("dead-%d", time.Now().UnixNano())
-	path, err := sessionPIDPath(session)
-	if err != nil {
-		t.Fatalf("sessionPIDPath: %v", err)
-	}
+func writeSessionFile(t *testing.T, path string, contents string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("99999999\n"), 0o600); err != nil {
-		t.Fatalf("write pid file: %v", err)
-	}
-	if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone {
-		t.Fatalf("ownership = %v (pid %d), want %v for a dead process", ownership, owner.pid, pidOwnershipGone)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("pid file state = %v, want removed", err)
-	}
-}
-
-// A pid file that outlives its server (SIGKILL, crash, host reboot) must not
-// permanently block the session once the operating system hands that pid to an
-// unrelated process. Otherwise every attach falls back to a login shell with
-// "is running (pid N) but not accepting connections".
-func TestSessionServerOwnerClearsRecycledPID(t *testing.T) {
-	isolateTestRuntime(t)
-
-	session := fmt.Sprintf("recycled-%d", time.Now().UnixNano())
-	path, err := sessionPIDPath(session)
-	if err != nil {
-		t.Fatalf("sessionPIDPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(recycledPIDFileContents()), 0o600); err != nil {
-		t.Fatalf("write pid file: %v", err)
-	}
-	agePIDFileBeforeThisProcess(t, path)
-	if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone {
-		t.Fatalf("ownership = %v (pid %d), want %v for a recycled pid", ownership, owner.pid, pidOwnershipGone)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("pid file state = %v, want removed", err)
-	}
-	// ensureServer consults exactly this result, so a gone owner is what lets
-	// it start instead of reporting "not accepting connections" forever.
-	if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone ||
-		owner.pid != 0 {
-		t.Fatalf(
-			"second resolve = %v (pid %d), want %v with no owner",
-			ownership,
-			owner.pid,
-			pidOwnershipGone,
-		)
-	}
-}
-
-// Pid files written before identities were recorded carry only a number, so a
-// recycled pid is detected by checking the running process image instead.
-func TestSessionServerOwnerClearsLegacyForeignPID(t *testing.T) {
-	isolateTestRuntime(t)
-
-	session := fmt.Sprintf("legacy-%d", time.Now().UnixNano())
-	path, err := sessionPIDPath(session)
-	if err != nil {
-		t.Fatalf("sessionPIDPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	foreign := startForeignProcess(t)
-	contents := fmt.Sprintf("%d\n", foreign)
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatalf("write pid file: %v", err)
+		t.Fatalf("write session file: %v", err)
 	}
-	if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone {
-		t.Fatalf("ownership = %v (pid %d), want %v for a foreign process", ownership, owner.pid, pidOwnershipGone)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("pid file state = %v, want removed", err)
+}
+
+// A pid file that outlives its server (dead PID, recycled PID, or legacy
+// number-only PID now held by a foreign process) must be cleared instead of
+// blocking ensureServer forever.
+func TestSessionServerOwnerClearsStaleOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prefix   string
+		contents func(*testing.T) string
+		age      bool
+		recheck  bool
+	}{
+		{
+			name:     "dead owner",
+			prefix:   "dead",
+			contents: func(*testing.T) string { return "99999999\n" },
+		},
+		{
+			name:     "recycled pid",
+			prefix:   "recycled",
+			contents: func(*testing.T) string { return recycledPIDFileContents() },
+			age:      true,
+			recheck:  true,
+		},
+		{
+			name:     "legacy foreign pid",
+			prefix:   "legacy",
+			contents: func(t *testing.T) string { return fmt.Sprintf("%d\n", startForeignProcess(t)) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTestRuntime(t)
+
+			session := fmt.Sprintf("%s-%d", tc.prefix, time.Now().UnixNano())
+			path, err := sessionPIDPath(session)
+			if err != nil {
+				t.Fatalf("sessionPIDPath: %v", err)
+			}
+			writeSessionFile(t, path, tc.contents(t))
+			if tc.age {
+				agePIDFileBeforeThisProcess(t, path)
+			}
+			if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone {
+				t.Fatalf("ownership = %v (pid %d), want %v", ownership, owner.pid, pidOwnershipGone)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("pid file state = %v, want removed", err)
+			}
+			if tc.recheck {
+				if owner, ownership := sessionServerOwner(session); ownership != pidOwnershipGone || owner.pid != 0 {
+					t.Fatalf("second resolve = %v (pid %d), want %v with no owner", ownership, owner.pid, pidOwnershipGone)
+				}
+			}
+		})
 	}
 }
 
@@ -549,12 +529,7 @@ func TestAcquireSessionLockClearsLockHeldByRecycledPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionLockPath: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(recycledPIDFileContents()), 0o600); err != nil {
-		t.Fatalf("write lock file: %v", err)
-	}
+	writeSessionFile(t, path, recycledPIDFileContents())
 	agePIDFileBeforeThisProcess(t, path)
 
 	unlock, err := acquireSessionLock(session)

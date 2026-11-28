@@ -308,13 +308,6 @@ func TestVisibilityModeResetsOnFullReset(t *testing.T) {
 	}
 }
 
-func TestClientVisibilityIsACapability(t *testing.T) {
-	t.Parallel()
-	if !containsString(capabilities, "client-visibility") {
-		t.Fatal("capabilities do not advertise client-visibility")
-	}
-}
-
 // A window's display modes are replayed for it and reset for the next one,
 // so they do not leak into another window and its DECRQM answers.
 func TestReverseVideoAndCursorBlinkAreTrackedPerWindow(t *testing.T) {

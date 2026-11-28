@@ -87,7 +87,6 @@ type windowStartPty struct {
 
 func (p windowStartPty) Close() error             { p.close.pass(); return nil }
 func (p windowStartPty) Read([]byte) (int, error) { p.read.pass(); return 0, io.EOF }
-func (p windowStartPty) Fd() uintptr              { return ^uintptr(0) }
 
 func TestPendingWindowStartShutdownOwnership(t *testing.T) {
 	t.Parallel()
@@ -233,6 +232,7 @@ func TestPendingWindowStartWatcherHandoff(t *testing.T) {
 // lifecyclePty delivers scripted output to the window reader and reaches EOF
 // when the script is closed or the terminal is.
 type lifecyclePty struct {
+	recordingPty
 	output    chan []byte
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -253,10 +253,7 @@ func (p *lifecyclePty) Read(b []byte) (int, error) {
 		return 0, io.EOF
 	}
 }
-func (p *lifecyclePty) Write(b []byte) (int, error) { return len(b), nil }
-func (p *lifecyclePty) Close() error                { p.closeOnce.Do(func() { close(p.closed) }); return nil }
-func (p *lifecyclePty) Resize(int, int) error       { return nil }
-func (p *lifecyclePty) Fd() uintptr                 { return ^uintptr(0) }
+func (p *lifecyclePty) Close() error { p.closeOnce.Do(func() { close(p.closed) }); return nil }
 
 // lifecycleProcess exits when the test says so or when it is hung up.
 type lifecycleProcess struct {

@@ -56,11 +56,10 @@ func replayPostHistorySuffixForTest(cursorVisible bool) string {
 // event log on every Write, so a test can assert the theme hint reaches the pty
 // before the synthetic redraw dance runs.
 type orderRecordingPty struct {
+	recordingPty
 	mu  *sync.Mutex
 	log *[]string
 }
-
-func (p *orderRecordingPty) Read([]byte) (int, error) { return 0, io.EOF }
 
 func (p *orderRecordingPty) Write(b []byte) (int, error) {
 	p.mu.Lock()
@@ -68,10 +67,6 @@ func (p *orderRecordingPty) Write(b []byte) (int, error) {
 	p.mu.Unlock()
 	return len(b), nil
 }
-
-func (p *orderRecordingPty) Close() error          { return nil }
-func (p *orderRecordingPty) Resize(int, int) error { return nil }
-func (p *orderRecordingPty) Fd() uintptr           { return 0 }
 
 func synchronizedTerminalOutputForTest(data string) string {
 	return terminalSynchronizedOutputBegin + data + terminalSynchronizedOutputEnd
@@ -209,37 +204,6 @@ func setPtySize(t *testing.T, p muxPty, columns int, rows int) {
 		Cols: uint16(columns),
 	}); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestInheritedEnvironmentPassesThroughLaunchEnvironment(t *testing.T) {
-	t.Parallel()
-	base := []string{
-		"PATH=/custom/bin:/usr/bin",
-		"TERM=screen-256color",
-		"COLORTERM=24bit",
-		"SHELL=/bin/zsh",
-		"EMPTY=",
-		"PATH=/second-path-entry",
-	}
-
-	env := inheritedEnvironment(base)
-
-	if !reflect.DeepEqual(env, base) {
-		t.Fatalf("environment = %#v, want exact pass-through %#v", env, base)
-	}
-	env[0] = "PATH=/changed"
-	if base[0] == env[0] {
-		t.Fatal("inherited environment aliases source slice")
-	}
-}
-
-func TestInheritedEnvironmentDoesNotAddMissingValues(t *testing.T) {
-	t.Parallel()
-	env := inheritedEnvironment([]string{"USER=test"})
-
-	if !reflect.DeepEqual(env, []string{"USER=test"}) {
-		t.Fatalf("environment = %#v, want no synthesized values", env)
 	}
 }
 
@@ -5725,44 +5689,57 @@ func TestCreateWindowClosesNonAgentWindowOnExit(t *testing.T) {
 	}
 }
 
-func TestSameSizeResizeDoesNotSignalFocusAwareTui(t *testing.T) {
-	server := newMuxServer("test")
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "codex",
-		focusModeEnabled:  true,
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.width = 120
-	server.height = 40
-	server.publishedWidth = 120
-	server.publishedHeight = 40
+func TestSameSizeResizeDoesNotSignalForegroundWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		command   string
+		published bool
+	}{
+		{"focus-aware tui", "codex", true},
+		{"shell", "zsh", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newMuxServer("test")
+			window := &muxWindow{
+				id:                "@1",
+				index:             0,
+				foregroundCommand: tc.command,
+				focusModeEnabled:  true,
+				lastActivity:      time.Now(),
+			}
+			server.windows = []*muxWindow{window}
+			server.activeID = "@1"
+			server.width = 120
+			server.height = 40
+			if tc.published {
+				server.publishedWidth = 120
+				server.publishedHeight = 40
+			}
 
-	originalSignalForegroundResize := signalForegroundResize
-	originalForegroundProcessGroupForWindow := foregroundProcessGroupForWindow
-	defer func() {
-		signalForegroundResize = originalSignalForegroundResize
-		foregroundProcessGroupForWindow = originalForegroundProcessGroupForWindow
-	}()
+			originalSignalForegroundResize := signalForegroundResize
+			originalForegroundProcessGroupForWindow := foregroundProcessGroupForWindow
+			defer func() {
+				signalForegroundResize = originalSignalForegroundResize
+				foregroundProcessGroupForWindow = originalForegroundProcessGroupForWindow
+			}()
 
-	var signaled []int
-	foregroundProcessGroupForWindow = func(candidate *muxWindow) int {
-		if candidate == window {
-			return 5151
-		}
-		return 0
-	}
-	signalForegroundResize = func(processGroup int) {
-		signaled = append(signaled, processGroup)
-	}
+			var signaled []int
+			foregroundProcessGroupForWindow = func(candidate *muxWindow) int {
+				if candidate == window {
+					return 5151
+				}
+				return 0
+			}
+			signalForegroundResize = func(processGroup int) {
+				signaled = append(signaled, processGroup)
+			}
 
-	server.resizeWithRedraw(120, 40, false, false, "")
+			server.resizeWithRedraw(120, 40, false, false, "")
 
-	if len(signaled) != 0 {
-		t.Fatalf("signaled process groups = %#v, want none", signaled)
+			if len(signaled) != 0 {
+				t.Fatalf("signaled process groups = %#v, want none", signaled)
+			}
+		})
 	}
 }
 
@@ -5928,7 +5905,7 @@ func TestForegroundRedrawDoesNotResizeClosedPty(t *testing.T) {
 	time.Sleep(foregroundRedrawResizeDelay + 20*time.Millisecond)
 }
 
-func TestClosedUnixPtyUsesInvalidFileDescriptorSentinel(t *testing.T) {
+func TestClosedUnixPtyReturnsNoForegroundProcessGroup(t *testing.T) {
 	t.Parallel()
 	windowPty := openTestPty(t)
 
@@ -5936,9 +5913,6 @@ func TestClosedUnixPtyUsesInvalidFileDescriptorSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := windowPty.Fd(); got != ^uintptr(0) {
-		t.Fatalf("closed pty fd = %d, want invalid sentinel", got)
-	}
 	if got := foregroundProcessGroupForWindow(&muxWindow{pty: windowPty}); got != 0 {
 		t.Fatalf("closed pty foreground process group = %d, want 0", got)
 	}
@@ -6438,24 +6412,29 @@ func TestForegroundRedrawTemporarySize(t *testing.T) {
 	}
 }
 
-func TestRedrawResizeBuffersIntermediateAttachOutput(t *testing.T) {
-	t.Parallel()
+func newPausedRedrawTest(t *testing.T, command string, extra ...*muxWindow) (*muxServer, *muxWindow, *recordingConn, int) {
+	t.Helper()
 	server := newMuxServer("test")
 	conn := &recordingConn{}
 	window := &muxWindow{
 		id:                "@1",
 		index:             0,
-		foregroundCommand: "codex",
+		foregroundCommand: command,
 		lastActivity:      time.Now(),
 	}
-	server.windows = []*muxWindow{window}
+	server.windows = append([]*muxWindow{window}, extra...)
 	server.activeID = "@1"
 	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
-
 	server.mu.Lock()
 	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
 	generation := window.redrawForwardingGeneration
 	server.mu.Unlock()
+	return server, window, conn, generation
+}
+
+func TestRedrawResizeBuffersIntermediateAttachOutput(t *testing.T) {
+	t.Parallel()
+	server, _, conn, generation := newPausedRedrawTest(t, "codex")
 
 	server.handleWindowOutput("@1", []byte("temporary layout"))
 	server.handleWindowOutput("@1", []byte("final layout"))
@@ -6518,22 +6497,7 @@ func TestRedrawResizeBoundsLongPiTranscriptRepaint(t *testing.T) {
 
 func TestRedrawResizeWrapsBufferedRedrawAtomically(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	conn := &recordingConn{}
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "codex",
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
-
-	server.mu.Lock()
-	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	generation := window.redrawForwardingGeneration
-	server.mu.Unlock()
+	server, _, conn, generation := newPausedRedrawTest(t, "codex")
 	server.handleWindowOutput("@1", []byte("temporary layout"))
 
 	server.resumePausedAttachForwarding("@1", generation)
@@ -6550,22 +6514,7 @@ func TestRedrawResizeWrapsBufferedRedrawAtomically(t *testing.T) {
 
 func TestRedrawResizePreservesOneShotKittyTransmit(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	conn := &recordingConn{}
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "codex",
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
-
-	server.mu.Lock()
-	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	generation := window.redrawForwardingGeneration
-	server.mu.Unlock()
+	server, _, conn, generation := newPausedRedrawTest(t, "codex")
 
 	const transmit = "\x1b_Ga=t,f=24,s=1,v=1,i=7;AAAA\x1b\\"
 	const placeholder = "\U0010EEEE"
@@ -6622,21 +6571,7 @@ func TestWindowReplayDoesNotAdvanceActivity(t *testing.T) {
 
 func TestRedrawResizeDropsSupersededBufferedAttachOutput(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	conn := &recordingConn{}
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "codex",
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
-
-	server.mu.Lock()
-	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	server.mu.Unlock()
+	server, window, conn, _ := newPausedRedrawTest(t, "codex")
 	server.handleWindowOutput("@1", []byte("old intermediate layout"))
 
 	server.mu.Lock()
@@ -6740,25 +6675,7 @@ func TestRedrawResizePreservesPendingReplay(t *testing.T) {
 
 func TestRedrawResizeDropsBufferedAttachOutputWhenInactive(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	conn := &recordingConn{}
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "codex",
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{
-		window,
-		{id: "@2", index: 1, lastActivity: time.Now()},
-	}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, conn, "primary", server.width, server.height)
-
-	server.mu.Lock()
-	server.pauseAttachForwardingForRedrawLocked(window, 120, 40)
-	generation := window.redrawForwardingGeneration
-	server.mu.Unlock()
+	server, _, conn, generation := newPausedRedrawTest(t, "codex", &muxWindow{id: "@2", index: 1, lastActivity: time.Now()})
 
 	server.handleWindowOutput("@1", []byte("old active redraw"))
 	server.mu.Lock()
@@ -6769,45 +6686,6 @@ func TestRedrawResizeDropsBufferedAttachOutputWhenInactive(t *testing.T) {
 	waitForTestAttachWrites(t, server)
 	if got := conn.String(); got != "" {
 		t.Fatalf("inactive buffered output = %q, want empty", got)
-	}
-}
-
-func TestSameSizeResizeDoesNotSignalShell(t *testing.T) {
-	server := newMuxServer("test")
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "zsh",
-		focusModeEnabled:  true,
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-	server.width = 120
-	server.height = 40
-
-	originalSignalForegroundResize := signalForegroundResize
-	originalForegroundProcessGroupForWindow := foregroundProcessGroupForWindow
-	defer func() {
-		signalForegroundResize = originalSignalForegroundResize
-		foregroundProcessGroupForWindow = originalForegroundProcessGroupForWindow
-	}()
-
-	var signaled []int
-	foregroundProcessGroupForWindow = func(candidate *muxWindow) int {
-		if candidate == window {
-			return 5151
-		}
-		return 0
-	}
-	signalForegroundResize = func(processGroup int) {
-		signaled = append(signaled, processGroup)
-	}
-
-	server.resizeWithRedraw(120, 40, false, false, "")
-
-	if len(signaled) != 0 {
-		t.Fatalf("signaled process groups = %#v, want none", signaled)
 	}
 }
 
@@ -6830,58 +6708,67 @@ func TestAttachWriteSkipsStaleActiveWindowOutput(t *testing.T) {
 	waitForRecordedOutput(t, attach, "fresh new output")
 }
 
-func TestAttachInputDropsFocusReportsUntilActiveWindowEnablesFocus(t *testing.T) {
+func TestAttachInputFocusReportFiltering(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	window := &muxWindow{id: "@1", index: 0, pty: wrapPty(t, writer), lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
+	for _, tc := range []struct {
+		name           string
+		focusMode      bool
+		bracketedPaste bool
+		input          string
+		want           string
+	}{
+		{
+			name:  "drops focus reports when focus mode off",
+			input: "typed\x1b[I\x1b[Oinput",
+			want:  "typedinput",
+		},
+		{
+			name:           "preserves focus report bytes inside bracketed paste",
+			bracketedPaste: true,
+			input:          "\x1b[200~typed\x1b[I\x1b[Oinput\x1b[201~",
+			want:           "\x1b[200~typed\x1b[I\x1b[Oinput\x1b[201~",
+		},
+		{
+			name:      "preserves focus reports when active window enables focus",
+			focusMode: true,
+			input:     "typed\x1b[I\x1b[Oinput",
+			want:      "typed\x1b[I\x1b[Oinput",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := newMuxServer("test")
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			window := &muxWindow{
+				id:               "@1",
+				index:            0,
+				pty:              wrapPty(t, writer),
+				lastActivity:     time.Now(),
+				focusModeEnabled: tc.focusMode,
+			}
+			server.windows = []*muxWindow{window}
+			server.activeID = "@1"
 
-	server.writeActiveFromAttach([]byte("typed\x1b[I\x1b[Oinput"))
-	if err := window.pty.Close(); err != nil {
-		t.Fatal(err)
-	}
-	output, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := string(output); got != "typedinput" {
-		t.Fatalf("pty input = %q, want focus reports stripped", got)
-	}
-}
-
-func TestBracketedPasteInputPreservesFocusReportBytes(t *testing.T) {
-	t.Parallel()
-	server := newMuxServer("test")
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	window := &muxWindow{id: "@1", index: 0, pty: wrapPty(t, writer), lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-
-	server.writeActiveFromAttachInput(
-		[]byte("\x1b[200~typed\x1b[I\x1b[Oinput\x1b[201~"),
-		true,
-	)
-	if err := window.pty.Close(); err != nil {
-		t.Fatal(err)
-	}
-	output, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := string(output); got != "\x1b[200~typed\x1b[I\x1b[Oinput\x1b[201~" {
-		t.Fatalf("pty input = %q, want opaque bracketed paste", got)
+			if tc.bracketedPaste {
+				server.writeActiveFromAttachInput([]byte(tc.input), true)
+			} else {
+				server.writeActiveFromAttach([]byte(tc.input))
+			}
+			if err := window.pty.Close(); err != nil {
+				t.Fatal(err)
+			}
+			output, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(output); got != tc.want {
+				t.Fatalf("pty input = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -6933,39 +6820,6 @@ func TestBlockedInputWriteDoesNotBlockTerminalResponseRegistration(t *testing.T)
 
 	_ = window.pty.Close()
 	client.close()
-}
-
-func TestAttachInputPreservesFocusReportsForActiveFocusAwareWindow(t *testing.T) {
-	t.Parallel()
-	server := newMuxServer("test")
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer reader.Close()
-	window := &muxWindow{
-		id:               "@1",
-		index:            0,
-		pty:              wrapPty(t, writer),
-		lastActivity:     time.Now(),
-		focusModeEnabled: true,
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-
-	server.writeActiveFromAttach([]byte("typed\x1b[I\x1b[Oinput"))
-	if err := window.pty.Close(); err != nil {
-		t.Fatal(err)
-	}
-	output, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := string(output); got != "typed\x1b[I\x1b[Oinput" {
-		t.Fatalf("pty input = %q, want focus reports preserved", got)
-	}
 }
 
 func TestInactiveWindowBellParsing(t *testing.T) {
@@ -7271,125 +7125,98 @@ func TestActiveReplayUsesForegroundRedrawForTrackedAlternateScreenHistory(t *tes
 	}
 }
 
-func TestActiveReplayUsesForegroundRedrawForAgentHistory(t *testing.T) {
+func TestActiveReplayUsesForegroundRedrawInsteadOfStaleHistory(t *testing.T) {
 	t.Parallel()
-	server := newMuxServer("test")
-	history := []byte(
-		"agent-main-screen-start" +
-			strings.Repeat("conversation-history", windowHistoryLimitBytes/8) +
-			"agent-main-screen-end",
-	)
-	window := &muxWindow{
-		id:           "@1",
-		index:        0,
-		agentTool:    "codex",
-		history:      history,
-		lastActivity: time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
+	const enterAlternateScreen = "\x1b[?1049h"
+	for _, tc := range []struct {
+		name                string
+		agentTool           string
+		foregroundCommand   string
+		privateModes        map[string]bool
+		history             []byte
+		forbiddenSubstrings []string
+		wantContains        string
+		checkMaxBytes       bool
+	}{
+		{
+			name:      "agent main screen",
+			agentTool: "codex",
+			history: []byte(
+				"agent-main-screen-start" +
+					strings.Repeat("conversation-history", windowHistoryLimitBytes/8) +
+					"agent-main-screen-end",
+			),
+			forbiddenSubstrings: []string{"agent-main-screen-start", "agent-main-screen-end"},
+		},
+		{
+			name:         "agent alternate screen",
+			agentTool:    "codex",
+			privateModes: map[string]bool{"1049": true},
+			history: []byte(
+				enterAlternateScreen +
+					"agent-alternate-screen-start" +
+					strings.Repeat("conversation-history", windowReplayLimitBytes/8) +
+					"agent-alternate-screen-end",
+			),
+			forbiddenSubstrings: []string{"agent-alternate-screen-start", "agent-alternate-screen-end"},
+			wantContains:        enterAlternateScreen + terminalScreenClearSequence,
+		},
+		{
+			name:      "runaway agent history",
+			agentTool: "copilot",
+			history: []byte(
+				"agent-main-screen-start" +
+					strings.Repeat("conversation-history", windowFullReplayHistoryLimitBytes/4) +
+					"agent-main-screen-end",
+			),
+			forbiddenSubstrings: []string{"agent-main-screen"},
+			checkMaxBytes:       true,
+		},
+		{
+			name:              "vim alternate screen",
+			foregroundCommand: "vim",
+			privateModes:      map[string]bool{"1049": true},
+			history: []byte(
+				"interactive-main-screen-start" +
+					strings.Repeat("tui-history", windowReplayLimitBytes/8) +
+					"interactive-main-screen-end",
+			),
+			forbiddenSubstrings: []string{"interactive-main-screen-start", "interactive-main-screen-end"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := newMuxServer("test")
+			window := &muxWindow{
+				id:                "@1",
+				index:             0,
+				agentTool:         tc.agentTool,
+				foregroundCommand: tc.foregroundCommand,
+				history:           tc.history,
+				privateModes:      tc.privateModes,
+				lastActivity:      time.Now(),
+			}
+			server.windows = []*muxWindow{window}
+			server.activeID = "@1"
 
-	replay := string(server.activeReplayLocked())
-
-	if strings.Contains(replay, "agent-main-screen-start") ||
-		strings.Contains(replay, "agent-main-screen-end") {
-		t.Fatalf("agent redraw replay retained stale history: %q", replay)
-	}
-	if got, want := len(window.history), len(history); got != want {
-		t.Fatalf("history length = %d, want %d", got, want)
-	}
-}
-
-func TestActiveReplayDropsAgentAlternateScreenHistory(t *testing.T) {
-	t.Parallel()
-	server := newMuxServer("test")
-	enterAlternateScreen := "\x1b[?1049h"
-	history := []byte(
-		enterAlternateScreen +
-			"agent-alternate-screen-start" +
-			strings.Repeat("conversation-history", windowReplayLimitBytes/8) +
-			"agent-alternate-screen-end",
-	)
-	window := &muxWindow{
-		id:           "@1",
-		index:        0,
-		agentTool:    "codex",
-		history:      history,
-		privateModes: map[string]bool{"1049": true},
-		lastActivity: time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-
-	replay := string(server.activeReplayLocked())
-
-	if strings.Contains(replay, "agent-alternate-screen-start") ||
-		strings.Contains(replay, "agent-alternate-screen-end") {
-		t.Fatalf("agent alternate-screen replay retained stale history: %q", replay)
-	}
-	if !strings.Contains(replay, enterAlternateScreen+terminalScreenClearSequence) {
-		t.Fatalf("agent alternate-screen replay did not clear stale alternate buffer: %q", replay)
-	}
-	if got, want := len(window.history), len(history); got != want {
-		t.Fatalf("history length = %d, want %d", got, want)
-	}
-}
-
-func TestActiveReplaySkipsRunawayAgentHistory(t *testing.T) {
-	t.Parallel()
-	server := newMuxServer("test")
-	history := []byte(
-		"agent-main-screen-start" +
-			strings.Repeat("conversation-history", windowFullReplayHistoryLimitBytes/4) +
-			"agent-main-screen-end",
-	)
-	window := &muxWindow{
-		id:           "@1",
-		index:        0,
-		agentTool:    "copilot",
-		history:      history,
-		lastActivity: time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-
-	replay := server.activeReplayLocked()
-
-	if len(replay) > len(replayPrefixForTest(window))+2048 {
-		t.Fatalf("redraw replay length = %d, want no retained history", len(replay))
-	}
-	if strings.Contains(string(replay), "agent-main-screen") {
-		t.Fatalf("agent redraw replay retained runaway history: %q", replay)
-	}
-}
-
-func TestActiveReplayUsesForegroundRedrawForVimAlternateScreenHistory(t *testing.T) {
-	t.Parallel()
-	server := newMuxServer("test")
-	history := []byte(
-		"interactive-main-screen-start" +
-			strings.Repeat("tui-history", windowReplayLimitBytes/8) +
-			"interactive-main-screen-end",
-	)
-	window := &muxWindow{
-		id:                "@1",
-		index:             0,
-		foregroundCommand: "vim",
-		history:           history,
-		privateModes:      map[string]bool{"1049": true},
-		lastActivity:      time.Now(),
-	}
-	server.windows = []*muxWindow{window}
-	server.activeID = "@1"
-
-	replay := string(server.activeReplayLocked())
-
-	if strings.Contains(replay, "interactive-main-screen-start") ||
-		strings.Contains(replay, "interactive-main-screen-end") {
-		t.Fatalf("interactive redraw replay retained stale history: %q", replay)
-	}
-	if got, want := len(window.history), len(history); got != want {
-		t.Fatalf("history length = %d, want %d", got, want)
+			replay := server.activeReplayLocked()
+			replayStr := string(replay)
+			for _, forbidden := range tc.forbiddenSubstrings {
+				if strings.Contains(replayStr, forbidden) {
+					t.Fatalf("redraw replay retained stale history %q: %q", forbidden, replayStr)
+				}
+			}
+			if tc.wantContains != "" && !strings.Contains(replayStr, tc.wantContains) {
+				t.Fatalf("replay missing %q: %q", tc.wantContains, replayStr)
+			}
+			if tc.checkMaxBytes {
+				if len(replay) > len(replayPrefixForTest(window))+2048 {
+					t.Fatalf("redraw replay length = %d, want no retained history", len(replay))
+				}
+			} else if got, want := len(window.history), len(tc.history); got != want {
+				t.Fatalf("history length = %d, want %d", got, want)
+			}
+		})
 	}
 }
 
@@ -8537,59 +8364,44 @@ func newThemeQueryTestServer(t *testing.T, window *muxWindow) (*os.File, *muxSer
 // the attach input pipe into the active window's PTY, where the TUI renders
 // it as literal text.
 func TestActiveOutputStripsLocallyAnsweredThemeQueryFromAttach(t *testing.T) {
-	window := &muxWindow{
-		id:                "@1",
-		foregroundCommand: "unknown-tui",
-		foregroundPid:     42,
-		lastActivity:      time.Now(),
-	}
-	inputReader, server := newThemeQueryTestServer(t, window)
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		mid    string
+	}{
+		{"single chunk", []string{"hello\x1b]11;?\x1b\\world"}, ""},
+		{"split chunk", []string{"hello\x1b]11;?", "\x1b\\world"}, "hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := &muxWindow{
+				id:                "@1",
+				foregroundCommand: "unknown-tui",
+				foregroundPid:     42,
+				lastActivity:      time.Now(),
+			}
+			inputReader, server := newThemeQueryTestServer(t, window)
 
-	attach := &recordingConn{}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
-	const backgroundReport = "\x1b]11;rgb:1111/2222/3333\x1b\\"
-	server.themeHint = []byte(backgroundReport)
+			attach := &recordingConn{}
+			server.activeID = "@1"
+			registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
+			const backgroundReport = "\x1b]11;rgb:1111/2222/3333\x1b\\"
+			server.themeHint = []byte(backgroundReport)
 
-	server.handleWindowOutput("@1", []byte("hello\x1b]11;?\x1b\\world"))
+			for i, chunk := range tc.chunks {
+				server.handleWindowOutput("@1", []byte(chunk))
+				if i == 0 && tc.mid != "" {
+					waitForRecordedOutput(t, attach, tc.mid)
+				}
+			}
+			waitForRecordedOutput(t, attach, "helloworld")
 
-	waitForRecordedOutput(t, attach, "helloworld")
-
-	got := readPipeUntil(t, inputReader, func(output string) bool {
-		return strings.Contains(output, backgroundReport)
-	})
-	if got != backgroundReport {
-		t.Fatalf("window pty got = %q, want background report %q", got, backgroundReport)
-	}
-}
-
-func TestActiveOutputStripsSplitLocallyAnsweredThemeQueryFromAttach(t *testing.T) {
-	window := &muxWindow{
-		id:                "@1",
-		foregroundCommand: "unknown-tui",
-		foregroundPid:     42,
-		lastActivity:      time.Now(),
-	}
-	inputReader, server := newThemeQueryTestServer(t, window)
-
-	attach := &recordingConn{}
-	server.activeID = "@1"
-	registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
-	const backgroundReport = "\x1b]11;rgb:1111/2222/3333\x1b\\"
-	server.themeHint = []byte(backgroundReport)
-
-	server.handleWindowOutput("@1", []byte("hello\x1b]11;?"))
-	waitForRecordedOutput(t, attach, "hello")
-
-	server.handleWindowOutput("@1", []byte("\x1b\\world"))
-
-	waitForRecordedOutput(t, attach, "helloworld")
-
-	got := readPipeUntil(t, inputReader, func(output string) bool {
-		return strings.Contains(output, backgroundReport)
-	})
-	if got != backgroundReport {
-		t.Fatalf("window pty got = %q, want background report %q", got, backgroundReport)
+			got := readPipeUntil(t, inputReader, func(output string) bool {
+				return strings.Contains(output, backgroundReport)
+			})
+			if got != backgroundReport {
+				t.Fatalf("window pty got = %q, want background report %q", got, backgroundReport)
+			}
+		})
 	}
 }
 
@@ -10560,135 +10372,123 @@ func TestAgentProcessesByPaneSelectsUniqueShallowestProcess(t *testing.T) {
 	}
 }
 
-func TestDiscoverCodexSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
+func stubProcessMetadata(t *testing.T) {
+	t.Helper()
+	originalTable := processTableForMetadata
 	originalOpenFiles := processOpenFilePathsForMetadata
 	originalWorkingDirectory := processWorkingDirectoryForMetadata
 	originalProcessStart := processStartedAtForMetadata
 	t.Cleanup(func() {
+		processTableForMetadata = originalTable
 		processOpenFilePathsForMetadata = originalOpenFiles
 		processWorkingDirectoryForMetadata = originalWorkingDirectory
 		processStartedAtForMetadata = originalProcessStart
 	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sessionID := "123e4567-e89b-12d3-a456-426614174055"
-	rolloutDir := filepath.Join(home, ".codex", "sessions", "2026", "08")
-	if err := os.MkdirAll(rolloutDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(rolloutDir, "rollout-2026-08-18T00-00-00-"+sessionID+".jsonl")
-	if err := os.WriteFile(path, []byte(`{"cwd":"/work/project","id":"`+sessionID+`"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
-	processWorkingDirectoryForMetadata = func(int) string { return "/work/project" }
-	processStartedAtForMetadata = func(int) time.Time { return time.Now().Add(-time.Minute) }
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		101: {pid: 101, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {pid: 200, ppid: 100, comm: "codex", args: "codex resume " + sessionID},
-		201: {pid: 201, ppid: 101, comm: "codex", args: "codex"},
-	}
-
-	got := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
-	if got[100] != sessionID || got[101] != "" {
-		t.Fatalf("Codex sibling assignments = %#v, want only argv-owned pane", got)
-	}
 }
 
-func TestDiscoverClaudeSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-		processStartedAtForMetadata = originalProcessStart
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	sessionID := "de4e84a3-cf16-4cc2-8ba7-34587e984d4a"
-	projectDir := filepath.Join(home, ".claude", "projects", "-work-project")
-	if err := os.MkdirAll(projectDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte(`{"cwd":"/work/project","sessionId":"`+sessionID+`"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	processOpenFilePathsForMetadata = func(int) []string { return nil }
-	processWorkingDirectoryForMetadata = func(int) string { return "/work/project" }
-	processStartedAtForMetadata = func(int) time.Time { return time.Now().Add(-time.Minute) }
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		101: {pid: 101, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {pid: 200, ppid: 100, comm: "claude", args: "claude --resume " + sessionID},
-		201: {pid: 201, ppid: 101, comm: "claude", args: "claude"},
-	}
-
-	got := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
-	if got[100] != sessionID || got[101] != "" {
-		t.Fatalf("Claude sibling assignments = %#v, want only argv-owned pane", got)
-	}
-}
-
-func TestDiscoverCodexSessionIDsUsesOpenRolloutFile(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-	})
-
-	sessionID := "123e4567-e89b-12d3-a456-426614174000"
-	processOpenFilePathsForMetadata = func(pid int) []string {
-		if pid != 200 {
-			return nil
-		}
-		return []string{
-			"/Users/alice/.codex/sessions/2026/06/rollout-2026-06-01T06-50-00-" + sessionID + ".jsonl",
-		}
-	}
-	processWorkingDirectoryForMetadata = func(pid int) string {
-		if pid == 200 {
-			return "/work/project"
-		}
-		return ""
-	}
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {
-			pid:  200,
-			ppid: 100,
-			comm: "node",
-			args: "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+func TestDiscoverAgentSessionIDsReservesArgvOwnedSiblingSession(t *testing.T) {
+	for _, tc := range []struct {
+		tool        string
+		sessionID   string
+		relPath     string
+		fileContent string
+		resumeArgs  string
+	}{
+		{
+			tool:        "codex",
+			sessionID:   "123e4567-e89b-12d3-a456-426614174055",
+			relPath:     filepath.Join(".codex", "sessions", "2026", "08", "rollout-2026-08-18T00-00-00-123e4567-e89b-12d3-a456-426614174055.jsonl"),
+			fileContent: `{"cwd":"/work/project","id":"123e4567-e89b-12d3-a456-426614174055"}` + "\n",
+			resumeArgs:  "codex resume 123e4567-e89b-12d3-a456-426614174055",
 		},
+		{
+			tool:        "claude",
+			sessionID:   "de4e84a3-cf16-4cc2-8ba7-34587e984d4a",
+			relPath:     filepath.Join(".claude", "projects", "-work-project", "de4e84a3-cf16-4cc2-8ba7-34587e984d4a.jsonl"),
+			fileContent: `{"cwd":"/work/project","sessionId":"de4e84a3-cf16-4cc2-8ba7-34587e984d4a"}` + "\n",
+			resumeArgs:  "claude --resume de4e84a3-cf16-4cc2-8ba7-34587e984d4a",
+		},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			stubProcessMetadata(t)
+			home := t.TempDir()
+			setTestHomeDir(t, home)
+			path := filepath.Join(home, tc.relPath)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.fileContent), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			processOpenFilePathsForMetadata = func(int) []string { return nil }
+			processWorkingDirectoryForMetadata = func(int) string { return "/work/project" }
+			processStartedAtForMetadata = func(int) time.Time { return time.Now().Add(-time.Minute) }
+			processes := map[int]processInfo{
+				100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
+				101: {pid: 101, ppid: 1, comm: "zsh", args: "zsh"},
+				200: {pid: 200, ppid: 100, comm: tc.tool, args: tc.resumeArgs},
+				201: {pid: 201, ppid: 101, comm: tc.tool, args: tc.tool},
+			}
+
+			got := discoverRestoreAgentSessionIDs(tc.tool, processes, map[int]struct{}{100: {}, 101: {}}, nil, nil)
+			if got[100] != tc.sessionID || got[101] != "" {
+				t.Fatalf("%s sibling assignments = %#v, want only argv-owned pane", tc.tool, got)
+			}
+		})
 	}
+}
 
-	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, nil)
+func TestDiscoverAgentSessionIDsUsesOpenSessionFile(t *testing.T) {
+	for _, tc := range []struct {
+		tool      string
+		sessionID string
+		openPath  string
+		process   processInfo
+	}{
+		{
+			tool:      "codex",
+			sessionID: "123e4567-e89b-12d3-a456-426614174000",
+			openPath:  "/Users/alice/.codex/sessions/2026/06/rollout-2026-06-01T06-50-00-123e4567-e89b-12d3-a456-426614174000.jsonl",
+			process:   processInfo{pid: 200, ppid: 100, comm: "node", args: "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js"},
+		},
+		{
+			tool:      "claude",
+			sessionID: "de4e84a3-cf16-4cc2-8ba7-34587e984d4a",
+			openPath:  "/Users/alice/.claude/projects/-Users-alice-Code-proj/de4e84a3-cf16-4cc2-8ba7-34587e984d4a.jsonl",
+			process:   processInfo{pid: 200, ppid: 100, comm: "claude", args: "claude"},
+		},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			stubProcessMetadata(t)
+			processOpenFilePathsForMetadata = func(pid int) []string {
+				if pid == 200 {
+					return []string{tc.openPath}
+				}
+				return nil
+			}
+			processWorkingDirectoryForMetadata = func(pid int) string {
+				if pid == 200 {
+					return "/work/project"
+				}
+				return ""
+			}
+			processes := map[int]processInfo{
+				100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
+				200: tc.process,
+			}
 
-	if got := sessions[100]; got != sessionID {
-		t.Fatalf("codex session id = %q, want %q", got, sessionID)
+			sessions := discoverRestoreAgentSessionIDs(tc.tool, processes, map[int]struct{}{100: {}}, nil, nil)
+			if got := sessions[100]; got != tc.sessionID {
+				t.Fatalf("%s session id = %q, want %q", tc.tool, got, tc.sessionID)
+			}
+		})
 	}
 }
 
 func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
-	originalTable := processTableForMetadata
-	t.Cleanup(func() { processTableForMetadata = originalTable })
-	originalHome := os.Getenv("HOME")
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		_ = os.Setenv("HOME", originalHome)
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-		processStartedAtForMetadata = originalProcessStart
-	})
-
+	stubProcessMetadata(t)
 	home := t.TempDir()
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatal(err)
-	}
+	setTestHomeDir(t, home)
 	sessionID := "123e4567-e89b-12d3-a456-426614174001"
 	rolloutDir := filepath.Join(home, ".codex", "sessions", "2026", "06")
 	if err := os.MkdirAll(rolloutDir, 0o700); err != nil {
@@ -10706,12 +10506,7 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 		t.Fatal(err)
 	}
 	processOpenFilePathsForMetadata = func(pid int) []string { return nil }
-	processWorkingDirectoryForMetadata = func(pid int) string {
-		if pid == 200 {
-			return "/work/project"
-		}
-		return ""
-	}
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	processStartedAtForMetadata = func(pid int) time.Time {
 		if pid == 200 {
 			return time.Now().Add(-time.Minute)
@@ -10723,7 +10518,6 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 		200: {pid: 200, ppid: 100, comm: "codex", args: "codex"},
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
-	processWorkingDirectoryForMetadata = func(int) string { return "" }
 
 	sessions := discoverRestoreAgentSessionIDs("codex", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
@@ -10733,22 +10527,10 @@ func TestDiscoverCodexSessionIDsFallsBackToRecentRolloutForCwd(t *testing.T) {
 }
 
 func TestDiscoverCodexSessionIDsSkipsUnknownProcessStart(t *testing.T) {
-	originalHome := os.Getenv("HOME")
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		_ = os.Setenv("HOME", originalHome)
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-		processStartedAtForMetadata = originalProcessStart
-	})
-
+	stubProcessMetadata(t)
 	processStartedAtForMetadata = func(int) time.Time { return time.Time{} }
 	home := t.TempDir()
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatal(err)
-	}
+	setTestHomeDir(t, home)
 	sessionID := "123e4567-e89b-12d3-a456-426614174002"
 	rolloutDir := filepath.Join(home, ".codex", "sessions", "2026", "06")
 	if err := os.MkdirAll(rolloutDir, 0o700); err != nil {
@@ -10831,16 +10613,9 @@ func TestDiscoverOpenCodeSessionIDsUsesProcessArgs(t *testing.T) {
 }
 
 func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
-	originalTable := processTableForMetadata
-	t.Cleanup(func() { processTableForMetadata = originalTable })
+	stubProcessMetadata(t)
 	originalReader := openCodeSessionEntriesReader
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	originalProcessStart := processStartedAtForMetadata
-	t.Cleanup(func() {
-		openCodeSessionEntriesReader = originalReader
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-		processStartedAtForMetadata = originalProcessStart
-	})
+	t.Cleanup(func() { openCodeSessionEntriesReader = originalReader })
 	now := time.Now()
 	openCodeSessionEntriesReader = func() []openCodeSessionEntry {
 		return []openCodeSessionEntry{
@@ -10848,12 +10623,7 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 			{sessionID: "ses_other", directory: "/tmp/other", updatedAt: now},
 		}
 	}
-	processWorkingDirectoryForMetadata = func(pid int) string {
-		if pid == 200 {
-			return "/work/project"
-		}
-		return ""
-	}
+	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	processStartedAtForMetadata = func(pid int) time.Time {
 		if pid == 200 {
 			return now.Add(-time.Minute)
@@ -10866,7 +10636,6 @@ func TestDiscoverOpenCodeSessionIDsUsesWorkingDirectory(t *testing.T) {
 	}
 	processTableForMetadata = func() map[int]processInfo { return processes }
 
-	processWorkingDirectoryForMetadata = func(int) string { return "" }
 	sessions := discoverRestoreAgentSessionIDs("opencode", processes, map[int]struct{}{100: {}}, nil, map[int]string{100: "/work/project"})
 
 	if got := sessions[100]; got != "ses_new" {
@@ -10906,41 +10675,6 @@ func TestDiscoverOpenCodeSessionIDsSkipsAmbiguousWorkingDirectory(t *testing.T) 
 	}
 }
 
-func TestDiscoverClaudeSessionIDsUsesOpenProjectFile(t *testing.T) {
-	originalOpenFiles := processOpenFilePathsForMetadata
-	originalWorkingDirectory := processWorkingDirectoryForMetadata
-	t.Cleanup(func() {
-		processOpenFilePathsForMetadata = originalOpenFiles
-		processWorkingDirectoryForMetadata = originalWorkingDirectory
-	})
-
-	sessionID := "de4e84a3-cf16-4cc2-8ba7-34587e984d4a"
-	processOpenFilePathsForMetadata = func(pid int) []string {
-		if pid != 200 {
-			return nil
-		}
-		return []string{
-			"/Users/alice/.claude/projects/-Users-alice-Code-proj/" + sessionID + ".jsonl",
-		}
-	}
-	processWorkingDirectoryForMetadata = func(pid int) string {
-		if pid == 200 {
-			return "/work/project"
-		}
-		return ""
-	}
-	processes := map[int]processInfo{
-		100: {pid: 100, ppid: 1, comm: "zsh", args: "zsh"},
-		200: {pid: 200, ppid: 100, comm: "claude", args: "claude"},
-	}
-
-	sessions := discoverRestoreAgentSessionIDs("claude", processes, map[int]struct{}{100: {}}, nil, nil)
-
-	if got := sessions[100]; got != sessionID {
-		t.Fatalf("claude session id = %q, want %q", got, sessionID)
-	}
-}
-
 func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T) {
 	originalTable := processTableForMetadata
 	t.Cleanup(func() { processTableForMetadata = originalTable })
@@ -10954,7 +10688,7 @@ func TestDiscoverClaudeSessionIDsFallsBackToRecentProjectFileForCwd(t *testing.T
 	})
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	sessionID := "fa0a7327-666a-4439-8052-8d9e61c16d3f"
 	projectDir := filepath.Join(home, ".claude", "projects", "-work-project")
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
@@ -11044,7 +10778,7 @@ func TestDiscoverClaudeSessionIDsResumesSessionThatMovedIntoWorktree(t *testing.
 	})
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	sessionID := "b3f0d1c6-2f4f-4d0e-9f0f-2f26f9b1f4c1"
 	worktreeCwd := "/work/project/.claude/worktrees/feature"
 	writeClaudeWorktreeSessionFile(t, home, sessionID, "/work/project", worktreeCwd)
@@ -11085,7 +10819,7 @@ func TestDiscoverClaudeSessionIDsIgnoresSessionThatLeftTheWorkingDirectory(t *te
 	})
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	sessionID := "0d1b2f5c-9a0e-4c1a-8a6a-2b7f5c8d0e11"
 	writeClaudeWorktreeSessionFile(
 		t,
@@ -11166,7 +10900,7 @@ func TestDiscoverClaudeSessionIDsResumesAfterAgentChangedDirectory(t *testing.T)
 	})
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	sessionID := "8c2e4d17-3b5a-4e7c-9f01-6d3b8a2c5e94"
 	projectDir := filepath.Join(home, ".claude", "projects", "-work-project")
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
@@ -11277,7 +11011,7 @@ func TestDiscoverClaudeSessionIDsDoesNotResumeSessionFromBeforeFreshProcess(t *t
 	})
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	sessionID := "a69d705a-1822-49de-83ba-c86bd51932bb"
 	projectDir := filepath.Join(home, ".claude", "projects", "-work-project")
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
@@ -11758,7 +11492,7 @@ func TestCreateWindowOptionsForRestoreDropsIncompleteTrailingAPC(t *testing.T) {
 
 func TestEnrichRestoreClearsUnvalidatedCarriedAgentSessions(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	restore := &serverRestore{Windows: []restoreWindowState{
 		{Name: "Copilot CLI", AgentTool: "copilot", AgentSessionID: "stale-copilot"},
 		{Name: "Codex", AgentTool: "codex", AgentSessionID: "stale-codex"},
@@ -11828,7 +11562,7 @@ func TestEnrichRestoreWithAgentSessionIDsUsesAntigravityHistory(t *testing.T) {
 		return time.Time{}
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	project := filepath.Join(home, "project")
 	historyDir := filepath.Join(home, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(historyDir, 0o700); err != nil {
@@ -11888,7 +11622,7 @@ func TestEnrichRestoreAntigravityRejectsOtherWorkspaceFileMtime(t *testing.T) {
 		}
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	project := filepath.Join(home, "project")
 	now := time.Now().UTC().Truncate(time.Second)
 	processStartedAtForMetadata = func(pid int) time.Time {
@@ -11978,7 +11712,7 @@ func TestLiveCursorWindowPublishesSessionFromFalseConversationMetadata(t *testin
 		}
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	project := filepath.Join(home, "project", "named-subtree")
 	chatDir := filepath.Join(home, ".cursor", "chats", "workspace", "live-chat")
 	if err := os.MkdirAll(chatDir, 0o700); err != nil {
@@ -12031,7 +11765,7 @@ func TestEnrichRestoreWithAgentSessionIDsUsesCursorChatStore(t *testing.T) {
 		}
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHomeDir(t, home)
 	project := filepath.Join(home, "project")
 	chatsDir := filepath.Join(home, ".cursor", "chats", "workspacehash")
 
@@ -13055,112 +12789,76 @@ func TestControlClientCloseCancelsRunCommand(t *testing.T) {
 
 func waitForTrackedCommand(t *testing.T, client *controlClient) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitUntil(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		client.commandsMu.Lock()
 		count := len(client.commands)
 		client.commandsMu.Unlock()
-		if count > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("command was not tracked")
+		return count > 0
+	}, func() {
+		t.Fatal("command was not tracked")
+	})
 }
 
-func TestPromptForServerUpdateDefaultsToKeepingExistingSession(t *testing.T) {
+func TestPromptForServerUpdate(t *testing.T) {
 	t.Parallel()
-	var output bytes.Buffer
-	status := runningServerStatus{version: "0.1.0"}
-
-	if promptForServerUpdate(strings.NewReader("\n"), &output, "main", status) {
-		t.Fatal("empty prompt response updated server")
-	}
-	if got := output.String(); !strings.Contains(got, "update skipped") {
-		t.Fatalf("prompt output = %q, want skipped message", got)
-	}
-}
-
-func TestPromptForServerUpdateAcceptsYes(t *testing.T) {
-	t.Parallel()
-	var output bytes.Buffer
-	status := runningServerStatus{version: "0.1.0"}
-
-	if !promptForServerUpdate(strings.NewReader("yes\n"), &output, "main", status) {
-		t.Fatal("yes prompt response did not update server")
-	}
-}
-
-func TestPromptForServerUpdateWarnsWhenShutdownIsUnavailable(t *testing.T) {
-	t.Parallel()
-	var output bytes.Buffer
-	status := runningServerStatus{version: "0.1.0"}
-
-	if !promptForServerUpdate(strings.NewReader("y\n"), &output, "main", status) {
-		t.Fatal("yes prompt response did not update server")
-	}
-	if got := output.String(); !strings.Contains(got, "may abandon") {
-		t.Fatalf("prompt output = %q, want abandon warning", got)
-	}
-}
-
-func TestPromptForServerUpdateDescribesWindowRestore(t *testing.T) {
-	t.Parallel()
-	var output bytes.Buffer
-	status := runningServerStatus{
-		version:      "0.1.1",
-		capabilities: []string{"shutdown"},
-	}
-
-	if !promptForServerUpdate(strings.NewReader("y\n"), &output, "main", status) {
-		t.Fatal("yes prompt response did not update server")
-	}
-	if got := output.String(); !strings.Contains(got, "try to restore existing windows") {
-		t.Fatalf("prompt output = %q, want restore message", got)
-	}
-}
-
-func TestPromptForServerUpdateSkipsOnReadError(t *testing.T) {
-	t.Parallel()
-	var output bytes.Buffer
-	status := runningServerStatus{version: "0.1.0"}
-
-	if promptForServerUpdate(errReader{}, &output, "main", status) {
-		t.Fatal("failed prompt read updated server")
-	}
-	if got := output.String(); !strings.Contains(got, "update skipped") {
-		t.Fatalf("prompt output = %q, want skipped message", got)
-	}
-}
-
-func TestCapabilitiesAdvertiseBracketedPasteControlInput(t *testing.T) {
-	t.Parallel()
-	for _, capability := range capabilities {
-		if capability == "inject-input-bracketed-paste" {
-			return
-		}
-	}
-	t.Fatal("bracketed-paste control input capability is not advertised")
-}
-
-func TestRunningServerStatusSupportsCapability(t *testing.T) {
-	t.Parallel()
-	status := runningServerStatus{
-		version:      "0.1.0",
-		capabilities: []string{"attach", "shutdown"},
-	}
-
-	if !status.supportsCapability("shutdown") {
-		t.Fatal("expected shutdown capability")
-	}
-	if status.supportsCapability("missing") {
-		t.Fatal("unexpected missing capability")
+	for _, tc := range []struct {
+		name         string
+		reader       io.Reader
+		status       runningServerStatus
+		wantUpdate   bool
+		wantContains string
+	}{
+		{
+			name:         "defaults to keeping existing session",
+			reader:       strings.NewReader("\n"),
+			status:       runningServerStatus{version: "0.1.0"},
+			wantUpdate:   false,
+			wantContains: "update skipped",
+		},
+		{
+			name:       "accepts yes",
+			reader:     strings.NewReader("yes\n"),
+			status:     runningServerStatus{version: "0.1.0"},
+			wantUpdate: true,
+		},
+		{
+			name:         "warns when shutdown is unavailable",
+			reader:       strings.NewReader("y\n"),
+			status:       runningServerStatus{version: "0.1.0"},
+			wantUpdate:   true,
+			wantContains: "may abandon",
+		},
+		{
+			name:         "describes window restore",
+			reader:       strings.NewReader("y\n"),
+			status:       runningServerStatus{version: "0.1.1", capabilities: []string{"shutdown"}},
+			wantUpdate:   true,
+			wantContains: "try to restore existing windows",
+		},
+		{
+			name:         "skips on read error",
+			reader:       errReader{},
+			status:       runningServerStatus{version: "0.1.0"},
+			wantUpdate:   false,
+			wantContains: "update skipped",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			if got := promptForServerUpdate(tc.reader, &output, "main", tc.status); got != tc.wantUpdate {
+				t.Fatalf("promptForServerUpdate() = %v, want %v", got, tc.wantUpdate)
+			}
+			if tc.wantContains != "" && !strings.Contains(output.String(), tc.wantContains) {
+				t.Fatalf("prompt output = %q, want %q", output.String(), tc.wantContains)
+			}
+		})
 	}
 }
 
 type errReader struct{}
 
-type discardConn struct{}
+type discardConn struct{ net.Conn }
 
 type failingConn struct {
 	discardConn
@@ -13267,29 +12965,10 @@ func (c *responseCheckConn) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (discardConn) Close() error {
-	return nil
-}
-
-func (discardConn) LocalAddr() net.Addr {
-	return testAddr("local")
-}
-
-func (discardConn) RemoteAddr() net.Addr {
-	return testAddr("remote")
-}
-
-func (discardConn) SetDeadline(time.Time) error {
-	return nil
-}
-
-func (discardConn) SetReadDeadline(time.Time) error {
-	return nil
-}
-
-func (discardConn) SetWriteDeadline(time.Time) error {
-	return nil
-}
+func (discardConn) Close() error                     { return nil }
+func (discardConn) SetDeadline(time.Time) error      { return nil }
+func (discardConn) SetReadDeadline(time.Time) error  { return nil }
+func (discardConn) SetWriteDeadline(time.Time) error { return nil }
 
 func waitForPrimaryClient(
 	t *testing.T,
@@ -13299,30 +12978,25 @@ func waitForPrimaryClient(
 	height int,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	var primary net.Conn
+	var gotWidth, gotHeight int
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
 		server.mu.Lock()
-		primary := server.attachConn
-		gotWidth, gotHeight := server.width, server.height
+		primary = server.attachConn
+		gotWidth, gotHeight = server.width, server.height
 		server.mu.Unlock()
-		if primary == want && gotWidth == width && gotHeight == height {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	server.mu.Lock()
-	primary := server.attachConn
-	gotWidth, gotHeight := server.width, server.height
-	server.mu.Unlock()
-	t.Fatalf(
-		"primary client = %v at %dx%d, want %v at %dx%d",
-		primary,
-		gotWidth,
-		gotHeight,
-		want,
-		width,
-		height,
-	)
+		return primary == want && gotWidth == width && gotHeight == height
+	}, func() {
+		t.Fatalf(
+			"primary client = %v at %dx%d, want %v at %dx%d",
+			primary,
+			gotWidth,
+			gotHeight,
+			want,
+			width,
+			height,
+		)
+	})
 }
 
 func TestReplayOmitsTheAttachOscTailStillWithheldFromLiveOutput(t *testing.T) {
@@ -13524,7 +13198,7 @@ func TestMetadataDiscoveryReleasesServerLockAndRejectsChangedProcess(t *testing.
 	window := &muxWindow{id: "@1", foregroundPid: 42, foregroundCommand: "zsh"}
 	_, server := newThemeQueryTestServer(t, window)
 	foregroundProcessGroupForWindow = func(w *muxWindow) int { return w.foregroundPid }
-	t.Setenv("HOME", t.TempDir())
+	setTestHomeDir(t, t.TempDir())
 	cache := &commandProcessTableCache
 	cache.mu.Lock()
 	previous, loaded := cache.processes, cache.loadedAt

@@ -615,19 +615,14 @@ func TestAcpWriterLeaseConcurrentTakeoversLeaveOneWriter(t *testing.T) {
 
 func waitForNoWriter(t *testing.T, bridge *acpBridge) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
+	waitUntil(t, time.Second, 5*time.Millisecond, func() bool {
 		bridge.mu.Lock()
 		free := bridge.clients[bridge.writerClientID] == nil
 		bridge.mu.Unlock()
-		if free {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the writer never detached")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return free
+	}, func() {
+		t.Fatal("the writer never detached")
+	})
 }
 
 func TestAcpDuplicateAnswerLeavesTheReplayCopyForARetry(t *testing.T) {

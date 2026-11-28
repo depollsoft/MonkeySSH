@@ -134,11 +134,7 @@ exit 0`,
 
 func waitRejectedCondition(t *testing.T, description string, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for !ready() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", description)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitUntil(t, 3*time.Second, 10*time.Millisecond, ready, func() {
+		t.Fatalf("timed out waiting for %s", description)
+	})
 }

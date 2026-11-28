@@ -63,7 +63,7 @@ type vtSemanticState struct {
 // both screens as applyTerminalShellIntegrationOsc does: A and D the prompt, B
 // and I the command being edited, C a command running.
 const (
-	vtShellNone uint8 = iota
+	_ uint8 = iota // none
 	vtShellPrompt
 	vtShellEditing
 	vtShellRunning

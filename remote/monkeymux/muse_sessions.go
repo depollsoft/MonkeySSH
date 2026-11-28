@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -113,7 +113,7 @@ func (cache *museSessionCache) read(root string, readMetadata func(string, strin
 		return filepath.SkipDir
 	})
 	cache.entries = next
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].created.After(candidates[j].created) })
+	slices.SortFunc(candidates, func(a, b agentSessionCandidate) int { return b.created.Compare(a.created) })
 	return candidates
 }
 

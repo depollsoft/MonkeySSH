@@ -15,7 +15,7 @@ func TestCodexSessionGateWaitsForHeldFile(t *testing.T) {
 	for _, customHome := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default-home", true: "custom-home"}[customHome], func(t *testing.T) {
 			home := t.TempDir()
-			t.Setenv("HOME", home)
+			setTestHomeDir(t, home)
 			t.Setenv("CODEX_HOME", "")
 			codexHome := filepath.Join(home, ".codex")
 			if customHome {

@@ -5,9 +5,7 @@ package main
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 // acpProviderProcessGroupHasLiveMember reads procfs directly instead of
@@ -29,17 +27,8 @@ func acpProviderProcessGroupHasLiveMember(cmd *exec.Cmd) (bool, error) {
 		if err != nil {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-		if err != nil {
-			continue
-		}
-		text := string(data)
-		end := strings.LastIndex(text, ")")
-		if end < 0 {
-			continue
-		}
-		fields := strings.Fields(text[end+1:])
-		if len(fields) < 3 {
+		_, fields, ok := readProcStat(pid)
+		if !ok || len(fields) < 3 {
 			continue
 		}
 		memberGroup, err := strconv.Atoi(fields[2])

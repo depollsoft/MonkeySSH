@@ -138,17 +138,11 @@ type attachDeliveryReporter struct {
 // openAttachDeliveryReporter connects a reporter, or returns nil when the
 // server does not take reports or cannot be reached.
 func openAttachDeliveryReporter(session string) *attachDeliveryReporter {
-	conn, err := dialSession(session)
+	conn, encoder, decoder, hello, err := dialControlClient(session)
 	if err != nil {
 		return nil
 	}
-	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
-	encoder := json.NewEncoder(conn)
-	decoder := json.NewDecoder(conn)
-	var hello controlResponse
-	if encoder.Encode(controlMessage{Role: "control", Session: session}) != nil ||
-		decoder.Decode(&hello) != nil ||
-		!slices.Contains(hello.Capabilities, attachOutputDeliveryCapability) {
+	if !slices.Contains(hello.Capabilities, attachOutputDeliveryCapability) {
 		_ = conn.Close()
 		return nil
 	}

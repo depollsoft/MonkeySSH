@@ -627,12 +627,12 @@ func TestPushStoreReloadsChangesFromOtherServers(t *testing.T) {
 	h := newPushTestHarness(t)
 	other := newPushNotifier()
 	other.now = h.clock.Now
-	if other.store.hasDevices() {
+	if devices, _ := other.store.snapshot(); len(devices) != 0 {
 		t.Fatal("fresh store has devices")
 	}
 	h.register(t, newPushTestDevice(t, 1))
 	h.clock.Advance(pushStoreRecheckInterval)
-	if !other.store.hasDevices() {
+	if devices, _ := other.store.snapshot(); len(devices) == 0 {
 		t.Fatal("second server did not see the registration")
 	}
 }

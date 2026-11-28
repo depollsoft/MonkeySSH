@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net"
@@ -102,16 +103,34 @@ func registerTestAttachClient(
 	return client
 }
 
-func waitForRecordedOutput(t *testing.T, conn *recordingConn, want string) {
+func waitUntil(
+	t testing.TB,
+	timeout time.Duration,
+	interval time.Duration,
+	ready func() bool,
+	onTimeout func(),
+) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if got := conn.String(); got == want {
+	deadline := time.Now().Add(timeout)
+	for {
+		if ready() {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		if !time.Now().Before(deadline) {
+			onTimeout()
+			return
+		}
+		time.Sleep(interval)
 	}
-	t.Fatalf("recorded output = %q, want %q", conn.String(), want)
+}
+
+func waitForRecordedOutput(t *testing.T, conn *recordingConn, want string) {
+	t.Helper()
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
+		return conn.String() == want
+	}, func() {
+		t.Fatalf("recorded output = %q, want %q", conn.String(), want)
+	})
 }
 
 func waitForRecordedContains(
@@ -120,35 +139,27 @@ func waitForRecordedContains(
 	want string,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(conn.String(), want) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("recorded output = %q, want it to contain %q", conn.String(), want)
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
+		return strings.Contains(conn.String(), want)
+	}, func() {
+		t.Fatalf("recorded output = %q, want it to contain %q", conn.String(), want)
+	})
 }
 
 // waitForWindowReplies waits until every reply the output reader queued for
 // window has been written to its pty.
 func waitForWindowReplies(t *testing.T, window *muxWindow) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
 		window.inputMu.Lock()
 		window.replies.mu.Lock()
 		idle := !window.replies.drainQueued && len(window.replies.pending) == 0
 		window.replies.mu.Unlock()
 		window.inputMu.Unlock()
-		if idle {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("queued window replies were not written")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return idle
+	}, func() {
+		t.Fatal("queued window replies were not written")
+	})
 }
 
 // controlRecorder records a control client's frames. String waits for the
@@ -217,8 +228,7 @@ func trimReplayHistoryForAttach(history []byte) []byte {
 
 func waitForTestAttachWrites(t *testing.T, server *muxServer) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
 		pending := false
 		server.mu.Lock()
 		for _, client := range server.attachClients {
@@ -227,12 +237,10 @@ func waitForTestAttachWrites(t *testing.T, server *muxServer) {
 			client.queueMu.Unlock()
 		}
 		server.mu.Unlock()
-		if !pending {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("attach writes did not finish")
+		return !pending
+	}, func() {
+		t.Fatal("attach writes did not finish")
+	})
 }
 
 func waitForPendingQueryState(
@@ -243,35 +251,55 @@ func waitForPendingQueryState(
 	pending string,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	var gotInFlight, gotPending string
+	waitUntil(t, time.Second, time.Millisecond, func() bool {
 		server.mu.Lock()
-		gotInFlight := string(window.pendingTerminalQueriesInFlight)
-		gotPending := string(window.pendingTerminalQueries)
+		gotInFlight = string(window.pendingTerminalQueriesInFlight)
+		gotPending = string(window.pendingTerminalQueries)
 		server.mu.Unlock()
-		if gotInFlight == inFlight && gotPending == pending {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	server.mu.Lock()
-	gotInFlight := string(window.pendingTerminalQueriesInFlight)
-	gotPending := string(window.pendingTerminalQueries)
-	server.mu.Unlock()
-	t.Fatalf(
-		"query state = in-flight %q, pending %q; want %q and %q",
-		gotInFlight,
-		gotPending,
-		inFlight,
-		pending,
-	)
+		return gotInFlight == inFlight && gotPending == pending
+	}, func() {
+		t.Fatalf(
+			"query state = in-flight %q, pending %q; want %q and %q",
+			gotInFlight,
+			gotPending,
+			inFlight,
+			pending,
+		)
+	})
 }
 
 // recordingPty captures synchronous writes to a window's child.
 type recordingPty struct{ recordingConn }
 
 func (p *recordingPty) Resize(int, int) error { return nil }
-func (p *recordingPty) Fd() uintptr           { return 0 }
+
+// attachTestClient attaches a client to bridge with hello and returns its
+// connection and a reader positioned at the first primed frame.
+func attachTestClient(
+	t *testing.T,
+	bridge *acpBridge,
+	hello acpWireMessage,
+) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	server, peer := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		hello.Version = acpBridgeProtocolVersion
+		hello.Type = "hello"
+		bridge.handleAttach(server, bufio.NewReader(server), hello)
+	}()
+	t.Cleanup(func() {
+		_ = peer.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("attach did not stop")
+		}
+	})
+	return peer, bufio.NewReader(peer)
+}
 
 func newTestAcpBridge() *acpBridge {
 	now := time.Now()
@@ -398,6 +426,29 @@ func (s *muxServer) replayBytesLocked(window *muxWindow) []byte {
 func (w *muxWindow) kittyImageReplayLocked(clientHas map[string]uint32) []byte {
 	out, _ := w.kittyImageReplaySelectionLocked(clientHas)
 	return out
+}
+
+func (s *terminalScreen) RenderFrame() []byte {
+	return s.RenderFrameReplacing(nil)
+}
+
+func (s *terminalScreen) RenderMainScreen() []byte {
+	return s.RenderMainScreenReplacing(nil)
+}
+
+func (c *attachClient) expectTerminalResponses(windowID string, count int) {
+	c.expectTerminalResponsesUntilDelivered(windowID, count, 0)
+}
+
+func (w *muxWindow) appendHistoryLocked(chunk []byte) {
+	w.appendHistoryReportingCursorLocked(chunk, nil)
+}
+
+func (s *muxServer) foregroundHistoryFallbackReplayLocked(
+	window *muxWindow,
+	screen *terminalScreen,
+) []byte {
+	return s.foregroundHistoryFallbackReplayForClientLocked(window, screen, nil)
 }
 
 // lastPublishedExitCode is the exit code carried by the most recent state

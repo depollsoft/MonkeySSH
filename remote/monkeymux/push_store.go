@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -214,8 +215,8 @@ func enforcePushCaps(state *pushStateFile) {
 		if len(indexes) <= pushMaxRecordsPerDevice {
 			continue
 		}
-		sort.Slice(indexes, func(a, b int) bool {
-			return state.Devices[indexes[a]].UpdatedAt < state.Devices[indexes[b]].UpdatedAt
+		slices.SortFunc(indexes, func(a, b int) int {
+			return cmp.Compare(state.Devices[a].UpdatedAt, state.Devices[b].UpdatedAt)
 		})
 		for _, index := range indexes[:len(indexes)-pushMaxRecordsPerDevice] {
 			drop[index] = true
@@ -236,7 +237,7 @@ func enforcePushCaps(state *pushStateFile) {
 		}
 		ages = append(ages, deviceAge{id, latest})
 	}
-	sort.Slice(ages, func(a, b int) bool { return ages[a].updated < ages[b].updated })
+	slices.SortFunc(ages, func(a, b deviceAge) int { return cmp.Compare(a.updated, b.updated) })
 	evicted := map[string]bool{}
 	for len(ages)-len(evicted) > pushMaxDevices {
 		evicted[ages[len(evicted)].id] = true
@@ -481,22 +482,6 @@ func ensurePushSalt(state *pushStateFile) ([]byte, error) {
 	}
 	state.Salt = base64.RawURLEncoding.EncodeToString(fresh)
 	return fresh, nil
-}
-
-// rejection reports whether ticket was rejected for deviceID.
-func (st *pushStore) rejection(deviceID string, ticket string) string {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.refreshLocked()
-	return pushRejectionFor(st.state, deviceID, ticket)
-}
-
-// hasDevices refreshes the cache and reports whether anything is registered.
-func (st *pushStore) hasDevices() bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.refreshLocked()
-	return len(st.state.Devices) > 0
 }
 
 // mayHaveDevices is a lock-free hint for hot paths; it lags the file by at
