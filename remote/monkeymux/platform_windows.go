@@ -989,6 +989,48 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 	return exec.Command(shell, "-NoLogo", "-Command", command) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 }
 
+// programResumeRunnable reports whether a reported OSC 7577 command can be
+// run here: its program must be found now, because a window whose process
+// cannot start is not restored at all.
+//
+// It must also be an executable image. A batch file (the .cmd shim npm
+// installs for a CLI) runs through cmd.exe, which reads the arguments again
+// as its own syntax, so an argument holding & or | would not arrive as one
+// argument and could run something else.
+func programResumeRunnable(resume programResumeState) bool {
+	path, err := exec.LookPath(resume.Argv[0])
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".exe", ".com":
+		return true
+	}
+	return false
+}
+
+// programResumeOwnerInWindow always holds here: Windows has no terminal
+// sessions to compare, and no pid namespaces to confuse a pid.
+func programResumeOwnerInWindow(windowPid int, pid int) bool {
+	_, _ = windowPid, pid
+	return true
+}
+
+// programResumeCommand starts a reported OSC 7577 command as the window's own
+// process, with each element as one argument. No shell reads it, and a bare
+// name is found on PATH but never in the current directory. The window closes
+// when the program ends.
+func programResumeCommand(
+	shell string,
+	resume programResumeState,
+	directory string,
+) (cmd *exec.Cmd, direct bool, input []byte, err error) {
+	// The caller sets the process's directory; nothing runs before the program.
+	_, _ = shell, directory
+	// The command is one the user's own program reported under the window's token.
+	return exec.Command(resume.Argv[0], resume.Argv[1:]...), true, nil, nil // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+}
+
 func isCmdShell(shell string) bool {
 	base := strings.ToLower(filepath.Base(shell))
 	return base == "cmd" || base == "cmd.exe"

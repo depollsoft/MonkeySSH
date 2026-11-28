@@ -4,13 +4,16 @@ import 'package:flutter/foundation.dart';
 
 import 'terminal_progress.dart';
 
-/// OSC code of the Program Status Protocol, revision 0.3:
+/// OSC code of the Program Status Protocol, revision 0.4:
 /// https://superlogical.com/rex/docs/build/program-status
 const terminalProgramStatusOscCode = '7501';
 
 /// Reply to OSC 7501 feature detection (`OSC 7501 ; ? ST`).
 ///
 /// Programs such as Claude Code report nothing until a terminal sends it.
+/// Revision 0.4 lets the reply list `states` and `kinds`; a reply that lists
+/// neither means exactly the spec's fixed lists, which are the ones the app
+/// implements, and programs written against revision 0.3 expect this form.
 const terminalProgramStatusQueryReply = '\x1b]7501;?\x1b\\';
 
 /// What a program reported it is doing through OSC 7501.

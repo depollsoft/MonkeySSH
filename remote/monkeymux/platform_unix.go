@@ -687,6 +687,80 @@ func shellCommandForScript(shell string, command string) *exec.Cmd {
 	return cmd
 }
 
+// programResumeRunnable reports whether a reported OSC 7577 command can be
+// run here. It needs a POSIX shell: other shells restore the usual way. A
+// program named by a path must still be an executable file. A bare name is
+// looked up on the restored shell's PATH, which is not known here; when it
+// is missing, the window shows the helper's error.
+func programResumeRunnable(resume programResumeState) bool {
+	if !isPosixShell(defaultShellPath()) {
+		return false
+	}
+	if program := resume.Argv[0]; filepath.IsAbs(program) {
+		info, err := os.Stat(program)
+		return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	}
+	return true
+}
+
+// programResumeOwnerInWindow reports whether pid belongs to the terminal
+// session the window's process leads. A window without a process has no
+// session to compare.
+func programResumeOwnerInWindow(windowPid int, pid int) bool {
+	if windowPid <= 0 {
+		return true
+	}
+	windowSession, err := unix.Getsid(windowPid)
+	if err != nil {
+		return false
+	}
+	session, err := unix.Getsid(pid)
+	return err == nil && session == windowSession
+}
+
+// programResumeCommand runs a reported OSC 7577 command through `monkeymux
+// program-resume-exec` (see programResumeExecCommand) in the user's shell
+// environment. The command and its directory travel in a private file, so no
+// part of the report is ever shell source: the only text a shell reads is
+// this executable's path and that file's, both MonkeyMux's own.
+//
+// A shell window starts its interactive login shell as usual and types the
+// helper's command line as its first input, so the program is an ordinary job
+// of the shell that stays: Ctrl-Z, fg and the prompt afterwards work as they
+// did. Any other window runs the helper from a login, interactive shell that
+// has read its startup files, and closes with the program.
+func programResumeCommand(
+	shell string,
+	resume programResumeState,
+	directory string,
+) (cmd *exec.Cmd, direct bool, input []byte, err error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, false, nil, err
+	}
+	launch, err := writeProgramResumeLaunch(programResumeLaunch{Argv: resume.Argv, Cwd: directory})
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if resume.ShellWindow {
+		line := " " + shellQuote(self) + " program-resume-exec " + shellQuote(launch)
+		for index := 0; index < len(line); index++ {
+			// The terminal's line editing reads control characters before
+			// the shell reads quotes, so a path holding one cannot be typed.
+			if line[index] < 0x20 || line[index] == 0x7f {
+				_ = os.Remove(launch)
+				return nil, false, nil, errors.New("monkeymux: path cannot be typed into a shell")
+			}
+		}
+		return shellCommand(shell), false, []byte(line + "\n"), nil
+	}
+	cmd = exec.Command(shell, "-i", "-c", `\exec "$0" program-resume-exec "$1"`, self, launch)
+	if base := filepath.Base(shell); base != "" {
+		cmd.Args[0] = "-" + base
+	}
+	return cmd, false, nil, nil
+}
+
 // agentWindowHoldThresholdSeconds bounds how soon after launch an abnormal agent
 // exit still holds the window open. Startup failures surface within a couple of
 // seconds; a later exit is treated as the user ending the session normally, so

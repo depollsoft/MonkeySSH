@@ -25,6 +25,12 @@ func TestMain(m *testing.M) {
 		runAgentLaunchWrapper(os.Args[2:])
 		os.Exit(0)
 	}
+	// A window restored from an OSC 7577 report starts its program through
+	// this executable.
+	if len(os.Args) > 1 && os.Args[1] == "program-resume-exec" {
+		programResumeExecCommand(os.Args[2:])
+		os.Exit(0)
+	}
 	// A restored Codex window runs its resume gate through this executable.
 	// Without this branch the gate would run the whole suite again.
 	if len(os.Args) > 1 && os.Args[1] == "wait-codex-session" {
