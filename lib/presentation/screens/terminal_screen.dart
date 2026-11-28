@@ -102,7 +102,6 @@ import '../shortcuts/app_shortcut_scope.dart';
 import '../shortcuts/app_shortcuts.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
-import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_connection_support.dart';
 import '../widgets/acp_diff.dart' show legibleDiffColor;
 import '../widgets/acp_native_badge.dart';
@@ -156,7 +155,10 @@ import 'terminal/terminal_screen_policy.dart';
 export 'terminal/terminal_screen_policy.dart';
 
 part '../widgets/tmux_expandable_bar.dart';
+part 'terminal/terminal_screen_clipboard.dart';
+part 'terminal/terminal_screen_path_links.dart';
 part 'terminal/terminal_screen_shortcuts.dart';
+part 'terminal/terminal_screen_theme.dart';
 
 /// Lets the pop transition back to home finish before the rating sheet.
 const _appReviewAfterLeavingDelay = Duration(milliseconds: 700);
@@ -1910,6 +1912,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return false;
   }
 
+  void _updateState(VoidCallback fn) => setState(fn);
+
   @override
   void initState() {
     super.initState();
@@ -2172,463 +2176,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       stopSync: _stopSharedClipboardSync,
       session: session,
       waitForInitialSync: waitForInitialSync,
-    );
-  }
-
-  void _applyTerminalThemeToSession(
-    TerminalThemeData theme, {
-    SshSession? session,
-    bool forceRemoteRefresh = false,
-    String reason = 'unspecified',
-  }) {
-    final targetSession = _sessionController.resolveTargetSession(
-      session: session,
-    );
-    if (targetSession == null) {
-      if (reason != 'build') {
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'apply_no_session',
-          fields: {
-            'reason': reason,
-            'connectionId': _connectionId,
-            'allowRemoteRefresh': true,
-            'forceRemoteRefresh': forceRemoteRefresh,
-          },
-        );
-      }
-      return;
-    }
-    final previousTheme = targetSession.terminalTheme;
-    targetSession.setTerminalTheme(theme);
-    if (targetSession.terminal != _terminal) {
-      if (reason != 'build') {
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'apply_foreign_terminal',
-          fields: {
-            'reason': reason,
-            'connectionId': targetSession.connectionId,
-            'allowRemoteRefresh': true,
-            'forceRemoteRefresh': forceRemoteRefresh,
-            'hasSessionTerminal': targetSession.terminal != null,
-          },
-        );
-      }
-      return;
-    }
-    final didThemeChange = previousTheme != null && previousTheme != theme;
-    final plainTuiRefreshAllowed = _shouldRefreshPlainTerminalTui(
-      targetSession,
-    );
-    final terminalViewReady = _isTerminalThemeRefreshViewReady;
-    final shouldRefreshFirstTheme =
-        previousTheme == null && (_isTmuxActive || plainTuiRefreshAllowed);
-    final willRefresh =
-        forceRemoteRefresh || didThemeChange || shouldRefreshFirstTheme;
-    if (willRefresh || reason != 'build') {
-      DiagnosticsLogService.instance.info(
-        'terminal.theme',
-        'apply_decision',
-        fields: {
-          'reason': reason,
-          'connectionId': targetSession.connectionId,
-          'allowRemoteRefresh': true,
-          'forceRemoteRefresh': forceRemoteRefresh,
-          'hasPreviousTheme': previousTheme != null,
-          'didThemeChange': didThemeChange,
-          'shouldRefreshFirstTheme': shouldRefreshFirstTheme,
-          'willRefresh': willRefresh,
-          'isTmuxActive': _isTmuxActive,
-          'plainTuiRefreshAllowed': plainTuiRefreshAllowed,
-          'colorSchemeUpdatesMode':
-              targetSession.terminalColorSchemeUpdatesMode,
-          'focusMode': _terminal.reportFocusMode,
-          'altBuffer': _terminal.isUsingAltBuffer,
-          'mouseMode': _terminal.mouseMode != MouseMode.none,
-          'shellReady': _shell != null,
-          'terminalViewReady': terminalViewReady,
-        },
-      );
-    }
-    if (willRefresh) {
-      _refreshTerminalThemeForTui(
-        theme,
-        targetSession,
-        reason: reason,
-        // Force a foreground repaint when the colors actually changed, and also
-        // on a forced re-sync (resume/reconnect/brightness), which is when a
-        // theme change that happened while backgrounded or disconnected would
-        // otherwise leave the agent painted in the previous theme.
-        forceForegroundRedraw: didThemeChange || forceRemoteRefresh,
-      );
-      return;
-    }
-  }
-
-  void _refreshTerminalThemeForTui(
-    TerminalThemeData theme,
-    SshSession session, {
-    required String reason,
-    bool forceForegroundRedraw = false,
-    int viewReadyAttempt = 0,
-  }) {
-    _cancelTerminalThemeRefreshTimers();
-    final refreshGeneration = ++_terminalThemeRefreshGeneration;
-    final refreshStartedAt = DateTime.now();
-    final plainTuiRefreshAllowed = _shouldRefreshPlainTerminalTui(session);
-    final terminalViewReady = _isTerminalThemeRefreshViewReady;
-    final tmuxStateBelongsToSession =
-        _tmuxStateConnectionId == session.connectionId;
-    DiagnosticsLogService.instance.info(
-      'terminal.theme',
-      'refresh_requested',
-      fields: {
-        'reason': reason,
-        'connectionId': session.connectionId,
-        'isTmuxActive': _isTmuxActive,
-        'tmuxStateBelongsToSession': tmuxStateBelongsToSession,
-        'plainTuiRefreshAllowed': plainTuiRefreshAllowed,
-        'colorSchemeUpdatesMode': session.terminalColorSchemeUpdatesMode,
-        'focusMode': _terminal.reportFocusMode,
-        'altBuffer': _terminal.isUsingAltBuffer,
-        'mouseMode': _terminal.mouseMode != MouseMode.none,
-        'shellReady': _shell != null,
-        'terminalViewReady': terminalViewReady,
-      },
-    );
-    final nativeAgentActive =
-        _activeNativeAcpSessionKey != null || _nativeAcpLaunchState != null;
-    final routeIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
-    if (!terminalViewReady &&
-        shouldRetryTerminalThemeWhenViewMounts(
-          nativeAgentActive: nativeAgentActive,
-          routeIsCurrent: routeIsCurrent,
-          attempt: viewReadyAttempt,
-        )) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_isCurrentTerminalThemeRefresh(
-          theme: theme,
-          session: session,
-          refreshGeneration: refreshGeneration,
-        )) {
-          return;
-        }
-        _refreshTerminalThemeForTui(
-          theme,
-          session,
-          reason: reason.endsWith('_view_ready')
-              ? reason
-              : '${reason}_view_ready',
-          forceForegroundRedraw: forceForegroundRedraw,
-          viewReadyAttempt: viewReadyAttempt + 1,
-        );
-      });
-    }
-    if (_isTmuxActive && tmuxStateBelongsToSession) {
-      if (_activeMuxBackend == RemoteMuxBackend.monkeyMux) {
-        if (forceForegroundRedraw) {
-          // Latch the repaint obligation so it survives this refresh request
-          // being superseded/coalesced by a later same-theme refresh (brightness
-          // changes fire several applies in quick succession, and preview ->
-          // "Use Theme" re-applies the same colors). It is passed to MonkeyMux
-          // as the theme_changed `redraw` flag and cleared once delivered.
-          _monkeyMuxForcedThemeRedrawPending = true;
-          _monkeyMuxForcedThemeRedrawGeneration += 1;
-        }
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'monkeymux_refresh_requested',
-          fields: {
-            'reason': reason,
-            'connectionId': session.connectionId,
-            'plainTuiRefreshAllowed': plainTuiRefreshAllowed,
-          },
-        );
-        _queueTmuxTerminalThemeRefresh(
-          _TmuxTerminalThemeRefreshRequest(
-            theme: theme,
-            session: session,
-            sessionName: _tmuxSessionName!,
-            refreshGeneration: refreshGeneration,
-            reason: reason,
-            extraFlags: _activeTmuxExtraFlags,
-          ),
-        );
-        return;
-      }
-      _refreshTmuxClientAfterTerminalThemeChange(
-        theme: theme,
-        session: session,
-        refreshGeneration: refreshGeneration,
-        reason: reason,
-      );
-      return;
-    }
-
-    if (!plainTuiRefreshAllowed) {
-      // A bare shell prompt treats terminal reports as typed input. Only send
-      // synthetic reports after a foreground app has enabled terminal-control
-      // modes that identify it as a TUI.
-      DiagnosticsLogService.instance.info(
-        'terminal.theme',
-        'plain_refresh_skipped',
-        fields: {
-          'reason': reason,
-          'connectionId': session.connectionId,
-          'colorSchemeUpdatesMode': session.terminalColorSchemeUpdatesMode,
-          'focusMode': _terminal.reportFocusMode,
-          'altBuffer': _terminal.isUsingAltBuffer,
-          'mouseMode': _terminal.mouseMode != MouseMode.none,
-          'shellReady': _shell != null,
-          'terminalViewReady': _isTerminalThemeRefreshViewReady,
-        },
-      );
-      return;
-    }
-
-    // Do not send unsolicited OSC palette replies directly to a plain
-    // foreground TUI. Codex treats those bytes as user input, and its crossterm
-    // color re-query can also be disrupted by unrelated terminal reports.
-    // Always send a synthetic focus transition so focus-aware TUIs re-query OSC
-    // 10/11 through the normal path. Apps that requested DEC 2031 updates can
-    // receive default-color reports directly. Under Windows ConPTY, wait until
-    // the foreground TUI responds by querying its palette. ConPTY enables focus
-    // reporting for a bare command prompt too, where unsolicited color reports
-    // are echoed as typed input.
-    final includeThemeModeReport = session.terminalColorSchemeUpdatesMode;
-    final includeDefaultColorReports =
-        includeThemeModeReport || session.terminalWin32InputMode;
-    _refreshTerminalThemeReportsForTui(
-      theme,
-      includeThemeModeReport: false,
-      reason: '${reason}_plain_focus',
-    );
-    if (includeThemeModeReport) {
-      _scheduleTerminalThemeRefreshForTui(
-        theme: theme,
-        session: session,
-        refreshGeneration: refreshGeneration,
-        delay: const Duration(milliseconds: 250),
-        includeFocusReport: false,
-        reason: '${reason}_plain_theme_mode',
-      );
-    }
-    if (includeDefaultColorReports) {
-      for (final delay in const [
-        Duration(milliseconds: 330),
-        Duration(milliseconds: 410),
-        Duration(milliseconds: 490),
-      ]) {
-        _scheduleTerminalThemeRefreshForTui(
-          theme: theme,
-          session: session,
-          refreshGeneration: refreshGeneration,
-          delay: delay,
-          includeFocusReport: false,
-          includeThemeModeReport: false,
-          includeDefaultColorReports: true,
-          requirePaletteQuerySince: includeThemeModeReport
-              ? null
-              : refreshStartedAt,
-          reason: '${reason}_plain_defaults',
-        );
-      }
-    }
-    _scheduleTerminalThemeRefreshForTui(
-      theme: theme,
-      session: session,
-      refreshGeneration: refreshGeneration,
-      delay: const Duration(milliseconds: 550),
-      includeThemeModeReport: false,
-      reason: '${reason}_plain_focus_late',
-    );
-    if (includeThemeModeReport) {
-      _scheduleTerminalThemeRefreshForTui(
-        theme: theme,
-        session: session,
-        refreshGeneration: refreshGeneration,
-        delay: const Duration(milliseconds: 800),
-        includeFocusReport: false,
-        reason: '${reason}_plain_theme_mode_late',
-      );
-    }
-  }
-
-  void _refreshTerminalThemeReportsForTui(
-    TerminalThemeData theme, {
-    bool includeThemeModeReport = true,
-    bool includeDefaultColorReports = false,
-    bool includeFocusReport = true,
-    String reason = 'unspecified',
-  }) {
-    final terminalView = _terminalViewKey.currentState;
-    if (terminalView == null || !_isTerminalThemeRefreshViewReady) {
-      DiagnosticsLogService.instance.info(
-        'terminal.theme',
-        'reports_unavailable',
-        fields: {
-          'reason': reason,
-          'includeThemeModeReport': includeThemeModeReport,
-          'includeDefaultColorReports': includeDefaultColorReports,
-          'includeFocusReport': includeFocusReport,
-          'shellReady': _shell != null,
-          'hasOutputCallback': _terminal.onOutput != null,
-        },
-      );
-      return;
-    }
-    DiagnosticsLogService.instance.debug(
-      'terminal.theme',
-      'reports_sent',
-      fields: {
-        'reason': reason,
-        'includeThemeModeReport': includeThemeModeReport,
-        'includeDefaultColorReports': includeDefaultColorReports,
-        'includeFocusReport': includeFocusReport,
-        'shellReady': _shell != null,
-        'hasOutputCallback': _terminal.onOutput != null,
-      },
-    );
-    if (includeThemeModeReport) {
-      terminalView.refreshThemeModeReport(isDark: theme.isDark);
-    }
-    if (includeDefaultColorReports) {
-      terminalView.refreshThemeDefaultColorReports(theme);
-    }
-    if (includeFocusReport) {
-      terminalView.refreshFocusReport(forceTransition: true, force: true);
-    }
-  }
-
-  /// Whether a foreground TUI has enabled any mode a real TUI uses. When none
-  /// is set the foreground is almost certainly a shell prompt, so neither a
-  /// plain-terminal theme refresh nor an outer-tmux focus report is safe: if
-  /// the user detached tmux while [_isTmuxActive] still reads true, synthetic
-  /// focus bytes would reach the bare shell as typed input.
-  bool _shouldRefreshPlainTerminalTui(SshSession session) =>
-      session.terminalColorSchemeUpdatesMode ||
-      _terminal.reportFocusMode ||
-      _terminal.isUsingAltBuffer ||
-      _terminal.mouseMode != MouseMode.none;
-
-  bool _shouldSuppressMonkeyMuxTerminalControlInput(String output) =>
-      shouldSuppressMonkeyMuxControlReport(
-        isMonkeyMux: _activeMuxBackend == RemoteMuxBackend.monkeyMux,
-        // A prompt click is a report the shell asked for (OSC 133
-        // click_events), sent with mouse tracking off on purpose.
-        isMouseReport:
-            !isWritingPromptClick &&
-            _terminalMouseReportOutputPattern.hasMatch(output),
-        isFocusReport: _terminalFocusReportOutputPattern.hasMatch(output),
-        mouseReportingActive: _terminalReportsMouseWheelForScroll,
-        focusReportingActive: _terminal.reportFocusMode,
-        isAgentToolActive: _isAgentToolActive,
-        currentCommand: _tmuxCurrentCommand,
-      );
-
-  bool get _isTerminalThemeRefreshViewReady {
-    final terminalViewWidget = _terminalViewKey.currentWidget;
-    return _terminalViewKey.currentState != null &&
-        terminalViewWidget is MonkeyTerminalView &&
-        identical(terminalViewWidget.terminal, _terminal);
-  }
-
-  /// Proactively pushes the active terminal theme into tmux's per-pane color
-  /// cache.
-  ///
-  /// Called whenever tmux is freshly detected or re-detected, regardless of
-  /// whether a theme switch just happened. tmux caches the outer terminal's
-  /// default colors per-pane, so priming refreshes tmux's pane palette and
-  /// client report cache through tmux control commands instead of writing
-  /// unsolicited OSC responses into the interactive shell.
-  void _primeTmuxTerminalTheme(SshSession session) {
-    if (!_isTmuxActive || _tmuxStateConnectionId != session.connectionId) {
-      return;
-    }
-    if (_activeMuxBackend != RemoteMuxBackend.tmux) {
-      return;
-    }
-    _cancelTerminalThemeRefreshTimers();
-    final theme = session.terminalTheme ?? _resolveEffectiveTerminalTheme();
-    DiagnosticsLogService.instance.info(
-      'terminal.theme',
-      'tmux_prime_requested',
-      fields: {
-        'connectionId': session.connectionId,
-        'hasTmuxSessionName': _tmuxSessionName != null,
-        'shellReady': _shell != null,
-        'terminalViewReady': _terminalViewKey.currentState != null,
-      },
-    );
-    final tmuxSessionName = _tmuxSessionName;
-    if (tmuxSessionName == null) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.theme',
-        'tmux_prime_skipped_no_session_name',
-        fields: {'connectionId': session.connectionId},
-      );
-      return;
-    }
-    final refreshGeneration = ++_terminalThemeRefreshGeneration;
-    final extraFlags = _activeTmuxExtraFlags;
-    _queueTmuxTerminalThemeRefresh(
-      _TmuxTerminalThemeRefreshRequest(
-        theme: theme,
-        session: session,
-        sessionName: tmuxSessionName,
-        refreshGeneration: refreshGeneration,
-        reason: 'tmux_prime',
-        extraFlags: extraFlags,
-        sendOuterFocusReport: true,
-      ),
-    );
-    for (final (:delay, :reason) in const [
-      (delay: Duration(milliseconds: 900), reason: 'tmux_prime_late_900ms'),
-      (delay: Duration(milliseconds: 1800), reason: 'tmux_prime_late_1800ms'),
-    ]) {
-      _scheduleTmuxTerminalThemeRefresh(
-        _TmuxTerminalThemeRefreshRequest(
-          theme: theme,
-          session: session,
-          sessionName: tmuxSessionName,
-          refreshGeneration: refreshGeneration,
-          reason: reason,
-          extraFlags: extraFlags,
-          sendOuterFocusReport: true,
-        ),
-        delay: delay,
-      );
-    }
-  }
-
-  void _refreshTmuxClientAfterTerminalThemeChange({
-    required TerminalThemeData theme,
-    required SshSession session,
-    required int refreshGeneration,
-    required String reason,
-  }) {
-    final tmuxSessionName = _tmuxSessionName;
-    if (tmuxSessionName == null) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.theme',
-        'tmux_refresh_skipped_no_session_name',
-        fields: {'reason': reason, 'connectionId': session.connectionId},
-      );
-      return;
-    }
-
-    _scheduleTmuxTerminalThemeRefresh(
-      _TmuxTerminalThemeRefreshRequest(
-        theme: theme,
-        session: session,
-        sessionName: tmuxSessionName,
-        refreshGeneration: refreshGeneration,
-        reason: reason,
-        extraFlags: _activeTmuxExtraFlags,
-        sendOuterFocusReport: true,
-      ),
-      delay: const Duration(milliseconds: 75),
     );
   }
 
@@ -3118,795 +2665,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  void _scheduleTmuxTerminalThemeRefreshAfterWindowStateChange({
-    required SshSession session,
-    required String sessionName,
-    required String reason,
-  }) {
-    if (!_isTmuxActive ||
-        _tmuxStateConnectionId != session.connectionId ||
-        _tmuxSessionName != sessionName ||
-        session.terminal != _terminal) {
-      return;
-    }
-    final isMonkeyMux = _activeMuxBackend == RemoteMuxBackend.monkeyMux;
-    if (isMonkeyMux) {
-      DiagnosticsLogService.instance.debug(
-        'terminal.theme',
-        'monkeymux_window_refresh_requested',
-        fields: {'reason': reason, 'connectionId': session.connectionId},
-      );
-    }
-
-    final theme = session.terminalTheme ?? _resolveEffectiveTerminalTheme();
-    if (!isMonkeyMux && session.terminalTheme == null) {
-      _applyTerminalThemeToSession(
-        theme,
-        session: session,
-        forceRemoteRefresh: true,
-        reason: reason,
-      );
-      return;
-    }
-
-    _pendingTmuxWindowThemeRefreshRequest = _TmuxTerminalThemeRefreshRequest(
-      theme: theme,
-      session: session,
-      sessionName: sessionName,
-      refreshGeneration: _terminalThemeRefreshGeneration,
-      reason: reason,
-      extraFlags: _activeTmuxExtraFlags,
-      sendOuterFocusReport: !isMonkeyMux,
-    );
-    if (_tmuxWindowThemeRefreshDebounceTimer?.isActive ?? false) {
-      return;
-    }
-
-    late final Timer timer;
-    timer = Timer(
-      _tmuxWindowThemeRefreshDebounceDelay +
-          (isMonkeyMux
-              ? Duration.zero
-              : _remainingMuxWindowSwitchQuietPeriod()),
-      () {
-        _terminalThemeRefreshTimers.remove(timer);
-        if (identical(_tmuxWindowThemeRefreshDebounceTimer, timer)) {
-          _tmuxWindowThemeRefreshDebounceTimer = null;
-        }
-        final pendingRequest = _pendingTmuxWindowThemeRefreshRequest;
-        _pendingTmuxWindowThemeRefreshRequest = null;
-        if (pendingRequest == null ||
-            _tmuxSessionName != pendingRequest.sessionName ||
-            !_isCurrentTerminalThemeRefresh(
-              theme: pendingRequest.theme,
-              session: pendingRequest.session,
-              refreshGeneration: pendingRequest.refreshGeneration,
-            )) {
-          return;
-        }
-        _queueTmuxTerminalThemeRefresh(pendingRequest);
-      },
-    );
-    _tmuxWindowThemeRefreshDebounceTimer = timer;
-    _terminalThemeRefreshTimers.add(timer);
-  }
-
-  void _scheduleTmuxTerminalThemeRefresh(
-    _TmuxTerminalThemeRefreshRequest request, {
-    required Duration delay,
-  }) {
-    late final Timer timer;
-    timer = Timer(delay, () {
-      _terminalThemeRefreshTimers.remove(timer);
-      if (_tmuxSessionName != request.sessionName ||
-          !_isCurrentTerminalThemeRefresh(
-            theme: request.theme,
-            session: request.session,
-            refreshGeneration: request.refreshGeneration,
-          )) {
-        return;
-      }
-      _queueTmuxTerminalThemeRefresh(request);
-    });
-    _terminalThemeRefreshTimers.add(timer);
-  }
-
-  void _queueTmuxTerminalThemeRefresh(
-    _TmuxTerminalThemeRefreshRequest request,
-  ) {
-    if (!_isCurrentTerminalThemeRefresh(
-      theme: request.theme,
-      session: request.session,
-      refreshGeneration: request.refreshGeneration,
-    )) {
-      return;
-    }
-    if (_isTmuxThemeRefreshRunning) {
-      _pendingTmuxThemeRefreshRequest = _mergePendingTmuxThemeRefreshRequest(
-        request,
-      );
-      DiagnosticsLogService.instance.debug(
-        'terminal.theme',
-        'tmux_refresh_queued',
-        fields: {
-          'reason': request.reason,
-          'connectionId': request.session.connectionId,
-          'shellReady': _shell != null,
-          'terminalViewReady': _terminalViewKey.currentState != null,
-        },
-      );
-      return;
-    }
-
-    _isTmuxThemeRefreshRunning = true;
-    unawaited(_runQueuedTmuxTerminalThemeRefresh(request));
-  }
-
-  _TmuxTerminalThemeRefreshRequest _mergePendingTmuxThemeRefreshRequest(
-    _TmuxTerminalThemeRefreshRequest request,
-  ) {
-    final pendingRequest = _pendingTmuxThemeRefreshRequest;
-    final preservePendingOuterFocus =
-        pendingRequest != null &&
-        pendingRequest.sendOuterFocusReport &&
-        _isCurrentTerminalThemeRefresh(
-          theme: pendingRequest.theme,
-          session: pendingRequest.session,
-          refreshGeneration: pendingRequest.refreshGeneration,
-        );
-    if (!preservePendingOuterFocus) {
-      return request;
-    }
-    return request.copyWith(
-      reason: request.sendOuterFocusReport
-          ? request.reason
-          : pendingRequest.reason,
-      sendOuterFocusReport:
-          request.sendOuterFocusReport || preservePendingOuterFocus,
-    );
-  }
-
-  Future<void> _runQueuedTmuxTerminalThemeRefresh(
-    _TmuxTerminalThemeRefreshRequest initialRequest,
-  ) async {
-    try {
-      var request = initialRequest;
-      while (true) {
-        await _runTmuxTerminalThemeRefresh(request);
-        final nextRequest = _pendingTmuxThemeRefreshRequest;
-        _pendingTmuxThemeRefreshRequest = null;
-        if (nextRequest == null ||
-            !_isCurrentTerminalThemeRefresh(
-              theme: nextRequest.theme,
-              session: nextRequest.session,
-              refreshGeneration: nextRequest.refreshGeneration,
-            )) {
-          return;
-        }
-        request = nextRequest;
-      }
-    } finally {
-      _isTmuxThemeRefreshRunning = false;
-    }
-  }
-
-  Future<void> _runTmuxTerminalThemeRefresh(
-    _TmuxTerminalThemeRefreshRequest request,
-  ) async {
-    if (!_isCurrentTerminalThemeRefresh(
-      theme: request.theme,
-      session: request.session,
-      refreshGeneration: request.refreshGeneration,
-    )) {
-      return;
-    }
-
-    var outerRefreshReason = request.reason;
-    var tmuxCommandDeferred = false;
-    try {
-      final mux = _activeRemoteMultiplexerService;
-      DiagnosticsLogService.instance.info(
-        'terminal.theme',
-        'tmux_refresh_start',
-        fields: {
-          'reason': request.reason,
-          'connectionId': request.session.connectionId,
-          'shellReady': _shell != null,
-          'terminalViewReady': _terminalViewKey.currentState != null,
-        },
-      );
-      if (mux.isExecChannelCoolingDown(request.session)) {
-        DiagnosticsLogService.instance.debug(
-          'terminal.theme',
-          'tmux_refresh_deferred',
-          fields: {
-            'reason': request.reason,
-            'connectionId': request.session.connectionId,
-          },
-        );
-        tmuxCommandDeferred = true;
-        outerRefreshReason = '${request.reason}_tmux_deferred';
-      } else {
-        // Drive the server-side foreground repaint from the latched theme-change
-        // obligation. Passing it with the theme hint makes the repaint atomic
-        // and immune to this request being superseded/coalesced: MonkeyMux
-        // performs the synthetic redraw right after delivering the hint.
-        final forcedRedrawGeneration = _monkeyMuxForcedThemeRedrawGeneration;
-        final forceForegroundRedraw =
-            _monkeyMuxForcedThemeRedrawPending &&
-            _activeMuxBackend == RemoteMuxBackend.monkeyMux;
-        await mux.refreshTerminalTheme(
-          request.session,
-          request.sessionName,
-          request.theme,
-          extraFlags: request.extraFlags,
-          forceForegroundRedraw: forceForegroundRedraw,
-        );
-        if (forceForegroundRedraw &&
-            _monkeyMuxForcedThemeRedrawGeneration == forcedRedrawGeneration) {
-          // Clear only if no newer obligation was latched while awaiting; a newer
-          // one bumps the generation and its own refresh will carry the redraw.
-          _monkeyMuxForcedThemeRedrawPending = false;
-        }
-        if (forceForegroundRedraw) {
-          // The helper already performs the platform-appropriate synthetic
-          // redraw atomically with the theme hint. A second resize-redraw can
-          // replay a large agent transcript twice and temporarily erase the
-          // composer, so discard any older viewport follow-up instead.
-          _monkeyMuxResizeRedrawFollowUpTimer?.cancel();
-          _monkeyMuxResizeRedrawFollowUpTimer = null;
-        }
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'tmux_refresh_complete',
-          fields: {
-            'reason': request.reason,
-            'connectionId': request.session.connectionId,
-            'sendOuterFocusReport': request.sendOuterFocusReport,
-            'forceForegroundRedraw': forceForegroundRedraw,
-            'shellReady': _shell != null,
-            'terminalViewReady': _terminalViewKey.currentState != null,
-          },
-        );
-      }
-    } on Object catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.theme',
-        'tmux_refresh_failed',
-        fields: {
-          'reason': request.reason,
-          'connectionId': request.session.connectionId,
-          'errorType': error.runtimeType,
-        },
-      );
-      outerRefreshReason = '${request.reason}_tmux_failed';
-    }
-
-    if (!_isCurrentTerminalThemeRefresh(
-      theme: request.theme,
-      session: request.session,
-      refreshGeneration: request.refreshGeneration,
-    )) {
-      DiagnosticsLogService.instance.debug(
-        'terminal.theme',
-        'tmux_refresh_stale',
-        fields: {
-          'reason': request.reason,
-          'connectionId': request.session.connectionId,
-          'sendOuterFocusReport': request.sendOuterFocusReport,
-          'tmuxCommandDeferred': tmuxCommandDeferred,
-        },
-      );
-      return;
-    }
-    if (request.sendOuterFocusReport) {
-      if (!_shouldRefreshPlainTerminalTui(request.session)) {
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'tmux_outer_focus_skipped',
-          fields: {
-            'reason': '${outerRefreshReason}_no_foreground_tui',
-            'connectionId': request.session.connectionId,
-            'colorSchemeUpdatesMode':
-                request.session.terminalColorSchemeUpdatesMode,
-            'focusMode': _terminal.reportFocusMode,
-            'altBuffer': _terminal.isUsingAltBuffer,
-            'mouseMode': _terminal.mouseMode != MouseMode.none,
-          },
-        );
-        return;
-      }
-      _refreshTerminalThemeReportsForTui(
-        request.theme,
-        includeThemeModeReport: false,
-        reason: '${outerRefreshReason}_tmux_outer_focus',
-      );
-    }
-  }
-
-  void _scheduleTerminalThemeRefreshForTui({
-    required TerminalThemeData theme,
-    required SshSession session,
-    required int refreshGeneration,
-    required Duration delay,
-    bool includeThemeModeReport = true,
-    bool includeDefaultColorReports = false,
-    bool includeFocusReport = true,
-    DateTime? requirePaletteQuerySince,
-    String reason = 'unspecified',
-  }) {
-    late final Timer timer;
-    timer = Timer(delay, () {
-      _terminalThemeRefreshTimers.remove(timer);
-      if (!_isCurrentTerminalThemeRefresh(
-        theme: theme,
-        session: session,
-        refreshGeneration: refreshGeneration,
-      )) {
-        return;
-      }
-      if (includeDefaultColorReports &&
-          requirePaletteQuerySince != null &&
-          !session.hasTerminalPaletteQuerySince(requirePaletteQuerySince)) {
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'defaults_skipped_no_palette_query',
-          fields: {'reason': reason, 'connectionId': session.connectionId},
-        );
-        return;
-      }
-      // The TUI that justified these reports may have exited during the
-      // delay; a bare shell would read them as typed input.
-      if (!_shouldRefreshPlainTerminalTui(session)) {
-        DiagnosticsLogService.instance.info(
-          'terminal.theme',
-          'late_refresh_skipped',
-          fields: {
-            'reason': reason,
-            'connectionId': session.connectionId,
-            'isTmuxActive': _isTmuxActive,
-            'focusMode': _terminal.reportFocusMode,
-            'altBuffer': _terminal.isUsingAltBuffer,
-            'mouseMode': _terminal.mouseMode != MouseMode.none,
-          },
-        );
-        return;
-      }
-      // DEC 2031 reports are only solicited while the mode is still on. The
-      // Windows default-color path is gated by the palette query above.
-      final colorSchemeUpdates = session.terminalColorSchemeUpdatesMode;
-      final sendThemeMode = includeThemeModeReport && colorSchemeUpdates;
-      final sendDefaults =
-          includeDefaultColorReports &&
-          (colorSchemeUpdates || requirePaletteQuerySince != null);
-      if (!sendThemeMode && !sendDefaults && !includeFocusReport) {
-        return;
-      }
-      _refreshTerminalThemeReportsForTui(
-        theme,
-        includeThemeModeReport: sendThemeMode,
-        includeDefaultColorReports: sendDefaults,
-        includeFocusReport: includeFocusReport,
-        reason: reason,
-      );
-    });
-    _terminalThemeRefreshTimers.add(timer);
-  }
-
-  void _cancelTerminalThemeRefreshTimers() {
-    _cancelPendingTmuxWindowThemeRefresh();
-    for (final timer in _terminalThemeRefreshTimers) {
-      timer.cancel();
-    }
-    _terminalThemeRefreshTimers.clear();
-  }
-
-  void _cancelPendingTmuxWindowThemeRefresh() {
-    final timer = _tmuxWindowThemeRefreshDebounceTimer;
-    if (timer != null) {
-      timer.cancel();
-      _terminalThemeRefreshTimers.remove(timer);
-    }
-    _tmuxWindowThemeRefreshDebounceTimer = null;
-    _pendingTmuxWindowThemeRefreshRequest = null;
-  }
-
-  bool _isCurrentTerminalThemeRefresh({
-    required TerminalThemeData theme,
-    required SshSession session,
-    required int refreshGeneration,
-  }) {
-    final activeTheme = session.terminalTheme;
-    return mounted &&
-        refreshGeneration == _terminalThemeRefreshGeneration &&
-        session.terminal == _terminal &&
-        activeTheme != null &&
-        activeTheme == theme;
-  }
-
-  bool _sameTerminalThemeSettings(
-    TerminalThemeSettings? previous,
-    TerminalThemeSettings next,
-  ) =>
-      previous != null &&
-      previous.lightThemeId == next.lightThemeId &&
-      previous.darkThemeId == next.darkThemeId;
-
-  void _handleTerminalThemeDependenciesChanged({
-    bool forceRemoteRefresh = false,
-    String reason = 'unknown',
-  }) {
-    if (!mounted) {
-      return;
-    }
-    final session = _observedSession ?? _activeSession();
-    if (forceRemoteRefresh &&
-        _wasBackgrounded &&
-        _isWindowsMonkeyMuxSession(session)) {
-      _terminalThemeRefreshRequiredAfterResume = true;
-      DiagnosticsLogService.instance.info(
-        'terminal.theme',
-        'dependency_deferred',
-        fields: {
-          'reason': reason,
-          'connectionId': session?.connectionId ?? _connectionId,
-          'until': 'app_resumed',
-        },
-      );
-      return;
-    }
-    _pendingTerminalThemeDependencyReload = true;
-    _pendingTerminalThemeDependencyForceRemoteRefresh =
-        _pendingTerminalThemeDependencyForceRemoteRefresh || forceRemoteRefresh;
-    _pendingTerminalThemeDependencyReason = reason;
-    DiagnosticsLogService.instance.info(
-      'terminal.theme',
-      'dependency_changed',
-      fields: {
-        'reason': reason,
-        'connectionId': _connectionId,
-        'forceRemoteRefresh': forceRemoteRefresh,
-        'hasCurrentTheme': _currentTheme != null,
-        'hasSessionOverride': _sessionThemeOverride != null,
-      },
-    );
-    _scheduleTerminalThemeDependencyReload();
-  }
-
-  void _scheduleTerminalThemeDependencyReload() {
-    if (_terminalThemeDependencyReloadQueued) {
-      return;
-    }
-    _terminalThemeDependencyReloadQueued = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _terminalThemeDependencyReloadQueued = false;
-      if (!mounted || !_pendingTerminalThemeDependencyReload) {
-        return;
-      }
-      if (_currentTheme == null) {
-        return;
-      }
-      final forceRemoteRefresh =
-          _pendingTerminalThemeDependencyForceRemoteRefresh;
-      final reason = _pendingTerminalThemeDependencyReason;
-      _pendingTerminalThemeDependencyReload = false;
-      _pendingTerminalThemeDependencyForceRemoteRefresh = false;
-      _pendingTerminalThemeDependencyReason = 'unknown';
-      unawaited(
-        _reloadTerminalThemeForDependencies(
-          forceRemoteRefresh: forceRemoteRefresh,
-          reason: reason,
-        ),
-      );
-    });
-    WidgetsBinding.instance.ensureVisualUpdate();
-  }
-
-  Future<void> _reloadTerminalThemeForDependencies({
-    bool forceRemoteRefresh = false,
-    String reason = 'unknown',
-  }) async {
-    final session = _connectionId == null
-        ? null
-        : _sessionsNotifier?.getSession(_connectionId!);
-    DiagnosticsLogService.instance.info(
-      'terminal.theme',
-      'dependency_reload',
-      fields: {
-        'reason': reason,
-        'connectionId': _connectionId,
-        'forceRemoteRefresh': forceRemoteRefresh,
-        'hasSession': session != null,
-        'hasSessionOverride': _sessionThemeOverride != null,
-      },
-    );
-    if (session != null) {
-      final restored = await _restoreSessionThemeOverride(
-        session,
-        forceRemoteRefresh: forceRemoteRefresh,
-        reason: reason,
-      );
-      if (restored) {
-        return;
-      }
-    }
-
-    if (_sessionThemeOverride == null) {
-      await _loadTheme(forceRemoteRefresh: forceRemoteRefresh, reason: reason);
-    }
-  }
-
-  void _syncAppThemeOverrideFromSession(SshSession session) {
-    if (session.terminalThemeLightId == null &&
-        session.terminalThemeDarkId == null) {
-      _clearAppThemeOverride();
-      return;
-    }
-    _terminalAppThemeOverrideNotifier.activeOverride = TerminalAppThemeOverride(
-      owner: _terminalAppThemeOverrideOwner,
-      lightThemeId: session.terminalThemeLightId,
-      darkThemeId: session.terminalThemeDarkId,
-    );
-  }
-
-  void _clearAppThemeOverride() => _terminalAppThemeOverrideNotifier
-      .clearForOwner(_terminalAppThemeOverrideOwner);
-
-  TerminalThemeData _resolveEffectiveTerminalTheme() {
-    final isDark = _resolveTerminalThemeBrightness() == Brightness.dark;
-    return _sessionThemeOverride ??
-        _currentTheme ??
-        (isDark
-            ? TerminalThemes.defaultDarkTheme
-            : TerminalThemes.defaultLightTheme);
-  }
-
-  Brightness _resolveTerminalThemeBrightness() {
-    final themeMode = ref.read(themeModeNotifierProvider);
-    return switch (themeMode) {
-      ThemeMode.dark => Brightness.dark,
-      ThemeMode.light => Brightness.light,
-      ThemeMode.system =>
-        MediaQuery.maybeOf(context)?.platformBrightness ??
-            WidgetsBinding.instance.platformDispatcher.platformBrightness,
-    };
-  }
-
   SshConnectionState _selectTrackedConnectionState(
     Map<int, SshConnectionState> states,
   ) => _sessionController.selectTrackedConnectionState(states);
-
-  // iOS can prompt for paste permission on any clipboard content read. Never
-  // poll it on startup, resume, or a timer, even when remote reads are allowed.
-  // Explicit paste and opted-in OSC 52 queries use their own read paths.
-  bool _canPollLocalClipboard(SshSession session) =>
-      session.clipboardSharingEnabled &&
-      session.localClipboardReadEnabled &&
-      (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS);
-
-  bool _ownsClipboardSync(SshSession session, int generation) =>
-      mounted &&
-      generation == _clipboardSyncGeneration &&
-      session.clipboardSharingEnabled &&
-      identical(_activeSession(), session) &&
-      _sessionController.isObservingSession(session);
-
-  Future<void> _startSharedClipboardSync(SshSession session) async {
-    _stopSharedClipboardSync();
-    final generation = _clipboardSyncGeneration;
-    _remoteClipboardUnsupported = false;
-    final localText = _canPollLocalClipboard(session)
-        ? await _readSystemClipboardText()
-        : null;
-    if (!_ownsClipboardSync(session, generation)) return;
-    _lastObservedLocalClipboardText = localText;
-    try {
-      final remoteText = await _readRemoteClipboardText(session);
-      if (!_ownsClipboardSync(session, generation)) return;
-      _setLastObservedRemoteClipboardText(remoteText);
-    } on Object catch (error) {
-      if (!_ownsClipboardSync(session, generation)) return;
-      _handleSharedClipboardRemoteCommandFailure(
-        session,
-        error,
-        operation: 'initial_read',
-      );
-      return;
-    }
-
-    if (_remoteClipboardUnsupported) return;
-    if (_canPollLocalClipboard(session)) {
-      _localClipboardSyncTimer = Timer.periodic(
-        _localClipboardSyncInterval,
-        (_) => unawaited(_syncLocalClipboardToRemote(session)),
-      );
-    }
-    _remoteClipboardSyncTimer = Timer.periodic(
-      _remoteClipboardSyncInterval,
-      (_) => unawaited(_syncRemoteClipboardToLocal(session)),
-    );
-  }
-
-  void _stopSharedClipboardSync() {
-    _clipboardSyncGeneration++;
-    _localClipboardSyncTimer?.cancel();
-    _localClipboardSyncTimer = null;
-    _remoteClipboardSyncTimer?.cancel();
-    _remoteClipboardSyncTimer = null;
-    _isPollingRemoteClipboard = false;
-    _isPushingLocalClipboard = false;
-  }
-
-  Future<String?> _readSystemClipboardText() async {
-    try {
-      final data = await Clipboard.getData(Clipboard.kTextPlain);
-      if (data?.text != null) {
-        return data!.text;
-      }
-    } on PlatformException {
-      if (!_isAndroidPlatform) {
-        return null;
-      }
-    }
-
-    if (_isAndroidPlatform) {
-      try {
-        return await Pasteboard.text;
-      } on PlatformException {
-        return null;
-      }
-    }
-
-    return null;
-  }
-
-  Future<void> _syncLocalClipboardToRemote(SshSession session) async {
-    if (!_ownsClipboardSync(session, _clipboardSyncGeneration) ||
-        !_canPollLocalClipboard(session) ||
-        _remoteClipboardUnsupported ||
-        _isPushingLocalClipboard) {
-      return;
-    }
-
-    final generation = _clipboardSyncGeneration;
-    _isPushingLocalClipboard = true;
-    try {
-      final localText = await _readSystemClipboardText();
-      if (!_ownsClipboardSync(session, generation) ||
-          !_canPollLocalClipboard(session)) {
-        return;
-      }
-      if (localText == null ||
-          localText == _lastObservedLocalClipboardText ||
-          localText == _lastObservedRemoteClipboardText ||
-          localText == _lastAppliedLocalClipboardText ||
-          !RemoteClipboardSyncService.canSyncText(localText)) {
-        _lastObservedLocalClipboardText = localText;
-        return;
-      }
-
-      final output = await _runRemoteCommand(
-        session,
-        RemoteClipboardSyncService.buildWriteCommand(localText),
-      );
-      if (!_ownsClipboardSync(session, generation)) return;
-      if (RemoteClipboardSyncService.outputIndicatesUnsupported(output)) {
-        _remoteClipboardUnsupported = true;
-        _stopSharedClipboardSync();
-        return;
-      }
-      _lastObservedLocalClipboardText = localText;
-      _setLastObservedRemoteClipboardText(localText);
-      _lastAppliedRemoteClipboardText = localText;
-    } on Object catch (error) {
-      if (!_ownsClipboardSync(session, generation)) return;
-      _handleSharedClipboardRemoteCommandFailure(
-        session,
-        error,
-        operation: 'write',
-      );
-    } finally {
-      if (generation == _clipboardSyncGeneration) {
-        _isPushingLocalClipboard = false;
-      }
-    }
-  }
-
-  Future<void> _syncRemoteClipboardToLocal(SshSession session) async {
-    if (!_ownsClipboardSync(session, _clipboardSyncGeneration) ||
-        _remoteClipboardUnsupported ||
-        _isPollingRemoteClipboard) {
-      return;
-    }
-    final lifecycleState = WidgetsBinding.instance.lifecycleState;
-    if (lifecycleState != null && lifecycleState != AppLifecycleState.resumed) {
-      return;
-    }
-
-    final generation = _clipboardSyncGeneration;
-    _isPollingRemoteClipboard = true;
-    try {
-      final remoteText = await _readRemoteClipboardText(session);
-      if (!_ownsClipboardSync(session, generation)) return;
-      if (!shouldApplyRemoteClipboardTextToLocal(
-        remoteText: remoteText,
-        lastObservedRemoteText: _lastObservedRemoteClipboardText,
-        lastObservedLocalText: _lastObservedLocalClipboardText,
-        lastAppliedRemoteText: _lastAppliedRemoteClipboardText,
-        recentLocalClipboardText: _recentLocalClipboardText,
-        recentLocalClipboardAt: _recentLocalClipboardAt,
-        now: DateTime.now(),
-      )) {
-        if (remoteText != null) {
-          _setLastObservedRemoteClipboardText(remoteText);
-        }
-        return;
-      }
-
-      final remoteClipboardText = remoteText;
-      if (remoteClipboardText == null) {
-        return;
-      }
-      await Clipboard.setData(ClipboardData(text: remoteClipboardText));
-      if (!_ownsClipboardSync(session, generation)) return;
-      _setLastObservedRemoteClipboardText(remoteClipboardText);
-      _lastObservedLocalClipboardText = remoteClipboardText;
-      _lastAppliedLocalClipboardText = remoteClipboardText;
-    } on PlatformException {
-      return;
-    } on Object catch (error) {
-      if (!_ownsClipboardSync(session, generation)) return;
-      _handleSharedClipboardRemoteCommandFailure(
-        session,
-        error,
-        operation: 'read',
-      );
-      return;
-    } finally {
-      if (generation == _clipboardSyncGeneration) {
-        _isPollingRemoteClipboard = false;
-      }
-    }
-  }
-
-  Future<String?> _readRemoteClipboardText(SshSession session) async {
-    final generation = _clipboardSyncGeneration;
-    final output = await _runRemoteCommand(
-      session,
-      RemoteClipboardSyncService.buildReadCommand(
-        expectedSha256: _lastObservedRemoteClipboardSha256,
-      ),
-    );
-    if (!_ownsClipboardSync(session, generation)) return null;
-    final parsed = RemoteClipboardSyncService.parseReadOutput(output);
-    if (!parsed.supported) {
-      _remoteClipboardUnsupported = true;
-      _stopSharedClipboardSync();
-      return null;
-    }
-    if (parsed.unchanged) {
-      return _lastObservedRemoteClipboardText;
-    }
-    return parsed.text;
-  }
-
-  void _handleSharedClipboardRemoteCommandFailure(
-    SshSession session,
-    Object error, {
-    required String operation,
-  }) {
-    _remoteClipboardUnsupported = true;
-    _stopSharedClipboardSync();
-    DiagnosticsLogService.instance.warning(
-      'terminal.clipboard',
-      'remote_sync_failed',
-      fields: {
-        'connectionId': session.connectionId,
-        'operation': operation,
-        'errorType': error.runtimeType,
-      },
-    );
-  }
 
   Future<String> _runRemoteCommand(SshSession session, String command) async =>
       (await _activeTerminalConnectionBackend(
@@ -7211,6 +5972,98 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  Future<
+    ({
+      MonkeyMuxInstallation installation,
+      MonkeyMuxServerUpdatePolicy updatePolicy,
+    })?
+  >
+  _prepareMonkeyMuxInstallation(
+    SshSession session,
+    String sessionName, {
+    required String declinedEvent,
+    required String unavailableEvent,
+    RemoteMuxBackend? telemetryBackend,
+    void Function(MonkeyMuxInstallation installation)? onInstalled,
+  }) async {
+    final telemetryService = ref.read(telemetryServiceProvider);
+    try {
+      MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
+      MonkeyMuxInstallation? deferredInstallation;
+      final installation = await _monkeyMuxInstallerService.ensureInstalled(
+        session,
+        priority: SshExecPriority.normal,
+        confirmInstall: (request) async {
+          final decision = await _confirmMonkeyMuxInstall(
+            request,
+            resolveRunningStatus: () => _monkeyMuxService
+                .runningServerStatusFromInstalledHelpers(session, sessionName),
+          );
+          requestedUpdatePolicy = decision.updatePolicy;
+          deferredInstallation = decision.reuseInstallation;
+          return decision.install;
+        },
+        reuseInstallation: () => deferredInstallation,
+      );
+      onInstalled?.call(installation);
+      final updatePolicy = await _resolveMonkeyMuxServerUpdatePolicy(
+        session,
+        installation,
+        sessionName,
+        preferredUpdatePolicy: requestedUpdatePolicy,
+      );
+      return (installation: installation, updatePolicy: updatePolicy);
+    } on MonkeyMuxInstallDeclinedException {
+      _suppressRemoteMuxDetectionConnectionId = session.connectionId;
+      if (telemetryBackend != null) {
+        unawaited(
+          telemetryService.logMuxInstallFailed(
+            backend: 'monkeymux',
+            failureCategory: 'declined',
+          ),
+        );
+        DiagnosticsLogService.instance.info(
+          'monkeymux.install',
+          declinedEvent,
+          fields: {
+            'connectionId': session.connectionId,
+            'configuredBackend': telemetryBackend.storageValue,
+          },
+        );
+      }
+      return null;
+    } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) {
+        rethrow;
+      }
+      _suppressRemoteMuxDetectionConnectionId = session.connectionId;
+      if (telemetryBackend != null) {
+        unawaited(
+          telemetryService.logMuxInstallFailed(
+            backend: 'monkeymux',
+            failureCategory: 'unavailable',
+          ),
+        );
+      }
+      DiagnosticsLogService.instance.warning(
+        'monkeymux.install',
+        unavailableEvent,
+        fields: {
+          'connectionId': session.connectionId,
+          if (telemetryBackend != null)
+            'configuredBackend': telemetryBackend.storageValue,
+          'errorType': error.runtimeType,
+        },
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('MonkeyMux is unavailable.')),
+        );
+      }
+      return null;
+    }
+  }
+
   Future<({String command, RemoteMuxBackend backend})?>
   _buildRemoteMuxAttachCommand(
     SshSession session,
@@ -7219,7 +6072,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     RemoteMuxBackend? preferredBackend,
     bool existingOnly = false,
   }) async {
-    final telemetryService = ref.read(telemetryServiceProvider);
     final configuredBackend =
         preferredBackend ??
         _configuredRemoteMuxBackend(host) ??
@@ -7235,102 +6087,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     if (configuredBackend == RemoteMuxBackend.monkeyMux ||
         configuredBackend == RemoteMuxBackend.auto) {
-      try {
-        MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
-        MonkeyMuxInstallation? deferredInstallation;
-        final installation = await _monkeyMuxInstallerService.ensureInstalled(
-          session,
-          priority: SshExecPriority.normal,
-          confirmInstall: (request) async {
-            final decision = await _confirmMonkeyMuxInstall(
-              request,
-              resolveRunningStatus: () =>
-                  _monkeyMuxService.runningServerStatusFromInstalledHelpers(
-                    session,
-                    sessionName,
-                  ),
-            );
-            requestedUpdatePolicy = decision.updatePolicy;
-            deferredInstallation = decision.reuseInstallation;
-            return decision.install;
-          },
-          reuseInstallation: () => deferredInstallation,
-        );
-        final updatePolicy = await _resolveMonkeyMuxServerUpdatePolicy(
-          session,
-          installation,
-          sessionName,
-          preferredUpdatePolicy: requestedUpdatePolicy,
-        );
-        final terminalThemeReports = buildTerminalThemeHintReports(
-          session.terminalTheme ?? _resolveEffectiveTerminalTheme(),
-        );
-        if (!mounted) {
-          return null;
-        }
-        final viewportCellSize = _localTerminalViewportCellSize();
-        return (
-          command: buildMonkeyMuxAttachCommand(
-            executablePath: installation.executablePath,
-            sessionName: sessionName,
-            clientId: session.monkeyMuxClientId,
-            clipViewport: true,
-            existingOnly: existingOnly,
-            terminalColumns: viewportCellSize.columns,
-            terminalRows: viewportCellSize.rows,
-            workingDirectory: host.tmuxWorkingDirectory,
-            terminalThemeReports: terminalThemeReports,
-            terminalCapabilityReports: buildTerminalCapabilityHintReports(),
-            serverUpdatePolicy: updatePolicy,
-            startInYoloMode: _startClisInYoloMode,
-            windows: installation.isWindows,
-          ),
-          backend: RemoteMuxBackend.monkeyMux,
-        );
-      } on MonkeyMuxInstallDeclinedException {
-        _suppressRemoteMuxDetectionConnectionId = session.connectionId;
-        unawaited(
-          telemetryService.logMuxInstallFailed(
-            backend: 'monkeymux',
-            failureCategory: 'declined',
-          ),
-        );
-        DiagnosticsLogService.instance.info(
-          'monkeymux.install',
-          'attach_declined',
-          fields: {
-            'connectionId': session.connectionId,
-            'configuredBackend': configuredBackend.storageValue,
-          },
-        );
-        return null;
-      } on Object catch (error) {
-        if (error is! Exception && !isExpectedSshOperationError(error)) {
-          rethrow;
-        }
-        _suppressRemoteMuxDetectionConnectionId = session.connectionId;
-        unawaited(
-          telemetryService.logMuxInstallFailed(
-            backend: 'monkeymux',
-            failureCategory: 'unavailable',
-          ),
-        );
-        DiagnosticsLogService.instance.warning(
-          'monkeymux.install',
-          'attach_unavailable',
-          fields: {
-            'connectionId': session.connectionId,
-            'configuredBackend': configuredBackend.storageValue,
-            'errorType': error.runtimeType,
-          },
-        );
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('MonkeyMux is unavailable.')),
-          );
-        }
+      final prepared = await _prepareMonkeyMuxInstallation(
+        session,
+        sessionName,
+        declinedEvent: 'attach_declined',
+        unavailableEvent: 'attach_unavailable',
+        telemetryBackend: configuredBackend,
+      );
+      if (prepared == null || !mounted) {
         return null;
       }
+      final terminalThemeReports = buildTerminalThemeHintReports(
+        session.terminalTheme ?? _resolveEffectiveTerminalTheme(),
+      );
+      final viewportCellSize = _localTerminalViewportCellSize();
+      return (
+        command: buildMonkeyMuxAttachCommand(
+          executablePath: prepared.installation.executablePath,
+          sessionName: sessionName,
+          clientId: session.monkeyMuxClientId,
+          clipViewport: true,
+          existingOnly: existingOnly,
+          terminalColumns: viewportCellSize.columns,
+          terminalRows: viewportCellSize.rows,
+          workingDirectory: host.tmuxWorkingDirectory,
+          terminalThemeReports: terminalThemeReports,
+          terminalCapabilityReports: buildTerminalCapabilityHintReports(),
+          serverUpdatePolicy: prepared.updatePolicy,
+          startInYoloMode: _startClisInYoloMode,
+          windows: prepared.installation.isWindows,
+        ),
+        backend: RemoteMuxBackend.monkeyMux,
+      );
     }
     return (
       command: buildTmuxCommand(
@@ -8091,42 +6879,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         'hasWorkingDirectory': preset.hasWorkingDirectory,
       },
     );
-    late String attachCommand;
+    final prepared = await _prepareMonkeyMuxInstallation(
+      session,
+      sessionName,
+      declinedEvent: 'agent_launch_declined',
+      unavailableEvent: 'agent_launch_unavailable',
+      onInstalled: (installation) {
+        DiagnosticsLogService.instance.info(
+          'terminal.agent_launch',
+          'monkeymux_ready',
+          fields: {
+            'connectionId': session.connectionId,
+            'platform': installation.platform,
+            'version': installation.version,
+          },
+        );
+      },
+    );
+    if (prepared == null || !mounted) {
+      return null;
+    }
+    final installation = prepared.installation;
+    final updatePolicy = prepared.updatePolicy;
     var agentInNewWindow = false;
     var confirmedLaunch = false;
+    late String attachCommand;
     try {
-      MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
-      MonkeyMuxInstallation? deferredInstallation;
-      final installation = await _monkeyMuxInstallerService.ensureInstalled(
-        session,
-        priority: SshExecPriority.normal,
-        confirmInstall: (request) async {
-          final decision = await _confirmMonkeyMuxInstall(
-            request,
-            resolveRunningStatus: () => _monkeyMuxService
-                .runningServerStatusFromInstalledHelpers(session, sessionName),
-          );
-          requestedUpdatePolicy = decision.updatePolicy;
-          deferredInstallation = decision.reuseInstallation;
-          return decision.install;
-        },
-        reuseInstallation: () => deferredInstallation,
-      );
-      DiagnosticsLogService.instance.info(
-        'terminal.agent_launch',
-        'monkeymux_ready',
-        fields: {
-          'connectionId': session.connectionId,
-          'platform': installation.platform,
-          'version': installation.version,
-        },
-      );
-      final updatePolicy = await _resolveMonkeyMuxServerUpdatePolicy(
-        session,
-        installation,
-        sessionName,
-        preferredUpdatePolicy: requestedUpdatePolicy,
-      );
       // A running workspace ignores the attach-time command, so a confirmed
       // preset launch attaches to it with --existing and no command, then
       // opens its agent in a new window. If the workspace stops before the
@@ -8176,10 +6954,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         startInYoloMode: _startClisInYoloMode,
         windows: installation.isWindows,
       );
-    } on MonkeyMuxInstallDeclinedException {
-      // Opening a shell instead of installing is a user choice, not a failure.
-      _suppressRemoteMuxDetectionConnectionId = session.connectionId;
-      return null;
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
         rethrow;
@@ -8680,6 +7454,40 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     var confirmedTmuxActive = false;
     String? confirmedOwnedSessionName;
     var hadDetectionFailure = false;
+    bool isCurrentDetection() =>
+        mounted &&
+        _connectionId == capturedConnectionId &&
+        detectionGeneration == _tmuxDetectionGeneration;
+    bool preserveExistingTmuxStateIfNeeded({required bool hadFailure}) {
+      if (!shouldPreserveTerminalTmuxStateAfterDetectionFailure(
+        preserveExistingTmuxState: mayPreserveExistingTmuxState,
+        hadConfirmedTmuxState: hadConfirmedTmuxState,
+        confirmedTmuxActive: confirmedTmuxActive,
+        hadDetectionFailure: hadFailure,
+      )) {
+        return false;
+      }
+      final logFields = {
+        'connectionId': session.connectionId,
+        'confirmedTmuxActive': confirmedTmuxActive,
+        'hadDetectionFailure': hadFailure,
+      };
+      if (hadFailure) {
+        DiagnosticsLogService.instance.warning(
+          'tmux.ui',
+          'detection_preserved_existing',
+          fields: logFields,
+        );
+      } else {
+        DiagnosticsLogService.instance.info(
+          'tmux.ui',
+          'detection_preserved_existing',
+          fields: logFields,
+        );
+      }
+      _latchConfirmedTmuxOwnership(session, confirmedOwnedSessionName);
+      return true;
+    }
 
     if (mounted) {
       setState(() {
@@ -8722,9 +7530,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       for (final delay in retrySchedule) {
         if (delay > Duration.zero) {
           await Future<void>.delayed(delay);
-          if (!mounted ||
-              _connectionId != capturedConnectionId ||
-              detectionGeneration != _tmuxDetectionGeneration) {
+          if (!isCurrentDetection()) {
             return false;
           }
         }
@@ -8776,9 +7582,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             'hasForegroundSession': foregroundSessionName != null,
           },
         );
-        if (!mounted ||
-            _connectionId != capturedConnectionId ||
-            detectionGeneration != _tmuxDetectionGeneration) {
+        if (!isCurrentDetection()) {
           return false;
         }
         if (!active) {
@@ -8791,9 +7595,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _monkeyMuxForegroundFalseProbeCount = 0;
 
         final sessionName = candidateSessionName ?? foregroundSessionName;
-        if (!mounted ||
-            _connectionId != capturedConnectionId ||
-            detectionGeneration != _tmuxDetectionGeneration) {
+        if (!isCurrentDetection()) {
           return false;
         }
         if (sessionName == null) {
@@ -8827,9 +7629,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           );
           continue;
         }
-        if (!mounted ||
-            _connectionId != capturedConnectionId ||
-            detectionGeneration != _tmuxDetectionGeneration) {
+        if (!isCurrentDetection()) {
           return false;
         }
         if (windows.isEmpty) {
@@ -8863,9 +7663,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           // Non-critical — path resolution will fall back to OSC 7.
         }
 
-        if (!mounted ||
-            _connectionId != capturedConnectionId ||
-            detectionGeneration != _tmuxDetectionGeneration) {
+        if (!isCurrentDetection()) {
           return false;
         }
 
@@ -8925,9 +7723,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return true;
       }
 
-      if (!mounted ||
-          _connectionId != capturedConnectionId ||
-          detectionGeneration != _tmuxDetectionGeneration) {
+      if (!isCurrentDetection()) {
         return false;
       }
 
@@ -8958,31 +7754,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return false;
       }
 
-      if (shouldPreserveTerminalTmuxStateAfterDetectionFailure(
-        preserveExistingTmuxState: mayPreserveExistingTmuxState,
-        hadConfirmedTmuxState: hadConfirmedTmuxState,
-        confirmedTmuxActive: confirmedTmuxActive,
-        hadDetectionFailure: hadDetectionFailure,
-      )) {
-        final logFields = {
-          'connectionId': session.connectionId,
-          'confirmedTmuxActive': confirmedTmuxActive,
-          'hadDetectionFailure': hadDetectionFailure,
-        };
-        if (hadDetectionFailure) {
-          DiagnosticsLogService.instance.warning(
-            'tmux.ui',
-            'detection_preserved_existing',
-            fields: logFields,
-          );
-        } else {
-          DiagnosticsLogService.instance.info(
-            'tmux.ui',
-            'detection_preserved_existing',
-            fields: logFields,
-          );
-        }
-        _latchConfirmedTmuxOwnership(session, confirmedOwnedSessionName);
+      if (preserveExistingTmuxStateIfNeeded(hadFailure: hadDetectionFailure)) {
         return false;
       }
 
@@ -9011,27 +7783,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           'errorType': error.runtimeType,
         },
       );
-      if (!mounted ||
-          _connectionId != capturedConnectionId ||
-          detectionGeneration != _tmuxDetectionGeneration) {
+      if (!isCurrentDetection()) {
         return false;
       }
-      if (shouldPreserveTerminalTmuxStateAfterDetectionFailure(
-        preserveExistingTmuxState: mayPreserveExistingTmuxState,
-        hadConfirmedTmuxState: hadConfirmedTmuxState,
-        confirmedTmuxActive: confirmedTmuxActive,
-        hadDetectionFailure: true,
-      )) {
-        DiagnosticsLogService.instance.warning(
-          'tmux.ui',
-          'detection_preserved_existing',
-          fields: {
-            'connectionId': session.connectionId,
-            'confirmedTmuxActive': confirmedTmuxActive,
-            'hadDetectionFailure': true,
-          },
-        );
-        _latchConfirmedTmuxOwnership(session, confirmedOwnedSessionName);
+      if (preserveExistingTmuxStateIfNeeded(hadFailure: true)) {
         return false;
       }
       if (!mayPreserveExistingTmuxState) {
@@ -10142,11 +8897,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String providerId,
     AcpLaunchProfile? profile,
   ) {
-    if (profile == null || !profile.showInTitle) return null;
     final provider = acpBuiltinProviders
         .where((candidate) => candidate.id == providerId)
         .firstOrNull;
-    return '${provider?.label ?? 'Agent'} · ${profile.label}';
+    return formatAcpProfileProviderLabel(provider?.label, profile);
   }
 
   void _beginNativeAcpLaunch(SshSession session, _NativeAcpLaunchState launch) {
@@ -10361,20 +9115,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ),
           );
 
-    var result = await launch();
-    if (result is AcpSessionLaunchBlocked && mounted) {
-      final resolved = await resolveAcpConcurrencyBlock(
-        context,
-        ref,
-        result.decision,
-        relaunch: (replace) => launch(replace: replace),
-      );
-      if (!mounted || resolved == null) {
-        return;
-      }
-      result = resolved;
-    }
-    if (!mounted) {
+    var result = await runAcpLaunchWithConcurrencyResolution(
+      context,
+      ref,
+      launch: (replace) => launch(replace: replace),
+    );
+    if (!mounted || result == null) {
       return;
     }
     if (result case AcpSessionLaunchFailed(
@@ -10795,28 +9541,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     try {
-      var result = await reconnectWithTransportRetry();
-      if (!requestIsCurrent()) {
-        await restoreTerminalAfterFailedHandoff(allowSuperseded: true);
-        return;
-      }
-      if (result is AcpSessionLaunchBlocked && mounted) {
-        final resolved = await resolveAcpConcurrencyBlock(
-          context,
-          ref,
-          result.decision,
-          relaunch: (replace) => reconnectWithTransportRetry(replace: replace),
-          cancellation: cancellation,
+      final result = await runAcpLaunchWithConcurrencyResolution(
+        context,
+        ref,
+        launch: (replace) => reconnectWithTransportRetry(replace: replace),
+        isCurrent: requestIsCurrent,
+        cancellation: cancellation,
+      );
+      if (result == null) {
+        // A superseding request dismisses the sheet; restore for it too.
+        await restoreTerminalAfterFailedHandoff(
+          allowSuperseded:
+              requestGeneration != _nativeAcpWindowRequestGeneration,
         );
-        if (resolved == null) {
-          // A superseding request dismisses the sheet; restore for it too.
-          await restoreTerminalAfterFailedHandoff(
-            allowSuperseded:
-                requestGeneration != _nativeAcpWindowRequestGeneration,
-          );
-          return;
-        }
-        result = resolved;
+        return;
       }
       if (!mounted) return;
       if (requestGeneration != _nativeAcpWindowRequestGeneration) {
@@ -12458,6 +11196,308 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         .toList(growable: false);
   }
 
+  Widget _buildTerminalAppBarTitle({
+    required ThemeData theme,
+    required String connectionLabel,
+    required SshConnectionState connectionState,
+    required bool isConnectedThroughJumpHost,
+    required SshSession? activeSession,
+    required String titleSubtitle,
+  }) => Row(
+    children: [
+      _TerminalConnectionStatusIcon(
+        label: connectionLabel,
+        state: connectionState,
+        isConnecting: _isConnecting,
+        connectedThroughJumpHost: isConnectedThroughJumpHost,
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: AgentForwardingTitleSlot(
+          forwarding: connectionState == SshConnectionState.connected
+              ? (_observedSession ?? activeSession)?.config.agentForwarding
+              : null,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _host?.label ?? 'Terminal',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: FluttyTheme.displayMono(
+                  fontSize: 16,
+                  color: theme.colorScheme.onSurface,
+                ),
+              ),
+              if (titleSubtitle.isNotEmpty)
+                Text(
+                  titleSubtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: FluttyTheme.monoStyle.copyWith(
+                    fontSize: 11,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  PreferredSizeWidget? _buildTerminalAppBarBottom({
+    required bool showsNativeAgent,
+    required List<Widget> statusChips,
+    required TerminalProgress? terminalProgress,
+  }) {
+    final showsChips =
+        !showsNativeAgent && _showsTerminalMetadata && statusChips.isNotEmpty;
+    if (terminalProgress == null && !showsChips) {
+      return null;
+    }
+    return PreferredSize(
+      preferredSize: Size.fromHeight(
+        (showsChips ? 40 : 0) + (terminalProgress == null ? 0 : 3),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showsChips)
+            Container(
+              alignment: Alignment.centerLeft,
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: statusChips
+                      .map(
+                        (chip) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: chip,
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+              ),
+            ),
+          if (terminalProgress != null)
+            _TerminalProgressBar(progress: terminalProgress),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTerminalOverflowMenu({
+    required BuildContext context,
+    required ThemeData theme,
+    required bool isMobile,
+    required SshConnectionState connectionState,
+    required bool showsNativeAgent,
+    required bool showsTerminalViewportMenuActions,
+    required bool hasAgentUpdates,
+    required bool canManageAgents,
+    required bool showsDeviceDebugAction,
+    required DeviceDebugSessionController? deviceDebugController,
+    required List<Widget> statusChips,
+    required int commandMarkCount,
+    required List<Widget> railOverflowMenuItems,
+  }) => MenuAnchor(
+    key: _terminalOverflowMenuButtonKey,
+    style: _terminalOverflowMenuStyle(
+      context: context,
+      isMobilePlatform: isMobile,
+    ),
+    reservedPadding: _terminalOverflowMenuReservedPadding(
+      context: context,
+      isMobilePlatform: isMobile,
+    ),
+    menuChildren: [
+      ...railOverflowMenuItems,
+      if (_activeNativeAcpSessionKey != null) ...[
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.search,
+          label: 'Search Chat',
+          action: 'search_chat',
+        ),
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.adaptive.share,
+          label: 'Export Chat',
+          action: 'export_chat',
+        ),
+      ],
+      if (showsTerminalViewportMenuActions)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.code_rounded,
+          label: 'Snippets',
+          action: 'snippets',
+        ),
+      _terminalOverflowMenuItem(
+        context: context,
+        icon: Icons.palette_outlined,
+        label: 'Change Theme',
+        action: 'change_theme',
+      ),
+      _terminalOverflowMenuItem(
+        context: context,
+        icon: Icons.smart_toy_outlined,
+        label: 'Agent Management',
+        action: 'agent_management',
+        showStatusDot: hasAgentUpdates,
+        showProBadge: !canManageAgents,
+        enabled:
+            _connectionId != null &&
+            connectionState == SshConnectionState.connected,
+      ),
+      _terminalOverflowMenuItem(
+        context: context,
+        icon: Icons.alt_route_rounded,
+        label: 'Port Forwards',
+        action: 'port_forwards',
+        enabled:
+            _connectionId != null &&
+            connectionState == SshConnectionState.connected,
+      ),
+      // Always enabled: without a connection the sheet says why.
+      _terminalOverflowMenuItem(
+        context: context,
+        icon: Icons.difference_outlined,
+        label: 'Working tree changes',
+        action: 'working_tree_changes',
+      ),
+      if (_forceMonkeyMuxReloadMenuState.visible)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.restart_alt_rounded,
+          label: 'Force MonkeyMux Reload',
+          action: 'force_monkeymux_reload',
+          enabled: _forceMonkeyMuxReloadMenuState.enabled,
+        ),
+      if (showsDeviceDebugAction)
+        _terminalOverflowSwitchMenuItem(
+          context: context,
+          icon: Icons.bug_report_outlined,
+          label: 'Device debugging',
+          value: deviceDebugController?.state.isActive ?? false,
+          loading: deviceDebugController?.state.isBusy ?? false,
+          action: 'toggle_device_debug',
+          enabled:
+              deviceDebugController != null &&
+              connectionState == SshConnectionState.connected,
+        ),
+      if (isPortForwardBrowserSupported())
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.open_in_browser_outlined,
+          label: 'Open Forwarded Browser',
+          action: 'open_port_forward_browser',
+        ),
+      _terminalOverflowSubmenuButton(
+        context: context,
+        isMobile: isMobile,
+        icon: Icons.tune_rounded,
+        label: 'Options',
+        menuChildren: _terminalOptionsMenuItems(
+          context: context,
+          hasTerminalInfo: statusChips.isNotEmpty,
+          isMobile: isMobile,
+          nativeAgentActive: showsNativeAgent,
+        ),
+      ),
+      _terminalOverflowMenuDivider(context),
+      if (showsTerminalViewportMenuActions && !isMobile)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: _isNativeSelectionMode
+              ? Icons.deselect_rounded
+              : Icons.select_all_rounded,
+          label: _isNativeSelectionMode
+              ? 'Exit Native Selection'
+              : 'Native Selection',
+          action: 'native_select',
+        ),
+      if (showsTerminalViewportMenuActions && commandMarkCount > 0)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.history_rounded,
+          label: commandMarkCount == 1
+              ? 'Previous Command'
+              : 'Previous Command ($commandMarkCount)',
+          action: 'previous_command',
+        ),
+      if (showsTerminalViewportMenuActions)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.search_rounded,
+          label: 'Find',
+          action: 'find_in_scrollback',
+        ),
+      if (showsTerminalViewportMenuActions)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: terminalScrollbackExportIcon(defaultTargetPlatform),
+          label: 'Export Scrollback',
+          action: 'export_scrollback',
+        ),
+      if (showsTerminalViewportMenuActions && _workingDirectoryPath != null)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.folder_copy_outlined,
+          label: 'Copy Current Directory',
+          action: 'copy_working_directory',
+        ),
+      if (showsTerminalViewportMenuActions &&
+          _currentTerminalSelectionText() != null)
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.code_rounded,
+          label: 'Create Snippet',
+          action: 'create_snippet',
+        ),
+      if (showsTerminalViewportMenuActions)
+        _terminalOverflowSubmenuButton(
+          context: context,
+          isMobile: isMobile,
+          icon: Icons.paste_rounded,
+          label: 'Paste',
+          menuChildren: _terminalPastingMenuItems(context),
+        ),
+      if (showsTerminalViewportMenuActions)
+        _terminalOverflowMenuDivider(context),
+      _terminalOverflowMenuItem(
+        context: context,
+        icon: Icons.link_off_rounded,
+        label: 'Disconnect',
+        action: 'disconnect',
+      ),
+    ],
+    builder: (context, controller, _) => IconButton(
+      icon: Semantics(
+        label: hasAgentUpdates ? 'Agent updates available' : null,
+        child: Badge(
+          key: const ValueKey('terminal-agent-updates-dot'),
+          isLabelVisible: hasAgentUpdates,
+          backgroundColor: theme.colorScheme.primary,
+          smallSize: 8,
+          child: const Icon(Icons.more_vert),
+        ),
+      ),
+      tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+      onPressed: () {
+        if (controller.isOpen) {
+          controller.close();
+        } else {
+          controller.open();
+        }
+      },
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => AppShortcutScope(
     handlers: _appShortcutHandlers(
@@ -12620,91 +11660,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // A native chat hides the find bar without closing it.
     final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
 
-    final terminalBarTitle = Row(
-      children: [
-        _TerminalConnectionStatusIcon(
-          label: connectionLabel,
-          state: connectionState,
-          isConnecting: _isConnecting,
-          connectedThroughJumpHost: isConnectedThroughJumpHost,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: AgentForwardingTitleSlot(
-            forwarding: connectionState == SshConnectionState.connected
-                ? (_observedSession ?? activeSession)?.config.agentForwarding
-                : null,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _host?.label ?? 'Terminal',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: FluttyTheme.displayMono(
-                    fontSize: 16,
-                    color: theme.colorScheme.onSurface,
-                  ),
-                ),
-                if (titleSubtitle.isNotEmpty)
-                  Text(
-                    titleSubtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: FluttyTheme.monoStyle.copyWith(
-                      fontSize: 11,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ],
+    final terminalBarTitle = _buildTerminalAppBarTitle(
+      theme: theme,
+      connectionLabel: connectionLabel,
+      connectionState: connectionState,
+      isConnectedThroughJumpHost: isConnectedThroughJumpHost,
+      activeSession: activeSession,
+      titleSubtitle: titleSubtitle,
     );
-    final PreferredSizeWidget? terminalBarBottom =
-        terminalProgress == null &&
-            (showsNativeAgent || !_showsTerminalMetadata || statusChips.isEmpty)
-        ? null
-        : PreferredSize(
-            preferredSize: Size.fromHeight(
-              (!showsNativeAgent &&
-                          _showsTerminalMetadata &&
-                          statusChips.isNotEmpty
-                      ? 40
-                      : 0) +
-                  (terminalProgress == null ? 0 : 3),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!showsNativeAgent &&
-                    _showsTerminalMetadata &&
-                    statusChips.isNotEmpty)
-                  Container(
-                    alignment: Alignment.centerLeft,
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: statusChips
-                            .map(
-                              (chip) => Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: chip,
-                              ),
-                            )
-                            .toList(growable: false),
-                      ),
-                    ),
-                  ),
-                if (terminalProgress != null)
-                  _TerminalProgressBar(progress: terminalProgress),
-              ],
-            ),
-          );
+    final terminalBarBottom = _buildTerminalAppBarBottom(
+      showsNativeAgent: showsNativeAgent,
+      statusChips: statusChips,
+      terminalProgress: terminalProgress,
+    );
     // Offered while the navigator is hidden from the Options menu, or while
     // the keyboard covers its propped page.
     final showsMuxWindowsControl =
@@ -12880,198 +11848,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (railOverflowMenuItems.isNotEmpty) {
       railOverflowMenuItems.add(_terminalOverflowMenuDivider(context));
     }
-    final overflowMenu = MenuAnchor(
-      key: _terminalOverflowMenuButtonKey,
-      style: _terminalOverflowMenuStyle(
-        context: context,
-        isMobilePlatform: isMobile,
-      ),
-      reservedPadding: _terminalOverflowMenuReservedPadding(
-        context: context,
-        isMobilePlatform: isMobile,
-      ),
-      menuChildren: [
-        ...railOverflowMenuItems,
-        if (_activeNativeAcpSessionKey != null) ...[
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.search,
-            label: 'Search Chat',
-            action: 'search_chat',
-          ),
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.adaptive.share,
-            label: 'Export Chat',
-            action: 'export_chat',
-          ),
-        ],
-        if (showsTerminalViewportMenuActions)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.code_rounded,
-            label: 'Snippets',
-            action: 'snippets',
-          ),
-        _terminalOverflowMenuItem(
-          context: context,
-          icon: Icons.palette_outlined,
-          label: 'Change Theme',
-          action: 'change_theme',
-        ),
-        _terminalOverflowMenuItem(
-          context: context,
-          icon: Icons.smart_toy_outlined,
-          label: 'Agent Management',
-          action: 'agent_management',
-          showStatusDot: hasAgentUpdates,
-          showProBadge: !canManageAgents,
-          enabled:
-              _connectionId != null &&
-              connectionState == SshConnectionState.connected,
-        ),
-        _terminalOverflowMenuItem(
-          context: context,
-          icon: Icons.alt_route_rounded,
-          label: 'Port Forwards',
-          action: 'port_forwards',
-          enabled:
-              _connectionId != null &&
-              connectionState == SshConnectionState.connected,
-        ),
-        // Always enabled: without a connection the sheet says why.
-        _terminalOverflowMenuItem(
-          context: context,
-          icon: Icons.difference_outlined,
-          label: 'Working tree changes',
-          action: 'working_tree_changes',
-        ),
-        if (_forceMonkeyMuxReloadMenuState.visible)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.restart_alt_rounded,
-            label: 'Force MonkeyMux Reload',
-            action: 'force_monkeymux_reload',
-            enabled: _forceMonkeyMuxReloadMenuState.enabled,
-          ),
-        if (showsDeviceDebugAction)
-          _terminalOverflowSwitchMenuItem(
-            context: context,
-            icon: Icons.bug_report_outlined,
-            label: 'Device debugging',
-            value: deviceDebugController?.state.isActive ?? false,
-            loading: deviceDebugController?.state.isBusy ?? false,
-            action: 'toggle_device_debug',
-            enabled:
-                deviceDebugController != null &&
-                connectionState == SshConnectionState.connected,
-          ),
-        if (isPortForwardBrowserSupported())
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.open_in_browser_outlined,
-            label: 'Open Forwarded Browser',
-            action: 'open_port_forward_browser',
-          ),
-        _terminalOverflowSubmenuButton(
-          context: context,
-          isMobile: isMobile,
-          icon: Icons.tune_rounded,
-          label: 'Options',
-          menuChildren: _terminalOptionsMenuItems(
-            context: context,
-            hasTerminalInfo: statusChips.isNotEmpty,
-            isMobile: isMobile,
-            nativeAgentActive: showsNativeAgent,
-          ),
-        ),
-        _terminalOverflowMenuDivider(context),
-        if (showsTerminalViewportMenuActions && !isMobile)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: _isNativeSelectionMode
-                ? Icons.deselect_rounded
-                : Icons.select_all_rounded,
-            label: _isNativeSelectionMode
-                ? 'Exit Native Selection'
-                : 'Native Selection',
-            action: 'native_select',
-          ),
-        if (showsTerminalViewportMenuActions && commandMarkCount > 0)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.history_rounded,
-            label: commandMarkCount == 1
-                ? 'Previous Command'
-                : 'Previous Command ($commandMarkCount)',
-            action: 'previous_command',
-          ),
-        if (showsTerminalViewportMenuActions)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.search_rounded,
-            label: 'Find',
-            action: 'find_in_scrollback',
-          ),
-        if (showsTerminalViewportMenuActions)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: terminalScrollbackExportIcon(defaultTargetPlatform),
-            label: 'Export Scrollback',
-            action: 'export_scrollback',
-          ),
-        if (showsTerminalViewportMenuActions && _workingDirectoryPath != null)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.folder_copy_outlined,
-            label: 'Copy Current Directory',
-            action: 'copy_working_directory',
-          ),
-        if (showsTerminalViewportMenuActions &&
-            _currentTerminalSelectionText() != null)
-          _terminalOverflowMenuItem(
-            context: context,
-            icon: Icons.code_rounded,
-            label: 'Create Snippet',
-            action: 'create_snippet',
-          ),
-        if (showsTerminalViewportMenuActions)
-          _terminalOverflowSubmenuButton(
-            context: context,
-            isMobile: isMobile,
-            icon: Icons.paste_rounded,
-            label: 'Paste',
-            menuChildren: _terminalPastingMenuItems(context),
-          ),
-        if (showsTerminalViewportMenuActions)
-          _terminalOverflowMenuDivider(context),
-        _terminalOverflowMenuItem(
-          context: context,
-          icon: Icons.link_off_rounded,
-          label: 'Disconnect',
-          action: 'disconnect',
-        ),
-      ],
-      builder: (context, controller, _) => IconButton(
-        icon: Semantics(
-          label: hasAgentUpdates ? 'Agent updates available' : null,
-          child: Badge(
-            key: const ValueKey('terminal-agent-updates-dot'),
-            isLabelVisible: hasAgentUpdates,
-            backgroundColor: theme.colorScheme.primary,
-            smallSize: 8,
-            child: const Icon(Icons.more_vert),
-          ),
-        ),
-        tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-        onPressed: () {
-          if (controller.isOpen) {
-            controller.close();
-          } else {
-            controller.open();
-          }
-        },
-      ),
+    final overflowMenu = _buildTerminalOverflowMenu(
+      context: context,
+      theme: theme,
+      isMobile: isMobile,
+      connectionState: connectionState,
+      showsNativeAgent: showsNativeAgent,
+      showsTerminalViewportMenuActions: showsTerminalViewportMenuActions,
+      hasAgentUpdates: hasAgentUpdates,
+      canManageAgents: canManageAgents,
+      showsDeviceDebugAction: showsDeviceDebugAction,
+      deviceDebugController: deviceDebugController,
+      statusChips: statusChips,
+      commandMarkCount: commandMarkCount,
+      railOverflowMenuItems: railOverflowMenuItems,
     );
     // The keys standing outside the title bar, in the vertical bar from top
     // to bottom or in the propped row from left to right: Back first and the
@@ -15173,3544 +13963,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     viewWidth,
     preserveTrailingPadding: false,
   );
-
-  String? _resolveTerminalLinkTap(CellOffset offset) {
-    var target = _resolveTerminalExternalLinkAtOffset(
-      offset,
-      forgiving: _isMobilePlatform,
-    );
-    if (target == null && ref.read(terminalPathLinksNotifierProvider)) {
-      final detectedPath = _resolveTerminalFilePathAtOffset(
-        offset,
-        forgiving: _isMobilePlatform,
-      );
-      if (detectedPath != null) {
-        target = '$_terminalSftpPathPrefix$detectedPath';
-      } else {
-        final pendingTarget = _pendingTerminalTargetTap;
-        if (pendingTarget != null &&
-            pendingTarget.startsWith(_terminalSftpPathPrefix) &&
-            _pathVerifier.isInteractiveTerminalFilePath(
-              pendingTarget.substring(_terminalSftpPathPrefix.length),
-            )) {
-          target = pendingTarget;
-        }
-      }
-    }
-    // Leave the pointer-level pending tap alone. With system selection the
-    // selection recognizer wins the arena, so that tap is the only one that
-    // opens the link; this resolver still runs when the losing tap recognizer
-    // reports its tap down 100 ms into the press.
-    return target;
-  }
-
-  /// Opens a link for the terminal's own tap recognizer, unless the pointer
-  /// listener already opened a target for the same touch. The two can resolve
-  /// different targets (the listener also looks at neighbouring cells), so the
-  /// check does not compare them.
-  void _handleTerminalGestureLinkTap(String link) {
-    if (_terminalTargetTapOpenedByPointer) {
-      _terminalTargetTapOpenedByPointer = false;
-      return;
-    }
-    _clearPendingTerminalTargetTap();
-    _handleTerminalLinkTap(link);
-  }
-
-  String? _resolveTerminalExternalLinkAtOffset(
-    CellOffset offset, {
-    bool forgiving = false,
-  }) {
-    if (!shouldResolveTerminalTapLinks(
-      showsNativeSelectionOverlay: _isNativeSelectionMode,
-    )) {
-      return null;
-    }
-
-    final candidateOffsets = forgiving
-        ? resolveForgivingTerminalTapOffsets(
-            offset,
-            shownRows: _terminalViewKey.currentState?.renderTerminal.shownRows,
-          )
-        : <CellOffset>[offset];
-    for (final candidateOffset in candidateOffsets) {
-      final trackedHyperlink = _terminalHyperlinkTracker?.resolveLinkAt(
-        candidateOffset,
-      );
-      if (trackedHyperlink != null) {
-        return trackedHyperlink;
-      }
-
-      final row = candidateOffset.y.clamp(0, _terminal.buffer.height - 1);
-      final column = candidateOffset.x.clamp(0, _terminal.buffer.viewWidth - 1);
-      final line = _terminal.buffer.lines[row];
-      if (line.getCodePoint(column) == 0) {
-        continue;
-      }
-
-      // Use the cross-rendered-line snapshot (the same one that reconstructs
-      // wrapped file paths) so a URL split across a program's bordered TUI
-      // lines is rejoined before detection.
-      final linkSnapshot = _buildTerminalPathTapSnapshot(row);
-      if (linkSnapshot == null) {
-        continue;
-      }
-
-      final rowIndex = row - linkSnapshot.startRow;
-      if (rowIndex < 0 || rowIndex >= linkSnapshot.columnOffsets.length) {
-        continue;
-      }
-      final rowColumnOffsets = linkSnapshot.columnOffsets[rowIndex];
-      if (column >= rowColumnOffsets.length) {
-        continue;
-      }
-      final textOffset =
-          linkSnapshot.rowStarts[rowIndex] + rowColumnOffsets[column];
-      final detectedLink = detectTerminalLinkAtTextOffset(
-        linkSnapshot.text,
-        textOffset,
-      );
-      if (detectedLink != null) {
-        return detectedLink.uri.toString();
-      }
-    }
-
-    // Forgiving touch fallback: a short OSC 8 label such as `#587` is easy to
-    // miss with a finger, so open the link when the tapped row carries exactly
-    // one tracked hyperlink.
-    if (forgiving) {
-      final rowLink = _terminalHyperlinkTracker?.resolveLinkOnRow(
-        offset.y.clamp(0, _terminal.buffer.height - 1),
-      );
-      if (rowLink != null) {
-        return rowLink;
-      }
-    }
-
-    return null;
-  }
-
-  String? _resolveTerminalFilePathAtOffset(
-    CellOffset offset, {
-    bool forgiving = false,
-  }) {
-    final detectedPath = _detectTerminalFilePathAtOffset(
-      offset,
-      forgiving: forgiving,
-    );
-    if (detectedPath == null) {
-      return null;
-    }
-
-    // Prime verification even for optimistically active paths so the link can
-    // shrink to (or drop below) the longest existing substring once resolved.
-    _pathVerifier.primeTerminalFilePathVerification(detectedPath);
-    return _pathVerifier.isInteractiveTerminalFilePath(detectedPath)
-        ? detectedPath
-        : null;
-  }
-
-  String? _detectTerminalFilePathAtOffset(
-    CellOffset offset, {
-    bool forgiving = false,
-  }) {
-    final candidateOffsets = forgiving
-        ? resolveForgivingTerminalTapOffsets(
-            offset,
-            shownRows: _terminalViewKey.currentState?.renderTerminal.shownRows,
-          )
-        : <CellOffset>[offset];
-    for (final candidateOffset in candidateOffsets) {
-      final detectedPath = _detectTerminalFilePathAtCell(candidateOffset);
-      if (detectedPath != null) {
-        return detectedPath;
-      }
-    }
-    if (forgiving) {
-      final segments = _resolveInteractiveTerminalPathSegmentsOnRow(offset.y);
-      return segments.length == 1 ? segments.single.path : null;
-    }
-    return null;
-  }
-
-  String? _detectTerminalFilePathAtCell(CellOffset offset) {
-    final row = offset.y.clamp(0, _terminal.buffer.height - 1);
-    final column = offset.x.clamp(0, _terminal.buffer.viewWidth - 1);
-    // OSC 8 hyperlinks are authoritative: only linkify text that is not already
-    // a program-declared link.
-    if (_terminalHyperlinkTracker?.resolveLinkAt(CellOffset(column, row)) !=
-        null) {
-      return null;
-    }
-    final pathSnapshot = _buildTerminalPathTapSnapshot(row);
-    if (pathSnapshot == null) {
-      return null;
-    }
-
-    return _detectTerminalFilePathInSnapshotAtCell(pathSnapshot, offset);
-  }
-
-  String? _detectTerminalFilePathInSnapshotAtCell(
-    _TerminalPathTapSnapshot pathSnapshot,
-    CellOffset offset,
-  ) {
-    final row = offset.y.clamp(0, _terminal.buffer.height - 1);
-    final column = offset.x.clamp(0, _terminal.buffer.viewWidth - 1);
-    final line = _terminal.buffer.lines[row];
-    if (line.getCodePoint(column) == 0) {
-      return null;
-    }
-
-    final pathRowIndex = row - pathSnapshot.startRow;
-    if (pathRowIndex < 0 || pathRowIndex >= pathSnapshot.columnOffsets.length) {
-      return null;
-    }
-
-    final rowColumnOffsets = pathSnapshot.columnOffsets[pathRowIndex];
-    if (column >= rowColumnOffsets.length) {
-      return null;
-    }
-
-    final pathTextOffset =
-        pathSnapshot.rowStarts[pathRowIndex] + rowColumnOffsets[column];
-    final snapshotAnalysis = _analyzeTerminalPathSnapshot(pathSnapshot);
-    for (final detectedPath in snapshotAnalysis.detectedPaths) {
-      final activePath = _pathVerifier.interactiveTerminalFilePathCandidate(
-        detectedPath.path,
-      );
-      final activeEnd = activePath == null
-          ? detectedPath.hitTestEnd
-          : _resolveOriginalTerminalPathMatchEnd(
-              normalizedSnapshot: snapshotAnalysis.normalizedSnapshot,
-              normalizedStart: detectedPath.normalizedStart,
-              normalizedLength: activePath.length,
-            );
-      if (activeEnd == null) {
-        continue;
-      }
-      if (pathTextOffset >= detectedPath.start && pathTextOffset < activeEnd) {
-        return detectedPath.path;
-      }
-    }
-    return null;
-  }
-
-  _TerminalPathTapSnapshot? _buildTerminalPathTapSnapshot(int row) {
-    final buffer = _terminal.buffer;
-    if (row < 0 || row >= buffer.height) {
-      return null;
-    }
-
-    // Locate the canonical start of the wrapped-line group so that all rows
-    // in the group share the same cache key.
-    var cacheKey = row;
-    while (cacheKey > 0 && buffer.lines[cacheKey].isWrapped) {
-      cacheKey--;
-    }
-
-    // Local resizes reflow the buffer without notifying content listeners.
-    // Include geometry so hit tests cannot reuse offsets from the old grid.
-    final geometry = (
-      buffer,
-      buffer.viewWidth,
-      buffer.viewHeight,
-      buffer.height,
-    );
-    if (_terminalPathSnapshotCacheGeneration != _terminalContentGeneration ||
-        _terminalPathSnapshotCacheGeometry != geometry) {
-      _terminalPathSnapshotCacheGeneration = _terminalContentGeneration;
-      _terminalPathSnapshotCacheGeometry = geometry;
-      _terminalPathSnapshotCache.clear();
-      _terminalPathAnalysisCache.clear();
-    }
-
-    if (_terminalPathSnapshotCache.containsKey(cacheKey)) {
-      return _terminalPathSnapshotCache[cacheKey];
-    }
-
-    final lineSnapshots = <int, ({String text, List<int> columnOffsets})>{};
-    ({String text, List<int> columnOffsets}) lineSnapshotAt(int lineIndex) =>
-        lineSnapshots.putIfAbsent(
-          lineIndex,
-          () => _buildNativeSelectionLineSnapshot(
-            buffer.lines[lineIndex],
-            buffer.viewWidth,
-          ),
-        );
-    String lineTextAt(int lineIndex) => lineSnapshotAt(lineIndex).text;
-
-    var startRow = cacheKey;
-    var endRow = row;
-    while (endRow + 1 < buffer.height && buffer.lines[endRow + 1].isWrapped) {
-      endRow++;
-    }
-
-    while (startRow > 0 &&
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: lineTextAt(startRow - 1),
-          nextLineText: lineTextAt(startRow),
-        )) {
-      startRow--;
-    }
-
-    while (endRow + 1 < buffer.height &&
-        isTerminalPathContinuationAcrossLines(
-          previousLineText: lineTextAt(endRow),
-          nextLineText: lineTextAt(endRow + 1),
-        )) {
-      endRow++;
-    }
-
-    final builder = StringBuffer();
-    final rowStarts = <int>[];
-    final columnOffsets = <List<int>>[];
-    for (var lineIndex = startRow; lineIndex <= endRow; lineIndex++) {
-      rowStarts.add(builder.length);
-      final lineSnapshot = lineSnapshotAt(lineIndex);
-      builder.write(lineSnapshot.text);
-      columnOffsets.add(lineSnapshot.columnOffsets);
-      if (lineIndex < endRow && !buffer.lines[lineIndex + 1].isWrapped) {
-        builder.write('\n');
-      }
-    }
-
-    final snapshot = (
-      text: builder.toString(),
-      startRow: startRow,
-      rowStarts: rowStarts,
-      columnOffsets: columnOffsets,
-    );
-    _terminalPathSnapshotCache[cacheKey] = snapshot;
-    return snapshot;
-  }
-
-  void _handleTerminalPathHover(PointerHoverEvent event) {
-    final terminalViewState = _terminalViewKey.currentState;
-    if (terminalViewState == null ||
-        !ref.read(terminalPathLinksNotifierProvider) ||
-        !ref.read(terminalPathLinkUnderlinesNotifierProvider)) {
-      _clearHoveredTerminalPathUnderline();
-      return;
-    }
-
-    final terminalLocalPosition = terminalViewState.renderTerminal
-        .globalToLocal(event.position);
-    final offset = terminalViewState.renderTerminal.getCellOffset(
-      terminalLocalPosition,
-    );
-    final isSameHoveredCell =
-        _lastHoveredTerminalPathOffset?.x == offset.x &&
-        _lastHoveredTerminalPathOffset?.y == offset.y;
-    final detectedPath = isSameHoveredCell
-        ? _lastHoveredTerminalPath
-        : _resolveTerminalFilePathAtOffset(offset);
-    if (!isSameHoveredCell) {
-      _lastHoveredTerminalPathOffset = offset;
-      _lastHoveredTerminalPath = detectedPath;
-    }
-    if (detectedPath == null || !_shouldShowTerminalPathBadge(detectedPath)) {
-      _clearHoveredTerminalPathUnderline();
-      return;
-    }
-    final hoveredSegment = _resolveInteractiveTerminalPathSegmentAtOffset(
-      offset,
-      path: detectedPath,
-    );
-    if (hoveredSegment == null) {
-      _clearHoveredTerminalPathUnderline();
-      return;
-    }
-    final underline = _buildTerminalPathInlineUnderline(
-      row: offset.y,
-      startColumn: hoveredSegment.startColumn,
-      endColumn: hoveredSegment.endColumn,
-    );
-    if (underline == null) {
-      _clearHoveredTerminalPathUnderline();
-      return;
-    }
-    if (_hoveredTerminalPathUnderline == underline) {
-      return;
-    }
-    setState(() => _hoveredTerminalPathUnderline = underline);
-  }
-
-  void _clearPendingTerminalTargetTap() {
-    _pendingTerminalTargetTap = null;
-    _pendingTerminalTargetTapPointer = null;
-    _pendingTerminalTargetTapDownPosition = null;
-    _pendingTerminalTargetTapDownTimestamp = null;
-  }
-
-  void _clearPendingTerminalDoubleTap() {
-    _pendingTerminalDoubleTapPointer = null;
-    _pendingTerminalDoubleTapDownPosition = null;
-    _pendingTerminalDoubleTapDownTimestamp = null;
-  }
-
-  void _clearLastTerminalTap() {
-    _lastTerminalTapPosition = null;
-    _lastTerminalTapTimestamp = null;
-  }
-
-  void _pauseTerminalOutputFollowForTouch(PointerDownEvent event) {
-    if (!_isMobilePlatform || event.kind != PointerDeviceKind.touch) {
-      return;
-    }
-
-    if (_terminalOutputPauseTouchPointers.add(event.pointer)) {
-      if (_terminalScrollController.hasClients) {
-        _lastTerminalScrollOffset = _terminalScrollController.offset;
-        _setShouldFollowLiveOutput(
-          shouldFollowTerminalOutput(
-            hasScrollClients: true,
-            currentOffset: _terminalScrollController.offset,
-            maxScrollExtent: _terminalScrollController.position.maxScrollExtent,
-          ),
-        );
-      }
-      _syncTerminalLiveOutputAutoScroll();
-      setState(() {});
-    }
-  }
-
-  void _resumeTerminalOutputFollowForTouch(int pointer) {
-    if (!_terminalOutputPauseTouchPointers.remove(pointer)) {
-      return;
-    }
-
-    _syncTerminalLiveOutputAutoScroll();
-    setState(() {});
-    if (_terminalOutputPauseTouchPointers.isNotEmpty ||
-        !_shouldFollowLiveOutput ||
-        _isTerminalOutputFollowPaused) {
-      return;
-    }
-
-    _queueTerminalScrollToBottom();
-  }
-
-  void _syncTerminalLiveOutputAutoScroll() {
-    _terminalViewKey.currentState?.renderTerminal.liveOutputAutoScroll =
-        _terminalLiveOutputAutoScrollEnabled;
-  }
-
-  void _handleTerminalPointerDown(PointerDownEvent event) {
-    _pauseTerminalOutputFollowForTouch(event);
-    _handleTerminalTargetPointerDown(event);
-    _handleTerminalDoubleTapPointerDown(
-      event,
-      allowDoubleTap: _pendingTerminalTargetTap == null,
-    );
-    _handleTerminalMouseTapPointerDown(
-      event,
-      allowTap:
-          _pendingTerminalTargetTap == null &&
-          _terminalDoubleTapConsumedPointer != event.pointer,
-    );
-  }
-
-  // Pointer routing keeps the hit-test path from pointer down, so move, up and
-  // cancel can still reach this listener after the terminal was disposed.
-  void _handleTerminalPointerMove(PointerMoveEvent event) {
-    if (!mounted) return;
-    _handleTerminalTargetPointerMove(event);
-    _handleTerminalDoubleTapPointerMove(event);
-    _handleTerminalMouseTapPointerMove(event);
-  }
-
-  void _handleTerminalPointerUp(PointerUpEvent event) {
-    if (!mounted) return;
-    if (!_handleTerminalTargetPointerUp(event)) {
-      _handleTerminalDoubleTapPointerUp(event);
-      _handleTerminalMouseTapPointerUp(event);
-    } else {
-      _clearPendingTerminalMouseTap(event.pointer);
-      _clearLastTerminalTap();
-    }
-    _resumeTerminalOutputFollowForTouch(event.pointer);
-  }
-
-  void _handleTerminalPointerCancel(PointerCancelEvent event) {
-    if (!mounted) return;
-    if (_pendingTerminalTargetTapPointer == event.pointer) {
-      _clearPendingTerminalTargetTap();
-    }
-    _handleTerminalDoubleTapPointerCancel(event);
-    _clearPendingTerminalMouseTap(event.pointer);
-    _resumeTerminalOutputFollowForTouch(event.pointer);
-  }
-
-  void _handleTerminalTargetPointerDown(PointerDownEvent event) {
-    _clearPendingTerminalTargetTap();
-    _terminalTargetTapOpenedByPointer = false;
-    final terminalViewState = _terminalViewKey.currentState;
-    if (terminalViewState == null) {
-      _clearHoveredTerminalPathUnderline();
-      return;
-    }
-    final localPosition = terminalViewState.renderTerminal.globalToLocal(
-      event.position,
-    );
-    final offset = terminalViewState.renderTerminal.getCellOffset(
-      localPosition,
-    );
-    final link = event.kind == PointerDeviceKind.touch
-        ? _resolveTerminalExternalLinkAtOffset(offset, forgiving: true)
-        : null;
-    final path = link == null
-        ? _resolveTerminalPointerPath(event, offset, localPosition)
-        : null;
-    final target =
-        link ?? (path == null ? null : '$_terminalSftpPathPrefix$path');
-    if (target == null) {
-      return;
-    }
-    if (link != null) {
-      _terminalTextInputController.suppressNextTouchKeyboardRequest();
-    }
-    _pendingTerminalTargetTap = target;
-    _pendingTerminalTargetTapPointer = event.pointer;
-    _pendingTerminalTargetTapDownPosition = event.position;
-    _pendingTerminalTargetTapDownTimestamp = event.timeStamp;
-  }
-
-  void _handleTerminalTargetPointerMove(PointerMoveEvent event) {
-    if (_pendingTerminalTargetTapPointer != event.pointer) {
-      return;
-    }
-    final downPosition = _pendingTerminalTargetTapDownPosition;
-    if (downPosition != null &&
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalTargetTap();
-    }
-  }
-
-  bool _handleTerminalTargetPointerUp(PointerUpEvent event) {
-    if (event.kind != PointerDeviceKind.touch) {
-      return false;
-    }
-
-    final pendingTarget = _pendingTerminalTargetTap;
-    final downPosition = _pendingTerminalTargetTapDownPosition;
-    final downTimestamp = _pendingTerminalTargetTapDownTimestamp;
-    if (pendingTarget == null ||
-        _pendingTerminalTargetTapPointer != event.pointer ||
-        downPosition == null ||
-        downTimestamp == null ||
-        event.timeStamp - downTimestamp > kLongPressTimeout ||
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalTargetTap();
-      return pendingTarget != null;
-    }
-
-    _clearPendingTerminalTargetTap();
-    // The recognizer's tap up, if it comes, arrives in this same pointer-up
-    // dispatch; the next pointer down clears the flag in case no frame does.
-    _terminalTargetTapOpenedByPointer = true;
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _terminalTargetTapOpenedByPointer = false,
-    );
-    _handleTerminalLinkTap(pendingTarget);
-    return true;
-  }
-
-  void _handleTerminalMouseTapPointerDown(
-    PointerDownEvent event, {
-    required bool allowTap,
-  }) {
-    _clearPendingTerminalMouseTap();
-    final terminalViewState = _terminalViewKey.currentState;
-    // A terminal that takes the tap itself (desktop) would see it twice.
-    if (!allowTap ||
-        event.buttons != kPrimaryButton ||
-        terminalViewState == null ||
-        !terminalViewState.leavesTapToParent(event.kind) ||
-        !((event.kind == PointerDeviceKind.touch &&
-                terminalViewState.shouldSendTerminalTapPointerInput) ||
-            terminalViewState.canMoveTerminalPromptCursor)) {
-      return;
-    }
-
-    _pendingTerminalMouseTapPointer = event.pointer;
-    _pendingTerminalMouseTapDownPosition = event.position;
-    _pendingTerminalMouseTapDownTimestamp = event.timeStamp;
-    _pendingTerminalMouseTapHadSelection =
-        _isNativeSelectionMode || _hasActiveSystemSelection;
-  }
-
-  void _handleTerminalMouseTapPointerMove(PointerMoveEvent event) {
-    if (_pendingTerminalMouseTapPointer != event.pointer) {
-      return;
-    }
-    final downPosition = _pendingTerminalMouseTapDownPosition;
-    if (downPosition != null &&
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalMouseTap(event.pointer);
-    }
-  }
-
-  void _handleTerminalMouseTapPointerUp(PointerUpEvent event) {
-    if (_terminalDoubleTapConsumedPointer == event.pointer) {
-      _clearPendingTerminalMouseTap(event.pointer);
-      return;
-    }
-
-    final downPosition = _pendingTerminalMouseTapDownPosition;
-    final downTimestamp = _pendingTerminalMouseTapDownTimestamp;
-    if (_pendingTerminalMouseTapPointer != event.pointer ||
-        downPosition == null ||
-        downTimestamp == null ||
-        event.timeStamp - downTimestamp > kLongPressTimeout ||
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalMouseTap(event.pointer);
-      return;
-    }
-
-    final hadSelection = _pendingTerminalMouseTapHadSelection;
-    _clearPendingTerminalMouseTap(event.pointer);
-    final terminalViewState = _terminalViewKey.currentState;
-    if (terminalViewState == null) {
-      return;
-    }
-    // The system selection owns mouse clicks, so only a touch tap is a click
-    // for mouse tracking.
-    if (event.kind == PointerDeviceKind.touch &&
-        terminalViewState.sendTerminalPrimaryTap(event.position)) {
-      // A clicked TUI such as Claude Code moves its own cursor, so the IME's
-      // copy of the text before the cursor no longer applies; later edits and
-      // suggestions would otherwise replace the wrong characters.
-      _terminalTextInputController.resetImeForExternalCursorMove();
-    } else if (!hadSelection) {
-      // Without mouse tracking, a tap on a shell prompt's input moves the
-      // shell's cursor there when the prompt asked for it (OSC 133). The view
-      // resets the IME for it, as for a click.
-      terminalViewState.moveTerminalPromptCursor(event.position);
-    }
-  }
-
-  void _clearPendingTerminalMouseTap([int? pointer]) {
-    if (pointer != null && _pendingTerminalMouseTapPointer != pointer) {
-      return;
-    }
-    _pendingTerminalMouseTapPointer = null;
-    _pendingTerminalMouseTapDownPosition = null;
-    _pendingTerminalMouseTapDownTimestamp = null;
-    _pendingTerminalMouseTapHadSelection = false;
-  }
-
-  void _handleTerminalDoubleTapPointerDown(
-    PointerDownEvent event, {
-    required bool allowDoubleTap,
-  }) {
-    if (event.kind != PointerDeviceKind.touch || !allowDoubleTap) {
-      _clearPendingTerminalDoubleTap();
-      return;
-    }
-
-    final lastTapPosition = _lastTerminalTapPosition;
-    final lastTapTimestamp = _lastTerminalTapTimestamp;
-    final isDoubleTap =
-        lastTapPosition != null &&
-        lastTapTimestamp != null &&
-        event.timeStamp - lastTapTimestamp <= kDoubleTapTimeout &&
-        (event.position - lastTapPosition).distance <= kDoubleTapSlop;
-
-    if (isDoubleTap) {
-      // Let SelectionArea handle text selection without also forwarding the
-      // second tap as terminal mouse input.
-      _terminalDoubleTapConsumedPointer = event.pointer;
-      _clearPendingTerminalDoubleTap();
-      _clearLastTerminalTap();
-      return;
-    }
-
-    _pendingTerminalDoubleTapPointer = event.pointer;
-    _pendingTerminalDoubleTapDownPosition = event.position;
-    _pendingTerminalDoubleTapDownTimestamp = event.timeStamp;
-  }
-
-  void _handleTerminalDoubleTapPointerMove(PointerMoveEvent event) {
-    if (_pendingTerminalDoubleTapPointer != event.pointer) {
-      return;
-    }
-    final downPosition = _pendingTerminalDoubleTapDownPosition;
-    if (downPosition != null &&
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalDoubleTap();
-      _clearLastTerminalTap();
-    }
-  }
-
-  void _handleTerminalDoubleTapPointerUp(PointerUpEvent event) {
-    if (event.kind != PointerDeviceKind.touch) {
-      return;
-    }
-    if (_terminalDoubleTapConsumedPointer == event.pointer) {
-      _terminalDoubleTapConsumedPointer = null;
-      _clearPendingTerminalDoubleTap();
-      return;
-    }
-
-    final downPosition = _pendingTerminalDoubleTapDownPosition;
-    final downTimestamp = _pendingTerminalDoubleTapDownTimestamp;
-    if (_pendingTerminalDoubleTapPointer != event.pointer ||
-        downPosition == null ||
-        downTimestamp == null ||
-        event.timeStamp - downTimestamp > kLongPressTimeout ||
-        (event.position - downPosition).distance > kTouchSlop) {
-      _clearPendingTerminalDoubleTap();
-      _clearLastTerminalTap();
-      return;
-    }
-
-    _lastTerminalTapPosition = event.position;
-    _lastTerminalTapTimestamp = event.timeStamp;
-    _clearPendingTerminalDoubleTap();
-  }
-
-  void _handleTerminalDoubleTapPointerCancel(PointerCancelEvent event) {
-    if (_pendingTerminalDoubleTapPointer == event.pointer) {
-      _clearPendingTerminalDoubleTap();
-    }
-    if (_terminalDoubleTapConsumedPointer == event.pointer) {
-      _terminalDoubleTapConsumedPointer = null;
-    }
-  }
-
-  String? _resolveTerminalPointerPath(
-    PointerDownEvent event,
-    CellOffset offset,
-    Offset terminalLocalPosition,
-  ) {
-    if (!ref.read(terminalPathLinksNotifierProvider)) {
-      _clearHoveredTerminalPathUnderline();
-      return null;
-    }
-    final terminalViewObject = _terminalViewKey.currentState!.context
-        .findRenderObject();
-    final terminalViewLocalPosition = terminalViewObject is RenderBox
-        ? terminalViewObject.globalToLocal(event.position)
-        : terminalLocalPosition;
-    final candidatePath = _detectTerminalFilePathAtOffset(
-      offset,
-      forgiving: event.kind == PointerDeviceKind.touch,
-    );
-    final underlinePath = event.kind == PointerDeviceKind.touch
-        ? resolveTerminalPathTouchTargetTap(terminalViewLocalPosition, [
-            for (final underline in _visibleTerminalPathUnderlines)
-              (path: underline.path, touchRect: underline.touchRect),
-          ])
-        : null;
-    final tappedPath = candidatePath ?? underlinePath;
-    if (tappedPath != null && event.kind == PointerDeviceKind.touch) {
-      _terminalTextInputController.suppressNextTouchKeyboardRequest();
-    }
-    if (candidatePath != null &&
-        !_pathVerifier.isInteractiveTerminalFilePath(candidatePath)) {
-      _pathVerifier.primeTerminalFilePathVerification(candidatePath);
-    }
-    return tappedPath != null &&
-            _pathVerifier.isInteractiveTerminalFilePath(tappedPath)
-        ? tappedPath
-        : null;
-  }
-
-  void _clearHoveredTerminalPathUnderline() {
-    _lastHoveredTerminalPathOffset = null;
-    _lastHoveredTerminalPath = null;
-    if (_hoveredTerminalPathUnderline == null || !mounted) {
-      return;
-    }
-    setState(() => _hoveredTerminalPathUnderline = null);
-  }
-
-  bool _shouldShowTerminalPathBadge(String path) =>
-      _pathVerifier.isInteractiveTerminalFilePath(path);
-
-  void _queueVisibleTerminalPathUnderlineRefresh() {
-    if (!_isMobilePlatform ||
-        _isTerminalPathUnderlineRefreshQueued ||
-        !mounted) {
-      return;
-    }
-
-    _isTerminalPathUnderlineRefreshQueued = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _isTerminalPathUnderlineRefreshQueued = false;
-      if (!mounted) {
-        return;
-      }
-      _refreshVisibleTerminalPathUnderlines();
-    });
-  }
-
-  void _refreshVisibleTerminalPathUnderlines() {
-    final diagnostics = DiagnosticsLogService.instance;
-    if (!diagnostics.enabled) {
-      _refreshVisibleTerminalPathUnderlinesImpl();
-      return;
-    }
-    final stopwatch = Stopwatch()..start();
-    _refreshVisibleTerminalPathUnderlinesImpl();
-    final micros = stopwatch.elapsedMicroseconds;
-    if (micros < 4000) {
-      return;
-    }
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    if (nowMs - _terminalPathUnderlineRefreshLogAtMs < 1000) {
-      return;
-    }
-    _terminalPathUnderlineRefreshLogAtMs = nowMs;
-    diagnostics.debug(
-      'terminal.paths',
-      'underline_refresh',
-      fields: {
-        'durationMs': (micros / 1000).round(),
-        'underlines': _visibleTerminalPathUnderlines.length,
-      },
-    );
-  }
-
-  void _refreshVisibleTerminalPathUnderlinesImpl() {
-    final terminalViewState = _terminalViewKey.currentState;
-    final showsUnderlines =
-        ref.read(terminalPathLinksNotifierProvider) &&
-        ref.read(terminalPathLinkUnderlinesNotifierProvider);
-    if (!_isMobilePlatform || !showsUnderlines || terminalViewState == null) {
-      if (_visibleTerminalPathUnderlines.isNotEmpty) {
-        setState(
-          () => _visibleTerminalPathUnderlines =
-              const <
-                ({String path, TerminalTextUnderline underline, Rect touchRect})
-              >[],
-        );
-      }
-      return;
-    }
-
-    final rowRange = terminalViewState.renderTerminal.shownRows;
-    if (rowRange == null) {
-      return;
-    }
-
-    final underlines =
-        <({String path, TerminalTextUnderline underline, Rect touchRect})>[];
-    final buffer = _terminal.buffer;
-    var row = rowRange.first;
-    while (row <= rowRange.last) {
-      // Skip single, non-wrapped rows that contain no path-like characters.
-      // This avoids the expensive snapshot-building step for the majority of
-      // output lines that can never match a file path.
-      final isSingleRow =
-          !buffer.lines[row].isWrapped &&
-          (row + 1 >= buffer.height || !buffer.lines[row + 1].isWrapped);
-      if (isSingleRow &&
-          !terminalRowMayContainPath(buffer.lines[row], buffer.viewWidth)) {
-        row++;
-        continue;
-      }
-      final pathSnapshot = _buildTerminalPathTapSnapshot(row);
-      if (pathSnapshot == null) {
-        row++;
-        continue;
-      }
-      final snapshotAnalysis = _analyzeTerminalPathSnapshot(pathSnapshot);
-      final snapshotEndRow =
-          pathSnapshot.startRow + pathSnapshot.columnOffsets.length - 1;
-      final visibleSnapshotBottom = min(rowRange.last, snapshotEndRow);
-      for (
-        var snapshotRow = max(row, pathSnapshot.startRow);
-        snapshotRow <= visibleSnapshotBottom;
-        snapshotRow++
-      ) {
-        final segments = _resolveInteractiveTerminalPathSegmentsInSnapshotRow(
-          snapshotRow,
-          pathSnapshot: pathSnapshot,
-          snapshotAnalysis: snapshotAnalysis,
-        );
-        for (final segment in segments) {
-          if (!_shouldShowTerminalPathBadge(segment.path)) {
-            continue;
-          }
-          final underline = _buildTerminalPathInlineUnderline(
-            row: snapshotRow,
-            startColumn: segment.startColumn,
-            endColumn: segment.endColumn,
-          );
-          final touchRect = _buildTerminalPathTouchTargetRect(
-            terminalViewState,
-            row: snapshotRow,
-            startColumn: segment.startColumn,
-            endColumn: segment.endColumn,
-          );
-          if (underline != null && touchRect != null) {
-            underlines.add((
-              path: segment.path,
-              underline: underline,
-              touchRect: touchRect,
-            ));
-          }
-        }
-      }
-      row = visibleSnapshotBottom + 1;
-    }
-
-    if (!listEquals(_visibleTerminalPathUnderlines, underlines)) {
-      setState(() => _visibleTerminalPathUnderlines = underlines);
-    }
-  }
-
-  TerminalTextUnderline? _buildTerminalPathInlineUnderline({
-    required int row,
-    required int startColumn,
-    required int endColumn,
-  }) => resolveTerminalPathInlineUnderline(
-    row: row,
-    startColumn: startColumn,
-    endColumn: endColumn,
-    rowCount: _terminal.buffer.height,
-    columnCount: _terminal.buffer.viewWidth,
-  );
-
-  Rect? _buildTerminalPathTouchTargetRect(
-    MonkeyTerminalViewState terminalViewState, {
-    required int row,
-    required int startColumn,
-    required int endColumn,
-  }) {
-    final terminalViewObject = terminalViewState.context.findRenderObject();
-    if (terminalViewObject is! RenderBox) {
-      return null;
-    }
-    final renderTerminal = terminalViewState.renderTerminal;
-    final lineTopLeft = renderTerminal.localToGlobal(
-      renderTerminal.getOffset(CellOffset(startColumn, row)),
-      ancestor: terminalViewObject,
-    );
-    final lineEndOffset = renderTerminal.localToGlobal(
-      renderTerminal.getOffset(
-        CellOffset((endColumn + 1).clamp(0, _terminal.buffer.viewWidth), row),
-      ),
-      ancestor: terminalViewObject,
-    );
-    return resolveTerminalPathTouchTargetRect(
-      lineTopLeft: lineTopLeft,
-      lineEndOffset: lineEndOffset,
-      lineHeight: renderTerminal.lineHeight,
-      viewportHeight: terminalViewObject.size.height,
-    );
-  }
-
-  ({String path, String text, int startColumn, int endColumn})?
-  _resolveInteractiveTerminalPathSegmentAtOffset(
-    CellOffset offset, {
-    String? path,
-  }) {
-    for (final segment in _resolveInteractiveTerminalPathSegmentsOnRow(
-      offset.y,
-    )) {
-      if (offset.x >= segment.startColumn &&
-          offset.x <= segment.endColumn &&
-          (path == null || segment.path == path)) {
-        return segment;
-      }
-    }
-    return null;
-  }
-
-  _TerminalPathSnapshotAnalysis _analyzeTerminalPathSnapshot(
-    _TerminalPathTapSnapshot pathSnapshot,
-  ) {
-    final cached = _terminalPathAnalysisCache[pathSnapshot.text];
-    if (cached != null) return cached;
-    final normalizedSnapshot = normalizeTerminalFilePathDetectionText(
-      pathSnapshot.text,
-    );
-    final analysis = (
-      detectedPaths: detectTerminalFilePathMatches(normalizedSnapshot),
-      normalizedSnapshot: normalizedSnapshot,
-    );
-    _terminalPathAnalysisCache[pathSnapshot.text] = analysis;
-    return analysis;
-  }
-
-  List<({String path, String text, int startColumn, int endColumn})>
-  _resolveInteractiveTerminalPathSegmentsOnRow(int row) {
-    final clampedRow = row.clamp(0, _terminal.buffer.height - 1);
-    final pathSnapshot = _buildTerminalPathTapSnapshot(clampedRow);
-    if (pathSnapshot == null) {
-      return const <
-        ({String path, String text, int startColumn, int endColumn})
-      >[];
-    }
-
-    return _resolveInteractiveTerminalPathSegmentsInSnapshotRow(
-      clampedRow,
-      pathSnapshot: pathSnapshot,
-      snapshotAnalysis: _analyzeTerminalPathSnapshot(pathSnapshot),
-    );
-  }
-
-  List<({String path, String text, int startColumn, int endColumn})>
-  _resolveInteractiveTerminalPathSegmentsInSnapshotRow(
-    int row, {
-    required _TerminalPathTapSnapshot pathSnapshot,
-    required _TerminalPathSnapshotAnalysis snapshotAnalysis,
-  }) {
-    final rowIndex = row - pathSnapshot.startRow;
-    if (rowIndex < 0 || rowIndex >= pathSnapshot.columnOffsets.length) {
-      return const <
-        ({String path, String text, int startColumn, int endColumn})
-      >[];
-    }
-    if (snapshotAnalysis.detectedPaths.isEmpty) {
-      return const <
-        ({String path, String text, int startColumn, int endColumn})
-      >[];
-    }
-
-    final rowStart = pathSnapshot.rowStarts[rowIndex];
-    final rowColumnOffsets = pathSnapshot.columnOffsets[rowIndex];
-    final rowEnd = rowStart + rowColumnOffsets.last;
-    final rowText = pathSnapshot.text.substring(rowStart, rowEnd);
-    final rowNormalizedStart = snapshotAnalysis
-        .normalizedSnapshot
-        .originalToNormalizedOffsets[rowStart];
-    final rowNormalizedEnd =
-        snapshotAnalysis.normalizedSnapshot.originalToNormalizedOffsets[rowEnd];
-    final candidatesToPrime = <String>{};
-    final segments =
-        <({String path, String text, int startColumn, int endColumn})>[];
-    for (final detectedPath in snapshotAnalysis.detectedPaths) {
-      if (detectedPath.normalizedEnd <= rowNormalizedStart ||
-          detectedPath.normalizedStart >= rowNormalizedEnd) {
-        continue;
-      }
-
-      final path = detectedPath.path;
-      // Verify every detected path so its link is trimmed to the longest
-      // existing substring (and dropped if no substring exists remotely).
-      candidatesToPrime.add(path);
-      final activePath = _pathVerifier.interactiveTerminalFilePathCandidate(
-        path,
-      );
-      if (activePath != null) {
-        final visibleSegment = resolveTerminalFilePathSegmentOnRow(
-          rowText: rowText,
-          rowStartOffset: rowStart,
-          rowColumnOffsets: rowColumnOffsets,
-          originalToNormalizedOffsets:
-              snapshotAnalysis.normalizedSnapshot.originalToNormalizedOffsets,
-          normalizedPathStart: detectedPath.normalizedStart,
-          normalizedPathEnd: detectedPath.normalizedStart + activePath.length,
-        );
-        if (visibleSegment == null) {
-          continue;
-        }
-        // Don't layer heuristic file-path linkification over a program-declared
-        // OSC 8 hyperlink: only linkify text that is not already a link.
-        if (_terminalHyperlinkTracker?.hasLinkInRowRange(
-              row,
-              visibleSegment.startColumn,
-              visibleSegment.endColumn,
-            ) ??
-            false) {
-          continue;
-        }
-        segments.add((
-          path: path,
-          text: visibleSegment.text,
-          startColumn: visibleSegment.startColumn,
-          endColumn: visibleSegment.endColumn,
-        ));
-      }
-    }
-
-    for (final path in candidatesToPrime) {
-      _pathVerifier.primeTerminalFilePathVerification(path);
-    }
-
-    return segments;
-  }
-
-  ({String text, int cursorOffset})? _buildWrappedTerminalCommandSnapshot() {
-    final buffer = _terminal.buffer;
-    final row = buffer.absoluteCursorY;
-    if (row < 0 || row >= buffer.height) {
-      return null;
-    }
-
-    var startRow = row;
-    while (startRow > 0 && buffer.lines[startRow].isWrapped) {
-      startRow--;
-    }
-
-    var endRow = row;
-    while (endRow + 1 < buffer.height && buffer.lines[endRow + 1].isWrapped) {
-      endRow++;
-    }
-
-    final builder = StringBuffer();
-    final cursorColumn = buffer.cursorX.clamp(0, buffer.viewWidth);
-    var cursorOffset = 0;
-    for (var lineIndex = startRow; lineIndex <= endRow; lineIndex++) {
-      final lineSnapshot = _buildTerminalLineSnapshot(
-        buffer.lines[lineIndex],
-        buffer.viewWidth,
-        preserveTrailingPadding: lineIndex < endRow,
-        preserveOffset: lineIndex == row ? cursorColumn : 0,
-      );
-      if (lineIndex == row) {
-        cursorOffset =
-            builder.length + lineSnapshot.columnOffsets[cursorColumn];
-      }
-      builder.write(lineSnapshot.text);
-    }
-
-    return (text: builder.toString(), cursorOffset: cursorOffset);
-  }
-
-  String? _terminalTextBeforeCursor() {
-    final snapshot = _buildWrappedTerminalCommandSnapshot();
-    if (snapshot == null) {
-      return null;
-    }
-    return snapshot.text.substring(0, snapshot.cursorOffset);
-  }
-
-  void _handleTerminalLinkTap(String link) {
-    _clearHoveredTerminalPathUnderline();
-    if (link.startsWith(_terminalSftpPathPrefix)) {
-      unawaited(
-        _openTerminalFilePath(link.substring(_terminalSftpPathPrefix.length)),
-      );
-      return;
-    }
-
-    // OSC 8 file destinations can be relative paths with source-line anchors,
-    // not just `file:` URIs. Open them on the connected host through SFTP.
-    final filePath = resolveTerminalFileLinkPath(link);
-    if (filePath != null) {
-      unawaited(_openTerminalFilePath(filePath, exact: true));
-      return;
-    }
-
-    unawaited(_openTerminalLink(link));
-  }
-
-  void _showTerminalLinkMessage(String message) {
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  Future<void> _openTerminalLink(String link) async {
-    final normalizedLink = normalizeTerminalLinkCandidate(link);
-    final uri = Uri.tryParse(normalizedLink);
-    if (uri == null) {
-      _showTerminalLinkMessage('Could not open $link');
-      return;
-    }
-
-    if (!isLaunchableTerminalUri(uri)) {
-      _showTerminalLinkMessage('Blocked unsupported link scheme: $link');
-      return;
-    }
-
-    if (isPortForwardBrowserSupported() &&
-        ref.read(portForwardBrowserLinksNotifierProvider)) {
-      final options = _activePortForwardBrowserOptions();
-      _PortForwardBrowserOption? targetOption;
-      Uri? browserUri;
-      for (final option in options) {
-        final rewritten = rewriteUriForPortForwardBrowser(
-          uri,
-          sourceUri: option.sourceUri,
-          browserUri: option.uri,
-        );
-        if (rewritten != null) {
-          targetOption = option;
-          browserUri = rewritten;
-          break;
-        }
-      }
-      if (targetOption != null && browserUri != null) {
-        await _openPortForwardBrowserOption(
-          _PortForwardBrowserOption(
-            uri: browserUri,
-            sourceUri: targetOption.sourceUri,
-            fallbackUri: targetOption.fallbackUri,
-            port: targetOption.port,
-            title: targetOption.title,
-            group: targetOption.group,
-          ),
-        );
-        return;
-      }
-    }
-
-    var launched = false;
-    try {
-      launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } on PlatformException {
-      launched = false;
-    }
-    if (launched || !mounted) {
-      return;
-    }
-
-    _showTerminalLinkMessage('Could not open $link');
-  }
-
-  List<_PortForwardBrowserOption> _activePortForwardBrowserOptions() {
-    final sessions = ref.read(activeSessionsProvider.notifier);
-    final hostTunnels = sessions.getActiveTunnelsForHost(widget.hostId);
-    final fallbackSession = _sessionController.observedSession;
-    final tunnels = hostTunnels.isNotEmpty
-        ? hostTunnels
-        : fallbackSession?.activeTunnels ?? const <ActiveTunnelInfo>[];
-    final options =
-        tunnels
-            .map(_portForwardBrowserOptionForTunnel)
-            .whereType<_PortForwardBrowserOption>()
-            .toList(growable: false)
-          ..sort((left, right) {
-            final groupComparison = left.group.index.compareTo(
-              right.group.index,
-            );
-            return groupComparison != 0
-                ? groupComparison
-                : left.port.compareTo(right.port);
-          });
-    return options;
-  }
-
-  _PortForwardBrowserOption? _portForwardBrowserOptionForTunnel(
-    ActiveTunnelInfo tunnel,
-  ) {
-    final browserHost = tunnel.browserHost;
-    final browserPort = tunnel.browserPort;
-    if (!tunnel.isLocal ||
-        !isPortForwardBrowserHost(tunnel.localHost) ||
-        tunnel.localPort < 1 ||
-        tunnel.localPort > 65535 ||
-        browserHost == null ||
-        browserPort == null ||
-        browserPort < 1 ||
-        browserPort > 65535) {
-      return null;
-    }
-
-    final sourcePort = tunnel.isAutomatic
-        ? tunnel.remotePort
-        : tunnel.localPort;
-    final sourceUri = buildPortForwardBrowserUriForBind(
-      localHost: tunnel.isAutomatic ? tunnel.remoteHost : tunnel.localHost,
-      localPort: sourcePort,
-    );
-    final uri = buildPortForwardBrowserUriForBind(
-      localHost: browserHost,
-      localPort: browserPort,
-    );
-    final fallbackHost = tunnel.browserFallbackHost;
-    final fallbackUri = fallbackHost == null
-        ? null
-        : buildPortForwardBrowserUriForBind(
-            localHost: fallbackHost,
-            localPort: tunnel.localPort,
-          );
-    return _PortForwardBrowserOption(
-      uri: uri,
-      sourceUri: sourceUri,
-      fallbackUri: fallbackUri,
-      port: sourcePort,
-      title: tunnel.isAutomatic
-          ? 'Port ${tunnel.remotePort}'
-          : sourceUri.authority,
-      group: tunnel.isAutomatic
-          ? (tunnel.isShellRelated
-                ? PortForwardBrowserTabGroup.savedHost
-                : PortForwardBrowserTabGroup.sharedHost)
-          : PortForwardBrowserTabGroup.savedForward,
-    );
-  }
-
-  Future<void> _openPortForwardBrowserTunnel(ActiveTunnelInfo tunnel) async {
-    final option = _portForwardBrowserOptionForTunnel(tunnel);
-    if (option == null) {
-      _showTerminalLinkMessage('This forward is not available in the browser');
-      return;
-    }
-    await _openPortForwardBrowserOption(option);
-  }
-
-  Future<void> _openPortForwardBrowserFromTerminal() async {
-    final options = _activePortForwardBrowserOptions();
-    if (options.isEmpty) {
-      _showTerminalLinkMessage('No active localhost port forwards to browse');
-      return;
-    }
-
-    await _openPortForwardBrowserOptions(options);
-  }
-
-  Future<void> _openPortForwardsFromTerminal() async {
-    final connectionId = _connectionId;
-    final session = connectionId == null
-        ? null
-        : ref.read(activeSessionsProvider.notifier).getSession(connectionId);
-    if (connectionId == null || session == null) {
-      _showTerminalLinkMessage('Connect before managing live port forwards');
-      return;
-    }
-
-    final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
-    try {
-      await showTerminalPortForwardsSheet(
-        context: context,
-        hostId: widget.hostId,
-        connectionId: connectionId,
-        session: session,
-        onOpenInBrowser: _openPortForwardBrowserTunnel,
-        // The user chose here, so a reconnect must not place the hold again.
-        onLinkHoldEnded: () => _linkPortForwardsReleased = true,
-      );
-    } finally {
-      _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
-    }
-  }
-
-  /// Opens the read-only git changes sheet for this window's directory. An
-  /// "Ask agent" prompt goes to the native composer, or into the terminal
-  /// through the same review as a clipboard paste, but only into the window
-  /// that supplied the directory.
-  Future<void> _openWorkingTreeChanges() => _runExclusiveTerminalAction(
-    _TerminalExclusiveAction.workingTreeChanges,
-    () async {
-      final activeSession = _activeSession();
-      final session =
-          activeSession != null &&
-              _sessionsNotifier?.getState(activeSession.connectionId) ==
-                  SshConnectionState.connected
-          ? activeSession
-          : null;
-      final nativeKey = _activeNativeAcpSessionKey;
-      var directory = nativeKey == null
-          ? null
-          : ref
-                .read(acpSessionManagerProvider)
-                .state
-                .byKeyValue(nativeKey.value)
-                ?.cwd;
-      if (directory == null && session != null && _isTmuxActive) {
-        try {
-          directory = await _resolveCurrentTmuxPaneDirectory();
-        } on Object catch (error) {
-          // The window's last known directory still works.
-          DiagnosticsLogService.instance.warning(
-            'git_changes',
-            'pane_directory_failed',
-            fields: {'errorType': error.runtimeType},
-          );
-        }
-        if (!mounted) return;
-      }
-      directory ??= _workingDirectoryPath;
-      final target = _workingTreePromptTarget();
-      final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
-      String? prompt;
-      try {
-        prompt = await showWorkingTreeChangesSheet(
-          context: context,
-          service: session == null
-              ? null
-              : ref.read(gitWorkingTreeServiceFactoryProvider)(session),
-          directory: directory,
-          unavailableMessage: workingTreeChangesUnavailableReason(session),
-          canAskAgent: true,
-        );
-      } finally {
-        _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
-      }
-      if (!mounted || prompt == null) return;
-      // Another client, or an agent, can switch windows while the sheet is
-      // open; the hunk belongs to the window it was read from.
-      if (_workingTreePromptTarget() != target) {
-        DiagnosticsLogService.instance.info(
-          'git_changes',
-          'prompt_dropped_window_changed',
-        );
-        _showClipboardMessage(
-          'The window changed while the sheet was open, so the prompt was '
-          'not sent.',
-        );
-        return;
-      }
-      if (_activeNativeAcpSessionKey != null) {
-        _nativeComposerFocusController
-          ..insertText(prompt)
-          ..requestFocus();
-        return;
-      }
-      await _pasteClipboard(promptText: prompt);
-    },
-  );
-
-  /// The window a working tree prompt is meant for: the native chat, the
-  /// connection and the mux window that were active.
-  ({AcpSessionKey? nativeKey, int? connectionId, String? windowKey})
-  _workingTreePromptTarget() => (
-    nativeKey: _activeNativeAcpSessionKey,
-    connectionId: _connectionId,
-    windowKey: resolveTmuxBarActiveWindowKey(_currentTmuxWindowsSnapshot),
-  );
-
-  Future<void> _openPortForwardBrowserOption(
-    _PortForwardBrowserOption option,
-  ) => _openPortForwardBrowserOptions([option]);
-
-  Future<void> _openPortForwardBrowserOptions(
-    List<_PortForwardBrowserOption> options,
-  ) async {
-    await context.pushNamed<void>(
-      Routes.portForwardBrowser,
-      extra: PortForwardBrowserLaunch(
-        tabs: [
-          for (final option in options)
-            PortForwardBrowserInitialTab(
-              uri: option.uri,
-              sourceUri: option.sourceUri,
-              fallbackUri: option.fallbackUri,
-              title: option.title,
-              group: option.group,
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openTerminalFilePath(
-    String path, {
-    bool exact = false,
-  }) => _runExclusiveTerminalAction(
-    _TerminalExclusiveAction.sftpBrowser,
-    () async {
-      final normalizedPath = exact ? path : trimTerminalFilePathCandidate(path);
-      if (!isSupportedTerminalFilePath(normalizedPath)) {
-        _showTerminalLinkMessage('Could not open $path');
-        return;
-      }
-
-      final verifiedPath = await _pathVerifier.resolveVerifiedTerminalFilePath(
-        normalizedPath,
-        exact: exact,
-      );
-      if (!mounted) {
-        return;
-      }
-      if (verifiedPath == null) {
-        if (exact) {
-          _showTerminalLinkMessage('Could not open "$path" in SFTP');
-        }
-        return;
-      }
-      unawaited(ref.read(telemetryServiceProvider).logTerminalPathLinkOpened());
-
-      final connectionId = _connectionId;
-      final cwd = _workingDirectoryPath;
-      final tmuxPaneDirectory = await _resolveCurrentTmuxPaneDirectory();
-      if (!mounted) {
-        return;
-      }
-
-      final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
-      String? result;
-      try {
-        result = await context.pushNamed<String>(
-          Routes.sftp,
-          pathParameters: {'hostId': widget.hostId.toString()},
-          queryParameters: _buildSftpBrowserQueryParameters(
-            connectionId: connectionId,
-            initialPath: verifiedPath,
-            workingDirectory: cwd,
-            tmuxPaneDirectory: tmuxPaneDirectory,
-          ),
-        );
-      } finally {
-        _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
-        _resetTerminalScrollAfterSftpBrowserClosed(
-          forceFullRepaint: true,
-          focusAlreadyRestored: shouldRestoreKeyboard,
-        );
-      }
-
-      if (mounted && result != null) {
-        _showTerminalLinkMessage(result);
-      }
-    },
-  );
-
-  void _resetTerminalScrollAfterSftpBrowserClosed({
-    bool forceFullRepaint = false,
-    bool focusAlreadyRestored = false,
-  }) {
-    if (!mounted) {
-      return;
-    }
-
-    // The terminal route stays mounted under SFTP, so reset accumulated gesture
-    // deltas before the first scroll after the browser pops.
-    _terminalOutputPauseTouchPointers.clear();
-    setState(() {
-      _terminalScrollResetGeneration += 1;
-    });
-    _syncTerminalLiveOutputAutoScroll();
-
-    if (forceFullRepaint) {
-      _terminalViewKey.currentState?.forceFullRepaint();
-    }
-
-    _rearmForegroundAppMouseReportingAfterOverlay(
-      focusAlreadyRestored: focusAlreadyRestored,
-    );
-  }
-
-  /// Re-emits a focus-in report after an overlay route (the SFTP browser)
-  /// closes.
-  ///
-  /// Opening the browser calls [_temporarilyDismissTerminalKeyboard], which
-  /// unfocuses the terminal and therefore emits a focus-out report. Focus-aware
-  /// TUIs such as Copilot CLI in the alternate screen disable mouse-wheel
-  /// reporting on focus-out, so touch scroll would stay frozen after the
-  /// browser closes until the next window switch re-emits focus reports. The
-  /// keyboard-restore path only refocuses when the soft keyboard was visible,
-  /// so a plain scroll interaction never regained focus and never reported
-  /// focus-in. Restore focus so the terminal emits the matching focus-in report
-  /// (gated on the foreground app's own focus-report mode, so bare shells are
-  /// unaffected) and the app re-enables mouse reporting.
-  ///
-  /// When [focusAlreadyRestored] is true the keyboard-restore path already
-  /// requested focus (and emitted the focus-in report), so skip a second
-  /// focus request to avoid scheduling a duplicate post-frame IME reset in the
-  /// same frame, which can flicker or desync the soft keyboard on mobile.
-  void _rearmForegroundAppMouseReportingAfterOverlay({
-    bool focusAlreadyRestored = false,
-  }) {
-    if (!_isMobilePlatform || focusAlreadyRestored) {
-      return;
-    }
-    _restoreTerminalFocus();
-  }
-
-  Future<void> _createSnippetFromSelection() async {
-    final text = _currentTerminalSelectionText();
-    if (text == null) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    await _createSnippetFromTerminalSelectionText(text);
-  }
-
-  Future<void> _createSnippetFromTerminalSelectionText(String text) async {
-    final command = text.trimRight();
-    if (command.isEmpty) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    if (_isNativeSelectionMode) {
-      _exitNativeSelectionMode();
-    } else {
-      _terminalController.clearSelection();
-    }
-
-    await context.pushNamed<void>(
-      Routes.snippetAdd,
-      extra: buildSnippetPrefillFromTerminalSelection(command),
-    );
-    if (mounted) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    }
-  }
-
-  Future<void> _copySelectionText(
-    String text, {
-    required bool clearTerminalSelection,
-    required bool restoreFocus,
-  }) async {
-    if (text.isEmpty) {
-      if (restoreFocus) {
-        _restoreTerminalFocus();
-      }
-      return;
-    }
-
-    await _writeLocalClipboardText(text);
-    if (clearTerminalSelection) {
-      _terminalController.clearSelection();
-      if (_isNativeSelectionMode) _exitNativeSelectionMode();
-    }
-    if (restoreFocus) {
-      _restoreTerminalFocus();
-    }
-
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Copied')));
-  }
-
-  String? _currentTerminalSelectionText() {
-    if (_isNativeSelectionMode) {
-      return _readSystemSelectionPlainText();
-    }
-    final selection = _terminalController.selection;
-    final terminalControllerText = selection == null
-        ? null
-        : trimTerminalSelectionText(_terminal.buffer.getText(selection));
-    return resolveTerminalSelectionPlainText(
-      terminalControllerSelectionText: terminalControllerText,
-      systemSelectionPlainText: _readSystemSelectionPlainText(),
-    );
-  }
-
-  // Reads the live system selection from the terminal's render object. This is
-  // the source of truth on mobile (`useSystemSelection: true`), where Flutter's
-  // SelectionArea owns the selection rather than the xterm controller.
-  String? _readSystemSelectionPlainText() {
-    final state = _terminalViewKey.currentState;
-    if (state == null) {
-      return null;
-    }
-    try {
-      return state.renderTerminal.getSelectedContent()?.plainText;
-    } on Object {
-      return null;
-    }
-  }
-
-  Future<void> _lookUpTerminalSelectionText(String text) async {
-    try {
-      await SystemChannels.platform.invokeMethod<void>('LookUp.invoke', text);
-    } on PlatformException {
-      // Platform doesn't support LookUp; ignore.
-    }
-  }
-
-  Future<void> _searchWebForTerminalSelectionText(String text) async {
-    try {
-      await SystemChannels.platform.invokeMethod<void>(
-        'SearchWeb.invoke',
-        text,
-      );
-    } on PlatformException {
-      // Platform doesn't support SearchWeb; ignore.
-    }
-  }
-
-  Future<void> _shareTerminalSelectionText(String text) async {
-    try {
-      await SystemChannels.platform.invokeMethod<void>('Share.invoke', text);
-    } on PlatformException {
-      // Platform doesn't support Share; ignore.
-    }
-  }
-
-  Future<void> _writeLocalClipboardText(String text) async {
-    _recentLocalClipboardText = text;
-    _recentLocalClipboardAt = DateTime.now();
-    await Clipboard.setData(ClipboardData(text: text));
-  }
-
-  void _showClipboardMessage(String message) {
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  Future<void> _copyWorkingDirectory() async {
-    final path = _workingDirectoryPath;
-    if (path == null || path.isEmpty) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    await _writeLocalClipboardText(path);
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Copied current directory')));
-  }
-
-  SshSession? _activeSession() {
-    final connectionId = _connectionId;
-    final sessionsNotifier = _sessionsNotifier;
-    if (connectionId == null || sessionsNotifier == null) {
-      return null;
-    }
-    return sessionsNotifier.getSession(connectionId);
-  }
-
-  int? _resolveOriginalTerminalPathMatchEnd({
-    required NormalizedTerminalPathSnapshot normalizedSnapshot,
-    required int normalizedStart,
-    required int normalizedLength,
-  }) {
-    if (normalizedLength <= 0) {
-      return null;
-    }
-
-    final normalizedEnd = normalizedStart + normalizedLength;
-    if (normalizedEnd > normalizedSnapshot.normalizedToOriginalEnds.length) {
-      return null;
-    }
-
-    return normalizedSnapshot.normalizedToOriginalEnds[normalizedEnd - 1];
-  }
-
-  /// Pastes the clipboard into the terminal. [promptText], when given, is
-  /// pasted instead of the clipboard, through the same review.
-  Future<void> _pasteClipboard({String? promptText}) async {
-    var inputGeneration = _terminalUserInputGeneration;
-    // Whatever path the paste takes, it goes only where it was asked for.
-    final inputTarget = _terminalInputTarget;
-    try {
-      if (promptText == null && _mayPasteAsKittyPasteEvent()) {
-        final usualPathGeneration = await _pasteClipboardAsKittyPasteEvent(
-          inputGeneration,
-          inputTarget,
-        );
-        if (usualPathGeneration == null) {
-          return;
-        }
-        inputGeneration = usualPathGeneration;
-      }
-      if (_isAndroidPlatform && promptText == null) {
-        final imageBytes = await Pasteboard.image;
-        if (imageBytes != null && imageBytes.isNotEmpty) {
-          await _pasteClipboardImage(imageBytes, inputTarget: inputTarget);
-          return;
-        }
-      }
-
-      final clipboardFiles = promptText == null
-          ? await Pasteboard.files()
-          : const <String>[];
-      if (clipboardFiles.isNotEmpty) {
-        await _pasteClipboardFiles(clipboardFiles, inputTarget: inputTarget);
-        return;
-      }
-
-      if (!_isAndroidPlatform && promptText == null) {
-        final imageBytes = await Pasteboard.image;
-        if (imageBytes != null && imageBytes.isNotEmpty) {
-          await _pasteClipboardImage(imageBytes, inputTarget: inputTarget);
-          return;
-        }
-      }
-
-      final text = promptText ?? await _readSystemClipboardText();
-      if (text == null || text.isEmpty) {
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        _showClipboardMessage('Clipboard is empty');
-        return;
-      }
-
-      final initialPasteMode = await _resolveSettledTerminalPasteMode();
-      if (initialPasteMode == null || !mounted) {
-        if (mounted) {
-          _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        }
-        return;
-      }
-      var pasteMode = initialPasteMode;
-      if (!_terminalPasteModeOwnsCurrentContext(pasteMode)) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_context_changed',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
-          _terminalInputTarget != inputTarget) {
-        _syncTerminalModesFromActiveMuxWindow();
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_window_changed',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-      if (!_terminalPasteModeCanUseResolvedState(pasteMode)) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_mode_unavailable',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        _showClipboardMessage(
-          'Could not verify bracketed paste mode. Try again.',
-        );
-        return;
-      }
-
-      // A shell prompt always reviews. A hunk prompt is also reviewed in any
-      // other program that is not a known agent (psql, a REPL, a nested
-      // shell), where a line break without bracketed paste runs a line.
-      final requiredReview =
-          _shouldReviewTerminalCommandInsertion ||
-          (promptText != null && !_isAgentToolActive);
-      var reviewedBracketedPasteMode = _effectiveTerminalBracketedPasteMode(
-        pasteMode,
-      );
-      if (requiredReview) {
-        var modeStableAfterReview = false;
-        for (var reviewAttempt = 0; reviewAttempt < 2; reviewAttempt++) {
-          var reviewShown = false;
-          final shouldPaste = await _confirmTerminalInsertionIfNeeded(
-            insertedText: text,
-            buildReview: (commandText) => assessClipboardPasteCommand(
-              commandText,
-              bracketedPasteModeEnabled: reviewedBracketedPasteMode,
-            ),
-            title: promptText == null
-                ? 'Review clipboard paste'
-                : 'Review prompt paste',
-            messageBuilder: (review) => review.bracketedPasteModeEnabled
-                ? 'This ${promptText == null ? 'clipboard content' : 'prompt'} looks risky even with bracketed paste enabled.'
-                : 'This ${promptText == null ? 'clipboard content' : 'prompt'} could execute multiple or reshaped commands.',
-            confirmLabel: 'Paste anyway',
-            onReviewShown: () => reviewShown = true,
-          );
-          if (!shouldPaste) {
-            _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-            return;
-          }
-          if (!reviewShown) {
-            modeStableAfterReview = true;
-            break;
-          }
-
-          final refreshedPasteMode = await _resolveSettledTerminalPasteMode();
-          if (refreshedPasteMode == null || !mounted) {
-            if (mounted) {
-              _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-            }
-            return;
-          }
-          if (!_sameTerminalPasteContext(pasteMode, refreshedPasteMode) ||
-              refreshedPasteMode.activeWindowKey != pasteMode.activeWindowKey ||
-              !_terminalPasteModeOwnsCurrentContext(refreshedPasteMode)) {
-            DiagnosticsLogService.instance.warning(
-              'terminal.clipboard',
-              'text_input_skipped_window_changed',
-              fields: {'connectionId': _connectionId},
-            );
-            _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-            return;
-          }
-          pasteMode = refreshedPasteMode;
-          if (!_terminalPasteModeCanUseResolvedState(pasteMode)) {
-            DiagnosticsLogService.instance.warning(
-              'terminal.clipboard',
-              'text_input_skipped_mode_unavailable',
-              fields: {'connectionId': _connectionId},
-            );
-            _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-            _showClipboardMessage(
-              'Could not verify bracketed paste mode. Try again.',
-            );
-            return;
-          }
-          final refreshedBracketedPasteMode =
-              _effectiveTerminalBracketedPasteMode(pasteMode);
-          if (refreshedBracketedPasteMode == reviewedBracketedPasteMode) {
-            modeStableAfterReview = true;
-            break;
-          }
-          reviewedBracketedPasteMode = refreshedBracketedPasteMode;
-        }
-        if (!modeStableAfterReview) {
-          DiagnosticsLogService.instance.warning(
-            'terminal.clipboard',
-            'text_input_skipped_mode_changed',
-            fields: {'connectionId': _connectionId},
-          );
-          _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-          return;
-        }
-      }
-      if (!_terminalPasteModeOwnsCurrentContext(pasteMode)) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_context_changed',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
-          _terminalInputTarget != inputTarget) {
-        _syncTerminalModesFromActiveMuxWindow();
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_window_changed',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-
-      if (_terminalUserInputGeneration != inputGeneration) {
-        DiagnosticsLogService.instance.warning(
-          'terminal.clipboard',
-          'text_input_skipped_intervening_input',
-          fields: {'connectionId': _connectionId},
-        );
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        _showClipboardMessage('Paste canceled because terminal input changed.');
-        return;
-      }
-
-      final modeReliable = _terminalPasteModeIsReliable(pasteMode);
-      final modeUsable = _terminalPasteModeCanUseResolvedState(pasteMode);
-      final usedBracketedPaste = _effectiveTerminalBracketedPasteMode(
-        pasteMode,
-      );
-      _followLiveOutput();
-      pasteTerminalTextWithBracketedPasteMode(
-        terminal: pasteMode.terminal,
-        text: text,
-        bracketedPasteMode: usedBracketedPaste,
-      );
-      _terminalUserInputGeneration++;
-      DiagnosticsLogService.instance.info(
-        'terminal.clipboard',
-        'text_input',
-        fields: {
-          'connectionId': pasteMode.connectionId,
-          'bracketedPasteMode': pasteMode.bracketedPasteMode,
-          'bracketedPasteModeKnown': pasteMode.bracketedPasteModeKnown,
-          'modeReliable': modeReliable,
-          'modeUsable': modeUsable,
-          'usedBracketedPaste': usedBracketedPaste,
-          'modeRefreshAttempted': pasteMode.refreshAttempted,
-          'modeRefreshSucceeded': pasteMode.refreshSucceeded,
-        },
-      );
-      unawaited(
-        ref
-            .read(telemetryServiceProvider)
-            .logTerminalPasteUsed(
-              source: promptText == null
-                  ? 'clipboard_text'
-                  : 'working_tree_hunk',
-              requiredReview: requiredReview,
-            ),
-      );
-      _terminalController.clearSelection();
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    } on PlatformException catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'paste_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Clipboard access failed. Try again.');
-    } on FileSystemException catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'file_upload_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Clipboard file upload failed. Try again.');
-    } on SftpError catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'remote_upload_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage(
-        'Remote upload failed. Check permissions and try again.',
-      );
-    } on Object catch (error) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'upload_failed',
-        fields: {'errorType': error.runtimeType},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Clipboard upload failed. Try again.');
-    }
-  }
-
-  /// A cheap first check for [_pasteClipboardAsKittyPasteEvent], so a paste
-  /// into a program that never set mode 5522 takes the usual path without an
-  /// extra MonkeyMux round trip. The settled paste mode decides.
-  bool _mayPasteAsKittyPasteEvent() {
-    final isMuxActive =
-        _isTmuxActive && _tmuxStateConnectionId == _connectionId;
-    if (isMuxActive && _activeMuxBackend == RemoteMuxBackend.monkeyMux) {
-      return _terminal.kittyPasteEventsMode ||
-          resolveTmuxBarActiveWindowKittyPasteEventsMode(
-                _currentTmuxWindowsSnapshot,
-              ) ==
-              true;
-    }
-    return shouldSendTerminalKittyPasteEvent(
-      isMuxActive: isMuxActive,
-      muxBackend: _activeMuxBackend,
-      terminalKittyPasteEventsMode: _terminal.kittyPasteEventsMode,
-      activeWindowKittyPasteEventsMode: null,
-    );
-  }
-
-  /// Announces the clipboard to a program that set kitty paste events (mode
-  /// 5522): it gets the clipboard's MIME types and reads the one it wants,
-  /// and an image travels in-band instead of being uploaded over SFTP.
-  ///
-  /// Returns null when the paste was dealt with here. Otherwise it should
-  /// take the usual text or attachment path, which checks for intervening
-  /// input against the returned input generation: the mode is off once
-  /// settled or was turned off before the event went out, or the clipboard
-  /// holds files or an image too large for the protocol.
-  Future<int?> _pasteClipboardAsKittyPasteEvent(
-    int inputGeneration,
-    Object inputTarget,
-  ) async {
-    final pasteMode = await _resolveSettledTerminalPasteMode();
-    if (pasteMode == null || !mounted) {
-      if (mounted) {
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      }
-      return null;
-    }
-    final session = pasteMode.session;
-    if (session == null ||
-        !pasteMode.sendsKittyPasteEvents ||
-        !_terminalPasteModeOwnsCurrentContext(pasteMode) ||
-        !_terminalPasteModeCanUseResolvedState(pasteMode)) {
-      return inputGeneration;
-    }
-    // The program can turn paste events off (`CSI ? 5522 l`) while the
-    // clipboard is read or the event waits its turn. The terminal sees that
-    // first. MonkeyMux decides by the window's mode, which the terminal
-    // follows for the active window (unless it never had it) and the window
-    // list reports once it refreshes.
-    final terminal = pasteMode.terminal;
-    final terminalHadMode = terminal.kittyPasteEventsMode;
-    bool stillEnabled() {
-      if (!pasteMode.isMuxActive) {
-        return terminal.kittyPasteEventsMode;
-      }
-      return (!terminalHadMode || terminal.kittyPasteEventsMode) &&
-          resolveTmuxBarActiveWindowKittyPasteEventsMode(
-                _currentTmuxWindowsSnapshot,
-              ) !=
-              false;
-    }
-
-    final clipboard = await session.kittyClipboard.platform.readPasteSnapshot();
-    final snapshot = clipboard.snapshot;
-    if (clipboard.useAttachmentFlow || snapshot == null) {
-      return inputGeneration;
-    }
-    if (!mounted) {
-      return null;
-    }
-    if (snapshot.isEmpty) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Clipboard is empty');
-      return null;
-    }
-    if (!_terminalPasteModeOwnsCurrentContext(pasteMode) ||
-        !_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
-        _terminalInputTarget != inputTarget) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'paste_event_skipped_window_changed',
-        fields: {'connectionId': _connectionId},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return null;
-    }
-    if (_terminalUserInputGeneration != inputGeneration) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'paste_event_skipped_intervening_input',
-        fields: {'connectionId': _connectionId},
-      );
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Paste canceled because terminal input changed.');
-      return null;
-    }
-    if (!stillEnabled()) {
-      return inputGeneration;
-    }
-    _followLiveOutput();
-    final pasteGeneration = ++_terminalUserInputGeneration;
-    final result = await session.kittyClipboard.sendPasteEvent(
-      snapshot,
-      // The event can wait behind a clipboard request still being answered;
-      // by then the user may have moved to another window or typed, or the
-      // program turned paste events off.
-      stillTargeted: () =>
-          mounted &&
-          _terminalUserInputGeneration == pasteGeneration &&
-          _terminalPasteModeOwnsCurrentContext(pasteMode) &&
-          _terminalPasteModeTargetsCurrentWindow(pasteMode) &&
-          _terminalInputTarget == inputTarget,
-      stillEnabled: stillEnabled,
-    );
-    if (result == KittyClipboardPasteEventResult.skipped) {
-      if (mounted) {
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      }
-      return null;
-    }
-    if (result == KittyClipboardPasteEventResult.disabled) {
-      // Nothing was sent, and no other input came since the event was due.
-      return pasteGeneration;
-    }
-    unawaited(
-      ref
-          .read(telemetryServiceProvider)
-          .logTerminalPasteUsed(
-            source: 'clipboard_event',
-            requiredReview: false,
-          ),
-    );
-    if (!mounted) {
-      return null;
-    }
-    _terminalController.clearSelection();
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    if (result == KittyClipboardPasteEventResult.failed) {
-      _showClipboardMessage('Paste failed because the connection is closed.');
-    }
-    return null;
-  }
-
-  Future<void> _pastePickedMedia() async {
-    unawaited(
-      ref
-          .read(telemetryServiceProvider)
-          .logTerminalPasteUsed(source: 'picked_media', requiredReview: false),
-    );
-    final pickerRequest = resolveTerminalUploadPickerRequest(media: true);
-    if (shouldUsePhotoLibraryPickerForTerminalMedia(
-      platform: defaultTargetPlatform,
-      isWeb: kIsWeb,
-    )) {
-      await _pickAndPastePhotoLibraryMedia(
-        itemLabelSingular: pickerRequest.itemLabelSingular,
-        itemLabelPlural: pickerRequest.itemLabelPlural,
-        failureContext: pickerRequest.failureContext,
-      );
-      return;
-    }
-
-    await _pickAndPasteFiles(
-      dialogTitle: pickerRequest.dialogTitle,
-      pickerType: pickerRequest.pickerType,
-      itemLabelSingular: pickerRequest.itemLabelSingular,
-      itemLabelPlural: pickerRequest.itemLabelPlural,
-      allowMultiple: pickerRequest.allowMultiple,
-      failureContext: pickerRequest.failureContext,
-    );
-  }
-
-  Future<void> _pastePickedFiles() async {
-    unawaited(
-      ref
-          .read(telemetryServiceProvider)
-          .logTerminalPasteUsed(source: 'picked_files', requiredReview: false),
-    );
-    final pickerRequest = resolveTerminalUploadPickerRequest(media: false);
-    await _pickAndPasteFiles(
-      dialogTitle: pickerRequest.dialogTitle,
-      pickerType: pickerRequest.pickerType,
-      itemLabelSingular: pickerRequest.itemLabelSingular,
-      itemLabelPlural: pickerRequest.itemLabelPlural,
-      allowMultiple: pickerRequest.allowMultiple,
-      failureContext: pickerRequest.failureContext,
-    );
-  }
-
-  void _enableAndroidPhotoPickerIfAvailable() {
-    if (!_isAndroidPlatform) {
-      return;
-    }
-    final currentImagePicker = ImagePickerPlatform.instance;
-    final androidImagePicker = enableAndroidPhotoPickerForTerminalMedia(
-      currentImagePicker,
-    );
-    if (!identical(currentImagePicker, androidImagePicker)) {
-      ImagePickerPlatform.instance = androidImagePicker;
-    }
-  }
-
-  Future<void> _pickAndPastePhotoLibraryMedia({
-    required String itemLabelSingular,
-    required String itemLabelPlural,
-    required String failureContext,
-  }) async {
-    try {
-      _enableAndroidPhotoPickerIfAvailable();
-      final selectedMedia = await ImagePicker().pickMultipleMedia(
-        requestFullMetadata: false,
-      );
-      if (!mounted) {
-        return;
-      }
-      if (selectedMedia.isEmpty) {
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-
-      final selectedFiles = <PlatformFile>[];
-      for (var index = 0; index < selectedMedia.length; index++) {
-        selectedFiles.add(
-          await platformFileFromPickedTerminalMedia(
-            selectedMedia[index],
-            index: index,
-          ),
-        );
-      }
-      if (!mounted) {
-        return;
-      }
-
-      await _pasteSelectedFiles(
-        selectedFiles,
-        itemLabelSingular: itemLabelSingular,
-        itemLabelPlural: itemLabelPlural,
-      );
-    } on Object catch (error) {
-      _handlePickedFileFailure(error, failureContext);
-    }
-  }
-
-  Future<void> _pickAndPasteFiles({
-    required String dialogTitle,
-    required FileType pickerType,
-    required String itemLabelSingular,
-    required String itemLabelPlural,
-    required bool allowMultiple,
-    required String failureContext,
-  }) async {
-    try {
-      final result = await FilePicker.pickFiles(
-        dialogTitle: dialogTitle,
-        type: pickerType,
-      );
-      if (!mounted) {
-        return;
-      }
-      if (result.isEmpty) {
-        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-        return;
-      }
-
-      await _pasteSelectedFiles(
-        result,
-        itemLabelSingular: itemLabelSingular,
-        itemLabelPlural: itemLabelPlural,
-      );
-    } on Object catch (error) {
-      _handlePickedFileFailure(error, failureContext);
-    }
-  }
-
-  void _handlePickedFileFailure(Object error, String failureContext) {
-    final failure = pickedFileFailure(error, failureContext);
-    DiagnosticsLogService.instance.warning(
-      'terminal.clipboard',
-      failure.category,
-      fields: {'errorType': error.runtimeType},
-    );
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    _showClipboardMessage(failure.message);
-  }
-
-  Future<T> _withClipboardSftp<T>(
-    Future<T> Function(
-      SftpClient sftp,
-      RemoteFileService remoteFileService,
-      _ClipboardUploadTarget uploadTarget,
-    )
-    action, {
-    String? uploadBaseDirectory,
-  }) async {
-    final session = _activeSession();
-    if (session == null) {
-      throw StateError('Connection is not ready yet');
-    }
-
-    final remoteFileService = ref.read(remoteFileServiceProvider);
-    _pathVerifier.disposeTerminalPathVerificationSftp();
-    final sftp = await session.sftp();
-    try {
-      final resolvedUploadBaseDirectory = uploadBaseDirectory?.trim();
-      final homeDirectory = resolvedUploadBaseDirectory?.isNotEmpty ?? false
-          ? resolvedUploadBaseDirectory!
-          : await remoteFileService.resolveInitialDirectory(sftp);
-      final appUploadParentDirectory =
-          buildRemoteClipboardUploadParentDirectory(homeDirectory);
-      final uploadDirectory = buildRemoteClipboardUploadDirectory(
-        homeDirectory,
-      );
-      final uploadTarget = _ClipboardUploadTarget(
-        sftpDirectory: uploadDirectory,
-        windows: session.remoteIsWindows,
-      );
-      await remoteFileService.ensureDirectoryExists(
-        sftp,
-        appUploadParentDirectory,
-        mode: uploadTarget.directoryMode,
-      );
-      await remoteFileService.ensureDirectoryExists(
-        sftp,
-        uploadDirectory,
-        mode: uploadTarget.directoryMode,
-      );
-      return await action(sftp, remoteFileService, uploadTarget);
-    } on TimeoutException {
-      session.discardSftpClient(sftp);
-      rethrow;
-    } on SSHError {
-      session.discardSftpClient(sftp);
-      rethrow;
-    } on SftpError catch (error) {
-      if (error is! SftpStatusError) {
-        session.discardSftpClient(sftp);
-      }
-      rethrow;
-    }
-  }
-
-  Future<({String name, Uint8List bytes})> _readAndroidClipboardContentUri(
-    String uri,
-  ) => ref.read(clipboardContentServiceProvider).readContentUri(uri);
-
-  Future<bool> _confirmClipboardUpload({
-    required String title,
-    required String message,
-    required String confirmLabel,
-    List<String> details = const [],
-    Duration? autoConfirmAfter,
-  }) async {
-    if (!mounted) {
-      return false;
-    }
-    final dialogState = _StoreDemoAutoConfirmDialogState();
-    if (autoConfirmAfter != null) {
-      unawaited(
-        Future<void>.delayed(autoConfirmAfter, () {
-          if (!mounted || !dialogState.open) {
-            return;
-          }
-          final navigator = Navigator.of(context, rootNavigator: true);
-          if (navigator.canPop()) {
-            navigator.pop(true);
-          }
-        }),
-      );
-    }
-    final confirmed = await showDialog<bool>(
-      context: context,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(message),
-              if (details.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                for (final detail in details)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text('\u2022 $detail'),
-                  ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(confirmLabel),
-          ),
-        ],
-      ),
-    );
-    dialogState.open = false;
-    return confirmed ?? false;
-  }
-
-  /// Minimum delay between consecutive uploaded-file bracketed pastes.
-  ///
-  /// Agent CLIs such as Copilot CLI only register each pasted path as a separate
-  /// attachment (one preview chip per file) when its bracketed pastes arrive as
-  /// distinct input events; pastes delivered closer together are coalesced and
-  /// shown as plain text. Empirically the coalescing window is ~200ms, so a
-  /// single file is sent immediately and additional files are staggered by this
-  /// margin above that threshold.
-  static const _uploadedAttachmentPasteStagger = Duration(milliseconds: 300);
-
-  /// Inserts references to just-uploaded [remotePaths] into the terminal.
-  ///
-  /// Each path is sent as its own bracketed paste so an agent CLI such as
-  /// Copilot CLI shows a preview chip per file (and so plain shells receive the
-  /// paths as distinct, space-separated arguments). Multiple files are staggered
-  /// by [_uploadedAttachmentPasteStagger] so each registers as its own
-  /// attachment. The pre-built segments are written straight to the session
-  /// input via [Terminal.onOutput]; they must not go through [Terminal.paste],
-  /// which would strip the bracketed-paste markers.
-  Future<_AttachmentPasteResult> _insertUploadedFileReferences(
-    List<String> remotePaths, {
-    required bool windows,
-    required int inputGeneration,
-    required Object inputTarget,
-    required _TerminalPasteMode? pasteMode,
-  }) async {
-    final pathCount = remotePaths
-        .where((remotePath) => remotePath.isNotEmpty)
-        .length;
-    _AttachmentPasteResult result(int sentCount) =>
-        (requestedCount: pathCount, sentCount: sentCount);
-    if (pathCount == 0) {
-      return result(0);
-    }
-    var sentCount = 0;
-    if (pasteMode == null || !mounted) {
-      return result(sentCount);
-    }
-    if (!_terminalPasteModeOwnsCurrentContext(pasteMode)) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'attachment_input_skipped_context_changed',
-        fields: {'connectionId': _connectionId, 'pathCount': pathCount},
-      );
-      return result(sentCount);
-    }
-    if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
-        _terminalInputTarget != inputTarget) {
-      _syncTerminalModesFromActiveMuxWindow();
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'attachment_input_skipped_window_changed',
-        fields: {'connectionId': _connectionId, 'pathCount': pathCount},
-      );
-      return result(sentCount);
-    }
-    final modeReliable = _terminalPasteModeIsReliable(pasteMode);
-    final modeUsable = _terminalPasteModeCanUseResolvedState(pasteMode);
-    if (!modeUsable) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'attachment_input_skipped_mode_unavailable',
-        fields: {'connectionId': _connectionId, 'pathCount': pathCount},
-      );
-      return result(sentCount);
-    }
-    final usedBracketedPaste = _effectiveTerminalBracketedPasteMode(pasteMode);
-    final injectViaMonkeyMuxControl =
-        shouldInjectTerminalAttachmentViaMonkeyMuxControl(
-          bracketedPasteMode: usedBracketedPaste,
-          isMuxActive: pasteMode.isMuxActive,
-          muxBackend: pasteMode.muxBackend,
-          hasSession: pasteMode.session != null,
-          hasSessionName: pasteMode.muxSessionName != null,
-          supportsBracketedPasteControlInput:
-              pasteMode.session != null &&
-              pasteMode.muxSessionName != null &&
-              _monkeyMuxService.supportsBracketedPasteControlInput(
-                pasteMode.session!,
-                pasteMode.muxSessionName!,
-              ),
-        );
-    final sendablePathCount = countTerminalAttachmentPastePaths(remotePaths);
-    final segments = buildTerminalAttachmentPasteSegments(
-      remotePaths,
-      bracketedPasteMode: usedBracketedPaste,
-      windows: windows,
-      preferRawAgentPaths: _isAgentToolActive,
-    );
-    if (segments.isEmpty) {
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        'attachment_input_skipped_unsafe_paths',
-        fields: {'connectionId': _connectionId, 'pathCount': pathCount},
-      );
-      return result(sentCount);
-    }
-    DiagnosticsLogService.instance.debug(
-      'terminal.clipboard',
-      'attachment_input',
-      fields: {
-        'connectionId': _connectionId,
-        'pathCount': pathCount,
-        'segmentCount': segments.length,
-        'bracketedPasteMode': pasteMode.bracketedPasteMode,
-        'bracketedPasteModeKnown': pasteMode.bracketedPasteModeKnown,
-        'modeReliable': modeReliable,
-        'modeUsable': modeUsable,
-        'usedBracketedPaste': usedBracketedPaste,
-        'usedMuxControlInjection': injectViaMonkeyMuxControl,
-        'modeRefreshAttempted': pasteMode.refreshAttempted,
-        'modeRefreshSucceeded': pasteMode.refreshSucceeded,
-      },
-    );
-    final delivery = await deliverTerminalAttachmentPasteSegments(
-      segments: segments,
-      injectViaMonkeyMuxControl: injectViaMonkeyMuxControl,
-      injectInput: (segment) => _monkeyMuxService.injectInput(
-        pasteMode.session!,
-        pasteMode.muxSessionName!,
-        segment,
-        windowId: pasteMode.activeWindowKey,
-        bracketedPaste: true,
-      ),
-      writeTerminalOutput: (segment) =>
-          pasteMode.terminal.onOutput?.call(segment),
-      initialInputGeneration: inputGeneration,
-      currentInputGeneration: () => _terminalUserInputGeneration,
-      recordDeliveredInput: () => _terminalUserInputGeneration++,
-      blockedReason: () {
-        if (!mounted) {
-          return TerminalAttachmentPasteStopReason.unavailable;
-        }
-        if (!_terminalPasteModeOwnsCurrentContext(pasteMode)) {
-          return TerminalAttachmentPasteStopReason.contextChanged;
-        }
-        if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
-            _terminalInputTarget != inputTarget) {
-          _syncTerminalModesFromActiveMuxWindow();
-          return TerminalAttachmentPasteStopReason.windowChanged;
-        }
-        return null;
-      },
-      waitBetweenSegments: () =>
-          Future<void>.delayed(_uploadedAttachmentPasteStagger),
-    );
-    sentCount = usedBracketedPaste
-        ? delivery.deliveredSegmentCount
-        : delivery.deliveredSegmentCount == 0
-        ? 0
-        : sendablePathCount;
-    final stopReason = delivery.stopReason;
-    if (stopReason != null &&
-        stopReason != TerminalAttachmentPasteStopReason.unavailable) {
-      final event = switch (stopReason) {
-        TerminalAttachmentPasteStopReason.contextChanged =>
-          'attachment_input_stopped_context_changed',
-        TerminalAttachmentPasteStopReason.windowChanged =>
-          'attachment_input_stopped_window_changed',
-        TerminalAttachmentPasteStopReason.interveningInput =>
-          'attachment_input_stopped_intervening_input',
-        TerminalAttachmentPasteStopReason.unavailable =>
-          'attachment_input_stopped_unavailable',
-      };
-      DiagnosticsLogService.instance.warning(
-        'terminal.clipboard',
-        event,
-        fields: {
-          'connectionId': _connectionId,
-          'pathCount': pathCount,
-          'sentCount': sentCount,
-        },
-      );
-    }
-    return result(sentCount);
-  }
-
-  /// Uploads [clipboardFiles] and pastes their remote paths into
-  /// [inputTarget], the input target the paste was asked for in.
-  Future<void> _pasteClipboardFiles(
-    List<String> clipboardFiles, {
-    required Object inputTarget,
-  }) async {
-    final shouldUpload = await _confirmClipboardUpload(
-      title: 'Upload clipboard files?',
-      message:
-          'This will upload ${clipboardFiles.length} clipboard file${clipboardFiles.length == 1 ? '' : 's'} to $_clipboardUploadDirectoryDisplay on the connected host and paste their remote paths into the terminal.',
-      confirmLabel: 'Upload and paste',
-      details: [
-        for (var index = 0; index < clipboardFiles.length; index++)
-          if (clipboardFiles[index].startsWith('content://'))
-            'Clipboard file ${index + 1}'
-          else
-            path.basename(clipboardFiles[index]),
-      ],
-    );
-    if (!shouldUpload) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    final files = <PlatformFile>[];
-    for (final localPath in clipboardFiles) {
-      if (localPath.startsWith('content://')) {
-        if (!_isAndroidPlatform) {
-          throw const FileSystemException(
-            'Clipboard file URIs are not supported on this platform yet',
-          );
-        }
-        final file = await _readAndroidClipboardContentUri(localPath);
-        files.add(AppPlatformFile(name: file.name, bytes: file.bytes));
-      } else {
-        files.add(
-          AppPlatformFile(name: path.basename(localPath), path: localPath),
-        );
-      }
-    }
-    await _pasteSelectedFiles(
-      files,
-      itemLabelSingular: 'file',
-      itemLabelPlural: 'files',
-      confirm: false,
-      telemetrySource: 'clipboard_files',
-      inputTarget: inputTarget,
-    );
-  }
-
-  void _maybePasteStoreDemoImage() {
-    if (!widget.pasteDemoImage || _didPasteDemoImage || !mounted) {
-      return;
-    }
-    _didPasteDemoImage = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      unawaited(_pasteStoreDemoImage());
-    });
-  }
-
-  Future<void> _pasteStoreDemoImage() async {
-    final pasteCompleter = storeDemoImagePasteCompleter;
-    try {
-      final pathInserted = await _pasteClipboardImage(
-        _storeDemoClipboardImageBytes,
-        autoConfirmAfter: const Duration(milliseconds: 4200),
-        showKeyboardAfterPaste: false,
-        uploadBaseDirectory: _workingDirectoryPath,
-      );
-      if (!pathInserted) {
-        throw StateError('Demo image path was not inserted into the terminal');
-      }
-      if (!mounted) {
-        return;
-      }
-      FocusManager.instance.primaryFocus?.unfocus();
-      await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
-      // Signal the store video harness that the image path is in the terminal
-      // so Beat 5 does not type the Copilot prompt before the paste lands.
-      debugPrintSynchronously('STORE_SCREENSHOT_DEMO_IMAGE_PASTED');
-      if (pasteCompleter != null && !pasteCompleter.isCompleted) {
-        pasteCompleter.complete();
-      }
-    } on Object catch (error, stackTrace) {
-      debugPrintSynchronously(
-        'STORE_SCREENSHOT_ERROR demo image paste failed: $error',
-      );
-      if (pasteCompleter != null && !pasteCompleter.isCompleted) {
-        pasteCompleter.completeError(error, stackTrace);
-      }
-      rethrow;
-    }
-  }
-
-  /// Uploads [imageBytes] and pastes its remote path into [inputTarget], the
-  /// input target the paste was asked for in, or by default the one current
-  /// once the upload is confirmed.
-  Future<bool> _pasteClipboardImage(
-    Uint8List imageBytes, {
-    Duration? autoConfirmAfter,
-    bool showKeyboardAfterPaste = true,
-    String? uploadBaseDirectory,
-    Object? inputTarget,
-  }) async {
-    final shouldUpload = await _confirmClipboardUpload(
-      title: 'Upload clipboard image?',
-      message:
-          'This will upload the clipboard image to $_clipboardUploadDirectoryDisplay on the connected host and paste its remote path into the terminal.',
-      confirmLabel: 'Upload and paste',
-      details: const ['monkeyssh-light-mode.png'],
-      autoConfirmAfter: autoConfirmAfter,
-    );
-    if (!shouldUpload) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return false;
-    }
-
-    final inputGeneration = _terminalUserInputGeneration;
-    final target = inputTarget ?? _terminalInputTarget;
-    final pasteMode = await _resolveSettledTerminalPasteMode();
-    final uploadGeneration = _beginPasteUpload(
-      TerminalPasteUploadProgress(
-        uploadedBytes: 0,
-        totalBytes: imageBytes.length,
-      ),
-    );
-    final ({String path, bool windows}) remotePath;
-    try {
-      remotePath = await _withClipboardSftp((
-        sftp,
-        remoteFileService,
-        uploadTarget,
-      ) async {
-        final remotePath = joinRemotePath(
-          uploadTarget.sftpDirectory,
-          buildClipboardImageFileName(DateTime.now()),
-        );
-        await remoteFileService.uploadBytes(
-          sftp: sftp,
-          remotePath: remotePath,
-          bytes: imageBytes,
-          applyPrivateMode: uploadTarget.applyPrivateFileMode,
-          onProgress: (uploadedBytes) => _updatePasteUpload(
-            uploadGeneration,
-            (current) => current.copyWith(uploadedBytes: uploadedBytes),
-          ),
-        );
-        return (
-          path: uploadTarget.terminalPathForSftpPath(remotePath),
-          windows: uploadTarget.windows,
-        );
-      }, uploadBaseDirectory: uploadBaseDirectory);
-    } finally {
-      _endPasteUpload(uploadGeneration);
-    }
-    _followLiveOutput();
-    final pasteResult = await _insertUploadedFileReferences(
-      [remotePath.path],
-      windows: remotePath.windows,
-      inputGeneration: inputGeneration,
-      inputTarget: target,
-      pasteMode: pasteMode,
-    );
-    if (!mounted) {
-      return false;
-    }
-    final pathInserted = pasteResult.sentCount == 1;
-    if (pathInserted) {
-      unawaited(
-        ref
-            .read(telemetryServiceProvider)
-            .logTerminalPasteUsed(
-              source: 'clipboard_image',
-              requiredReview: true,
-            ),
-      );
-    }
-    _terminalController.clearSelection();
-    _restoreTerminalFocus(
-      showSystemKeyboard: showKeyboardAfterPaste && _isMobilePlatform,
-    );
-    _showClipboardMessage(
-      pathInserted
-          ? 'Uploaded clipboard image to ${remotePath.path}'
-          : 'Uploaded clipboard image, but could not paste its path',
-    );
-    return pathInserted;
-  }
-
-  /// Uploads [selectedFiles] and pastes their remote paths into
-  /// [inputTarget] when given, otherwise into the input target current once
-  /// the upload is confirmed.
-  Future<void> _pasteSelectedFiles(
-    List<PlatformFile> selectedFiles, {
-    required String itemLabelSingular,
-    required String itemLabelPlural,
-    bool confirm = true,
-    String telemetrySource = 'picked_files',
-    Object? inputTarget,
-  }) async {
-    if (!mounted) {
-      return;
-    }
-    final itemLabel = selectedFiles.length == 1
-        ? itemLabelSingular
-        : itemLabelPlural;
-    final shouldUpload =
-        !confirm ||
-        await _confirmClipboardUpload(
-          title: 'Upload selected $itemLabel?',
-          message:
-              'This will upload ${selectedFiles.length == 1 ? 'the selected $itemLabelSingular' : '${selectedFiles.length} selected $itemLabelPlural'} to $_clipboardUploadDirectoryDisplay on the connected host and paste ${selectedFiles.length == 1 ? 'its remote path' : 'their remote paths'} into the terminal.',
-          confirmLabel: 'Upload and paste',
-          details: [
-            for (var index = 0; index < selectedFiles.length; index++)
-              resolvePickedTerminalUploadFileName(
-                selectedFiles[index],
-                index: index,
-              ),
-          ],
-        );
-    if (!shouldUpload) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    final inputGeneration = _terminalUserInputGeneration;
-    final target = inputTarget ?? _terminalInputTarget;
-    final pasteMode = await _resolveSettledTerminalPasteMode();
-    final timestamp = DateTime.now();
-    // Size the whole batch up front so the line reads as one upload rather
-    // than restarting per file; any unknown size makes it indeterminate.
-    final fileLengths = [
-      for (final file in selectedFiles)
-        await resolvePickedTerminalUploadLength(file),
-    ];
-    final batchTotalBytes = fileLengths.contains(null)
-        ? null
-        : fileLengths.fold<int>(0, (sum, length) => sum + length!);
-    final uploadGeneration = _beginPasteUpload(
-      TerminalPasteUploadProgress(
-        uploadedBytes: 0,
-        totalBytes: batchTotalBytes,
-      ),
-    );
-    var completedBytes = 0;
-    final ({List<String> paths, bool windows}) remotePaths;
-    try {
-      remotePaths = await _withClipboardSftp((
-        sftp,
-        remoteFileService,
-        uploadTarget,
-      ) async {
-        final remotePaths = <String>[];
-        for (var index = 0; index < selectedFiles.length; index++) {
-          final file = selectedFiles[index];
-          final sourceName = resolvePickedTerminalUploadFileName(
-            file,
-            index: index,
-          );
-          final remotePath = joinRemotePath(
-            uploadTarget.sftpDirectory,
-            buildClipboardUploadFileName(
-              sourceName,
-              timestamp,
-              sequence: index,
-            ),
-          );
-          await remoteFileService.uploadStream(
-            sftp: sftp,
-            remotePath: remotePath,
-            stream: resolvePickedTerminalUploadReadStream(file),
-            applyPrivateMode: uploadTarget.applyPrivateFileMode,
-            onProgress: (uploadedBytes) => _updatePasteUpload(
-              uploadGeneration,
-              (current) => current.copyWith(
-                uploadedBytes: completedBytes + uploadedBytes,
-              ),
-            ),
-          );
-          completedBytes += fileLengths[index] ?? 0;
-          remotePaths.add(uploadTarget.terminalPathForSftpPath(remotePath));
-        }
-        return (paths: remotePaths, windows: uploadTarget.windows);
-      });
-    } finally {
-      _endPasteUpload(uploadGeneration);
-    }
-
-    _followLiveOutput();
-    final pasteResult = await _insertUploadedFileReferences(
-      remotePaths.paths,
-      windows: remotePaths.windows,
-      inputGeneration: inputGeneration,
-      inputTarget: target,
-      pasteMode: pasteMode,
-    );
-    if (!mounted) {
-      return;
-    }
-    if (pasteResult.sentCount > 0) {
-      unawaited(
-        ref
-            .read(telemetryServiceProvider)
-            .logTerminalPasteUsed(
-              source: telemetrySource,
-              requiredReview: true,
-            ),
-      );
-    }
-    _terminalController.clearSelection();
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    final pathsInserted = pasteResult.sentCount == pasteResult.requestedCount;
-    _showClipboardMessage(
-      pathsInserted
-          ? 'Uploaded ${selectedFiles.length == 1 ? 'selected $itemLabelSingular' : '${remotePaths.paths.length} $itemLabelPlural'} to $_clipboardUploadDirectoryDisplay'
-          : pasteResult.sentCount > 0
-          ? 'Uploaded ${remotePaths.paths.length} $itemLabelPlural and pasted ${pasteResult.sentCount} of ${pasteResult.requestedCount} paths'
-          : 'Uploaded ${selectedFiles.length == 1 ? 'selected $itemLabelSingular' : '${remotePaths.paths.length} $itemLabelPlural'}, but could not paste ${remotePaths.paths.length == 1 ? 'its path' : 'their paths'}',
-    );
-  }
-
-  Future<bool> _confirmKeyboardInsertion(TerminalCommandReview review) async {
-    if (!_shouldReviewTerminalCommandInsertion) {
-      return true;
-    }
-    final shouldInsert = await _confirmCommandInsertion(
-      title: 'Review keyboard paste',
-      message: 'This text inserted from your keyboard could execute multiple or reshaped commands.',
-      confirmLabel: 'Insert anyway',
-      review: review,
-    );
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    return shouldInsert;
-  }
-
-  Future<bool> _confirmDesktopInsertedText(String text) async {
-    if (text.length <= 1) {
-      return true;
-    }
-    if (!_shouldReviewTerminalCommandInsertion) {
-      return true;
-    }
-
-    return _confirmTerminalInsertionIfNeeded(
-      insertedText: text,
-      buildReview: (commandText) => assessClipboardPasteCommand(
-        commandText,
-        bracketedPasteModeEnabled: false,
-      ),
-      title: 'Review keyboard paste',
-      messageBuilder: (_) => 'This text inserted from your keyboard could execute multiple or reshaped commands.',
-      confirmLabel: 'Insert anyway',
-    );
-  }
-
-  Future<void> _refreshKeyboardToolbarSnippetMenu() async {
-    final snippetRepo = ref.read(snippetRepositoryProvider);
-    final snippets = await snippetRepo.getAll();
-    final folders = await snippetRepo.getAllFolders();
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _keyboardToolbarSnippets = [
-        for (final snippet in snippets)
-          KeyboardToolbarSnippet(
-            id: snippet.id,
-            name: snippet.name,
-            command: snippet.command,
-            folderId: snippet.folderId,
-          ),
-      ];
-      _keyboardToolbarSnippetFolders = [
-        for (final folder in folders)
-          KeyboardToolbarSnippetFolder(id: folder.id, name: folder.name),
-      ];
-    });
-  }
-
-  Future<void> _pasteClipboardIntoFind(TerminalSearchFieldInput field) async {
-    final text = await _readSystemClipboardText();
-    if (!mounted) {
-      return;
-    }
-    if (text == null || text.isEmpty) {
-      _showClipboardMessage('Clipboard has no text to paste.');
-      return;
-    }
-    field.pasteText(text);
-  }
-
-  Future<void> _pasteClipboardIntoNativeComposer() async {
-    try {
-      final imageBytes = await Pasteboard.image;
-      if (imageBytes != null && imageBytes.isNotEmpty) {
-        if (!mounted) return;
-        _nativeComposerFocusController.pasteImage(imageBytes);
-        return;
-      }
-    } on PlatformException {
-      // Fall through to plain text when this platform cannot read image data.
-    }
-
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!mounted) {
-      return;
-    }
-    final text = data?.text;
-    if (text == null || text.isEmpty) {
-      _showClipboardMessage('Clipboard has no text or image to paste.');
-      return;
-    }
-    _nativeComposerFocusController.pasteText(text);
-  }
-
-  /// Inserts [selectedSnippet]'s command, with its variables filled in,
-  /// through [insert]: the native chat's composer or the find field. Neither
-  /// can hold a key press, so a snippet with key tokens is refused.
-  Future<void> _insertKeyboardToolbarSnippet(
-    KeyboardToolbarSnippet selectedSnippet,
-    ValueChanged<String> insert,
-  ) async {
-    final repository = ref.read(snippetRepositoryProvider);
-    final tokensReady = await repository.keyTokensReady();
-    final snippet = await repository.getById(selectedSnippet.id);
-    if (!mounted) {
-      return;
-    }
-    if (snippet == null) {
-      _showClipboardMessage('Snippet is no longer available.');
-      return;
-    }
-    final sequence = tokensReady
-        ? parseSnippetKeySequence(snippet.command)
-        : SnippetKeySequence.literal(snippet.command);
-    if (sequence.needsTerminal) {
-      _showClipboardMessage(
-        'This snippet presses keys, so it only works when typing into the '
-        'terminal.',
-      );
-      return;
-    }
-    final substitution = await _substituteVariables(context, snippet);
-    if (!mounted || substitution == null || substitution.command.isEmpty) {
-      return;
-    }
-    insert(sequence.withVariables(substitution.values).plainText);
-    unawaited(repository.incrementUsage(snippet.id));
-  }
-
-  Future<void> _pasteKeyboardToolbarSnippet(
-    KeyboardToolbarSnippet selectedSnippet,
-  ) async {
-    final snippetRepo = ref.read(snippetRepositoryProvider);
-    // Until stored snippets are upgraded for key tokens, an old `{key:esc}`
-    // is text and must be pasted as text.
-    final tokensReady = await snippetRepo.keyTokensReady();
-    final snippet = await snippetRepo.getById(selectedSnippet.id);
-    if (!mounted) {
-      return;
-    }
-    if (snippet == null) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage('Snippet is no longer available.');
-      return;
-    }
-    final parsedSequence = tokensReady
-        ? parseSnippetKeySequence(snippet.command)
-        : SnippetKeySequence.literal(snippet.command);
-    if (parsedSequence.errors.isNotEmpty) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      _showClipboardMessage(parsedSequence.errors.first);
-      return;
-    }
-
-    final substitution = await _substituteVariables(context, snippet);
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    if (substitution == null || substitution.command.isEmpty) {
-      return;
-    }
-    final sequence = parsedSequence.withVariables(substitution.values);
-    final reviewMode = sequence.hasActions
-        ? snippetKeySequenceReviewMode(
-            shellStatus: _shellStatus,
-            isUsingAltBuffer: _isUsingAltBuffer,
-            isAgentToolActive: _isAgentToolActive,
-          )
-        : SnippetReviewMode.full;
-
-    final shouldInsert =
-        reviewMode == SnippetReviewMode.none ||
-        await _confirmTerminalInsertionIfNeeded(
-          insertedText: sequence.hasActions
-              ? sequence.reviewText
-              : sequence.plainText,
-          buildReview: (commandText) =>
-              sequence.hasActions && commandText.trim().isEmpty
-              // Only Enter on an empty line: there is no command to review.
-              ? TerminalCommandReview(command: commandText, reasons: const [])
-              : reviewForSnippetMode(
-                  assessSnippetCommandInsertion(
-                    commandText,
-                    hadVariableSubstitution:
-                        substitution.hadVariableSubstitution,
-                  ),
-                  reviewMode,
-                  typesAfterSubmit: sequence.typesAfterSubmit,
-                ),
-          title: 'Review snippet command',
-          messageBuilder: (_) =>
-              'Confirm the rendered command before inserting it.',
-          confirmLabel: 'Insert command',
-        );
-    if (!shouldInsert) {
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return;
-    }
-
-    _handleTerminalUserInput();
-    if (sequence.hasActions) {
-      unawaited(snippetRepo.incrementUsage(snippet.id));
-      _terminalController.clearSelection();
-      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      await _sendSnippetKeySequence(sequence);
-      return;
-    }
-    _terminal.paste(sequence.plainText);
-    _terminalController.clearSelection();
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    unawaited(snippetRepo.incrementUsage(snippet.id));
-  }
-
-  /// Sends a snippet with key tokens, stopping as soon as the connection,
-  /// shell, window or visible view it started in changes, or another
-  /// sequence starts.
-  Future<void> _sendSnippetKeySequence(SnippetKeySequence sequence) async {
-    final run = ++_snippetSequenceRun;
-    final target = _terminalInputTarget;
-    // Typing, a toolbar key or a paste takes over the input line.
-    final inputGeneration = _terminalUserInputGeneration;
-    final windowKey = resolveTmuxBarActiveWindowKey(
-      _currentTmuxWindowsSnapshot,
-    );
-    // A drop that recovers between two steps still ends the sequence.
-    var connectionDropped = false;
-    final connectionSubscription = ref
-        .listenManual<Map<int, SshConnectionState>>(activeSessionsProvider, (
-          previous,
-          next,
-        ) {
-          final connectionId = _connectionId;
-          if (connectionId == null ||
-              next[connectionId] != SshConnectionState.connected) {
-            connectionDropped = true;
-          }
-        });
-    try {
-      final outcome = await sendSnippetKeySequence(
-        _terminal,
-        sequence,
-        outputIdle: () => _terminalEnterPacer?.idle,
-        canContinue: () =>
-            !connectionDropped &&
-            inputGeneration == _terminalUserInputGeneration &&
-            mounted &&
-            run == _snippetSequenceRun &&
-            terminalAttachmentPasteTargetsCurrentMuxWindow(
-              hasPendingWindowSelection:
-                  _tmuxBarKey.currentState?.hasPendingWindowSelection ?? false,
-              pasteWindowKey: windowKey,
-              currentWindowKey: resolveTmuxBarActiveWindowKey(
-                _currentTmuxWindowsSnapshot,
-              ),
-            ) &&
-            _terminalInputTarget == target,
-      );
-      if (outcome == SnippetSendOutcome.stopped &&
-          mounted &&
-          run == _snippetSequenceRun) {
-        _showClipboardMessage(
-          inputGeneration == _terminalUserInputGeneration
-              ? 'Snippet stopped: the connection or window changed.'
-              : 'Snippet stopped: other input went to the terminal.',
-        );
-      }
-    } finally {
-      connectionSubscription.close();
-    }
-  }
-
-  /// Where input started now would go: the connection, shell, terminal,
-  /// mux window and native session. Snippet key sequences and pastes that
-  /// outlast a change of it stop rather than reach the new target.
-  Object get _terminalInputTarget => (
-    terminal: _terminal,
-    shell: _shell,
-    connectionId: _connectionId,
-    connected: _readCurrentConnectionState() == SshConnectionState.connected,
-    windowChanges: _muxWindowChangeGeneration,
-    nativeAgent: _activeNativeAcpSessionKey,
-  );
-
-  /// Shows snippet picker and inserts selected snippet into terminal.
-  Future<void> _showSnippetPicker() async {
-    final snippetRepo = ref.read(snippetRepositoryProvider);
-    final snippets = await snippetRepo.getAll();
-
-    if (!mounted) return;
-
-    if (snippets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No snippets available. Add some first!')),
-      );
-      return;
-    }
-
-    final result = await showModalBottomSheet<KeyboardToolbarSnippet>(
-      context: context,
-      isScrollControlled: true,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (context) => DraggableScrollableSheet(
-        maxChildSize: 0.8,
-        minChildSize: 0.3,
-        expand: false,
-        builder: (context, scrollController) => Column(
-          children: [
-            // Handle bar
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.outline,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Text(
-                    'Snippets',
-                    style: FluttyTheme.displayMono(
-                      fontSize: 18,
-                      color: Theme.of(context).colorScheme.onSurface,
-                    ),
-                  ),
-                  const Spacer(),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel'),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(),
-            Expanded(
-              child: ListView.builder(
-                controller: scrollController,
-                itemCount: snippets.length,
-                itemBuilder: (context, index) {
-                  final snippet = snippets[index];
-                  final hasVariables = snippetVariablePattern.hasMatch(
-                    snippet.command,
-                  );
-                  return ListTile(
-                    leading: Icon(
-                      hasVariables ? Icons.tune : Icons.code,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                    title: Text(
-                      snippet.name,
-                      style: FluttyTheme.monoStyle.copyWith(
-                        fontSize: 14,
-                        color: Theme.of(context).colorScheme.onSurface,
-                      ),
-                    ),
-                    subtitle: Text(
-                      snippetLiteralText(snippet.command).replaceAll('\n', ' '),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: FluttyTheme.monoStyle.copyWith(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    trailing: hasVariables
-                        ? const Chip(label: Text('Has variables'))
-                        : null,
-                    onTap: () => Navigator.pop(
-                      context,
-                      KeyboardToolbarSnippet(
-                        id: snippet.id,
-                        name: snippet.name,
-                        command: snippet.command,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    if (result != null && mounted) {
-      await _pasteKeyboardToolbarSnippet(result);
-    }
-  }
-
-  /// Shows dialog for variable substitution if snippet has variables.
-  Future<
-    ({
-      String command,
-      bool hadVariableSubstitution,
-      Map<String, String> values,
-    })?
-  >
-  _substituteVariables(BuildContext context, Snippet snippet) async {
-    final variables = extractSnippetVariables(snippet.command);
-
-    if (variables.isEmpty) {
-      return (
-        command: snippet.command,
-        hadVariableSubstitution: false,
-        values: const <String, String>{},
-      );
-    }
-
-    final values = <String, String>{};
-    final formKey = GlobalKey<FormState>();
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Variables for "${snippet.name}"'),
-        content: Form(
-          key: formKey,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final variable in variables) ...[
-                  TextFormField(
-                    onChanged: (value) => values[variable] = value,
-                    decoration: InputDecoration(
-                      labelText: variable,
-                      hintText: 'Enter value for $variable',
-                    ),
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter a value';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                ],
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                Navigator.pop(context, true);
-              }
-            },
-            child: const Text('Insert'),
-          ),
-        ],
-      ),
-    );
-
-    if (result != true) return null;
-    return (
-      command: snippet.command.replaceAllMapped(
-        snippetVariablePattern,
-        (match) => values[match.group(1)]!,
-      ),
-      hadVariableSubstitution: true,
-      values: values,
-    );
-  }
-
-  Future<bool> _reviewImportedAutoConnectCommand(
-    TerminalCommandReview review,
-    Host host,
-  ) async {
-    // Trusting an imported host is persistent; a link review is one-off, so
-    // it never offers to trust the host even when the host was imported.
-    final imported =
-        review.reasons.contains(
-          TerminalCommandReviewReason.importedAutoConnect,
-        ) &&
-        !review.reasons.contains(TerminalCommandReviewReason.openedFromLink);
-    final decision = await showDialog<_AutoConnectReviewDecision>(
-      context: context,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (context) => AlertDialog(
-        title: Text(
-          imported
-              ? 'Review imported auto-connect command'
-              : 'Review auto-connect command',
-        ),
-        content: _buildCommandReviewContent(
-          review: review,
-          message: imported
-              ? 'Imported auto-connect commands never run silently. Review this one before letting it execute.'
-              : 'Links never run commands on their own. Review this one before letting it execute.',
-        ),
-        actions: [
-          TextButton(
-            // Neutral, so the dialog's one filled action carries the teal.
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.onSurface,
-            ),
-            onPressed: () =>
-                Navigator.pop(context, _AutoConnectReviewDecision.skip),
-            child: const Text('Skip'),
-          ),
-          if (imported)
-            TextButton(
-              onPressed: () =>
-                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
-              child: const Text('Run once'),
-            )
-          else
-            FilledButton(
-              onPressed: () =>
-                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
-              child: const Text('Run once'),
-            ),
-          if (imported)
-            FilledButton(
-              onPressed: () => Navigator.pop(
-                context,
-                _AutoConnectReviewDecision.trustAndRun,
-              ),
-              child: const Text('Always run'),
-            ),
-        ],
-      ),
-    );
-    if (!mounted ||
-        decision == null ||
-        decision == _AutoConnectReviewDecision.skip) {
-      return false;
-    }
-    if (decision == _AutoConnectReviewDecision.trustAndRun) {
-      await ref
-          .read(hostRepositoryProvider)
-          .updateFields(
-            host.id,
-            const HostsCompanion(
-              autoConnectRequiresConfirmation: drift.Value(false),
-            ),
-          );
-      _host = host.copyWith(autoConnectRequiresConfirmation: false);
-    }
-    return mounted;
-  }
-
-  Future<bool> _confirmCommandInsertion({
-    required String title,
-    required String message,
-    required String confirmLabel,
-    required TerminalCommandReview review,
-  }) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: _buildCommandReviewContent(review: review, message: message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(confirmLabel),
-          ),
-        ],
-      ),
-    );
-    return confirmed ?? false;
-  }
-
-  Widget _buildCommandReviewContent({
-    required TerminalCommandReview review,
-    required String message,
-  }) {
-    final reasons = describeTerminalCommandReview(review);
-    const maxPreviewLength = 2000;
-    final command = review.command;
-    final commandPreview = command.length <= maxPreviewLength
-        ? command
-        : '${command.substring(0, maxPreviewLength)}\n'
-              '... truncated ${command.length - maxPreviewLength} characters ...';
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(message),
-          if (reasons.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            for (final reason in reasons)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Padding(
-                      padding: EdgeInsets.only(top: 2),
-                      child: Icon(Icons.warning_amber_rounded, size: 18),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(reason)),
-                  ],
-                ),
-              ),
-          ],
-          const SizedBox(height: 12),
-          // The same command panel the launch preset review uses.
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
-              border: Border.all(
-                color: Theme.of(context).colorScheme.outlineVariant,
-              ),
-            ),
-            child: SelectableText(
-              commandPreview,
-              style: FluttyTheme.monoStyle.copyWith(
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 enum _ProppedTerminalSlot { terminal, controls, navigator, toolbar }

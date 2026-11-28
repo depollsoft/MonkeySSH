@@ -581,12 +581,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   Future<void> _loadPreferredLaunchTool() async {
     final hostId = widget.session.hostId;
-    final preset = await widget.ref
-        .read(agentLaunchPresetServiceProvider)
-        .getPresetForHost(hostId);
+    final preferredLaunchTool = await loadPreferredAgentLaunchTool(
+      widget.ref,
+      hostId,
+    );
     if (!mounted || widget.session.hostId != hostId) return;
-
-    final preferredLaunchTool = preset?.tool;
     if (_preferredLaunchTool == preferredLaunchTool) return;
     setState(() => _preferredLaunchTool = preferredLaunchTool);
   }
@@ -932,39 +931,23 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   Future<void> _showNewWindowPickerUnguarded({
     BuildContext? anchorContext,
   }) async {
-    final installedToolsFuture = widget.ref
-        .read(tmuxServiceProvider)
-        .detectInstalledAgentTools(widget.session);
-    final nativeAcpAvailable =
-        widget.activeMuxBackend == RemoteMuxBackend.monkeyMux;
-    final nativeAcpProviderIds = nativeAcpAvailable
-        ? builtinNativeAcpProvidersByTool()
-        : const <AgentLaunchTool, String>{};
     final agentWindowModePreference = await _loadAgentWindowModePreference();
     if (!mounted || (anchorContext != null && !anchorContext.mounted)) {
       return;
     }
-    final usesTerminalOnlyContextMenu =
-        _isSidebar &&
-        anchorContext != null &&
-        widget.activeMuxBackend != RemoteMuxBackend.monkeyMux;
-    final action = usesTerminalOnlyContextMenu
-        ? await showTmuxNewWindowContextMenu(
-            context: context,
-            anchorContext: anchorContext,
-            startClisInYoloMode: widget.startClisInYoloMode,
-            installedToolsFuture: installedToolsFuture,
-            preferredTool: _preferredLaunchTool,
-          )
-        : await showTmuxNewWindowPicker(
-            context: context,
-            isProUser: widget.isProUser,
-            startClisInYoloMode: widget.startClisInYoloMode,
-            agentWindowModePreference: agentWindowModePreference,
-            installedToolsFuture: installedToolsFuture,
-            preferredTool: _preferredLaunchTool,
-            nativeAcpProviderIds: nativeAcpProviderIds,
-          );
+    final action = await pickTmuxNewWindowAction(
+      context: context,
+      ref: widget.ref,
+      session: widget.session,
+      remoteMuxBackend: widget.activeMuxBackend,
+      isProUser: widget.isProUser,
+      startClisInYoloMode: widget.startClisInYoloMode,
+      agentWindowModePreference: agentWindowModePreference,
+      preferredTool: _preferredLaunchTool,
+      anchorContext: anchorContext,
+      useTerminalOnlyContextMenu:
+          _isSidebar && widget.activeMuxBackend != RemoteMuxBackend.monkeyMux,
+    );
     if (!mounted || action == null) {
       return;
     }
@@ -1700,13 +1683,15 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
   }
 
-  Widget _buildHandleBar(ThemeData theme) {
+  ({String label, String tooltip, Widget icon}) _resolveHandlePresentation(
+    ThemeData theme,
+  ) {
     final displayedWindows = _displayedWindows;
     final activeNative = _activeNativeAcpEntry;
     final nativeActivity = activeNative == null
         ? null
         : acpSessionActivityDisplay(activeNative);
-    final handleLabel = activeNative == null
+    final label = activeNative == null
         ? resolveTmuxBarHandleLabel(
             widget.tmuxSessionName,
             activeWindowTitle: resolveTmuxBarActiveWindowTitle(
@@ -1722,17 +1707,30 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         : agentLaunchToolForAcpProviderId(activeNative.key.providerId);
     final tooltip = _expanded
         ? 'Collapse tmux windows'
-        : 'Show tmux windows: $handleLabel';
+        : 'Show tmux windows: $label';
+    final icon = _buildHandleIcon(
+      theme,
+      activeWindowTool,
+      nativeWindowIndex: activeNative == null
+          ? null
+          : _nativeAcpWindowIndex(activeNative),
+      nativeWindowTool: activeNativeTool,
+    );
+    return (label: label, tooltip: tooltip, icon: icon);
+  }
+
+  Widget _buildHandleBar(ThemeData theme) {
+    final presentation = _resolveHandlePresentation(theme);
 
     return Semantics(
       button: true,
       toggled: _expanded,
-      label: 'tmux windows: $handleLabel',
+      label: 'tmux windows: ${presentation.label}',
       hint: _expanded
           ? 'Double tap to collapse the tmux window list'
           : 'Double tap to show tmux windows',
       child: Tooltip(
-        message: tooltip,
+        message: presentation.tooltip,
         child: GestureDetector(
           key: const ValueKey('tmux-handle-bar'),
           behavior: HitTestBehavior.opaque,
@@ -1743,18 +1741,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  _buildHandleIcon(
-                    theme,
-                    activeWindowTool,
-                    nativeWindowIndex: activeNative == null
-                        ? null
-                        : _nativeAcpWindowIndex(activeNative),
-                    nativeWindowTool: activeNativeTool,
-                  ),
+                  presentation.icon,
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      handleLabel,
+                      presentation.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.labelMedium?.copyWith(
@@ -1791,36 +1782,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   Widget _buildSidebarHandle(ThemeData theme) {
-    final displayedWindows = _displayedWindows;
-    final activeNative = _activeNativeAcpEntry;
-    final nativeActivity = activeNative == null
-        ? null
-        : acpSessionActivityDisplay(activeNative);
-    final handleLabel = activeNative == null
-        ? resolveTmuxBarHandleLabel(
-            widget.tmuxSessionName,
-            activeWindowTitle: resolveTmuxBarActiveWindowTitle(
-              displayedWindows,
-            ),
-          )
-        : '${_projection.sessionTitle(activeNative)} · ${nativeActivity!.label}';
-    final activeWindowTool = activeNative == null
-        ? resolveTmuxBarActiveWindowTool(displayedWindows)
-        : null;
-    final activeNativeTool = activeNative == null
-        ? null
-        : agentLaunchToolForAcpProviderId(activeNative.key.providerId);
-    final tooltip = _expanded
-        ? 'Collapse tmux windows'
-        : 'Show tmux windows: $handleLabel';
-    final icon = _buildHandleIcon(
-      theme,
-      activeWindowTool,
-      nativeWindowIndex: activeNative == null
-          ? null
-          : _nativeAcpWindowIndex(activeNative),
-      nativeWindowTool: activeNativeTool,
-    );
+    final presentation = _resolveHandlePresentation(theme);
     final handle = SizedBox(
       height: 56,
       width: double.infinity,
@@ -1829,11 +1791,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
                 children: [
-                  icon,
+                  presentation.icon,
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      handleLabel,
+                      presentation.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.labelMedium?.copyWith(
@@ -1854,12 +1816,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                 ],
               ),
             )
-          : Center(child: icon),
+          : Center(child: presentation.icon),
     );
     if (widget.pinnedOpen) {
       return Semantics(
         header: true,
-        label: 'tmux windows: $handleLabel',
+        label: 'tmux windows: ${presentation.label}',
         child: ExcludeSemantics(
           key: const ValueKey('tmux-handle-bar'),
           child: handle,
@@ -1870,12 +1832,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     return Semantics(
       button: true,
       toggled: _expanded,
-      label: 'tmux windows: $handleLabel',
+      label: 'tmux windows: ${presentation.label}',
       hint: _expanded
           ? 'Double tap or drag left to collapse the tmux window sidebar'
           : 'Double tap or drag right to show tmux windows',
       child: Tooltip(
-        message: tooltip,
+        message: presentation.tooltip,
         child: GestureDetector(
           key: const ValueKey('tmux-handle-bar'),
           behavior: HitTestBehavior.opaque,
@@ -1972,6 +1934,80 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
   }
 
+  Widget _buildCollapsedSidebarTile(
+    ThemeData theme, {
+    required Key inkWellKey,
+    required String tooltip,
+    required bool isActive,
+    required Widget centerIcon,
+    required Widget indexBadge,
+    required VoidCallback? onTap,
+    String? semanticsLabel,
+    BoxBorder? border,
+    Widget? topLeftBadge,
+    Widget? topRightBadge,
+    TerminalProgress? progress,
+    Key? progressKey,
+    String? progressSemanticsLabel,
+  }) {
+    final tile = InkWell(
+      key: inkWellKey,
+      customBorder: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      onTap: onTap,
+      child: Ink(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: isActive
+              ? theme.colorScheme.primaryContainer
+              : theme.colorScheme.surfaceContainerHigh,
+          border: border,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          fit: StackFit.expand,
+          alignment: Alignment.center,
+          children: [
+            Center(child: centerIcon),
+            if (topLeftBadge != null)
+              Positioned(left: 2, top: 2, child: topLeftBadge),
+            Positioned(right: 3, bottom: 3, child: indexBadge),
+            ?topRightBadge,
+            if (progress != null)
+              Positioned(
+                left: 5,
+                right: 19,
+                bottom: 1,
+                child: MuxWindowProgressIndicator(
+                  key: progressKey,
+                  progress: progress,
+                  semanticsWindowLabel: progressSemanticsLabel,
+                  compact: true,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      child: Tooltip(
+        message: tooltip,
+        child: semanticsLabel == null
+            ? tile
+            : Semantics(
+                button: true,
+                selected: isActive,
+                label: semanticsLabel,
+                child: tile,
+              ),
+      ),
+    );
+  }
+
   Widget _buildCollapsedSidebarWindowButton(
     ThemeData theme,
     TmuxWindow window,
@@ -2000,117 +2036,68 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       isActive: isActive,
     );
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      child: Tooltip(
-        message: 'Switch to $title',
-        child: Semantics(
-          button: true,
-          selected: isActive,
-          label: 'tmux window ${window.index}: $title',
-          child: InkWell(
-            key: ValueKey('tmux-sidebar-window-${window.index}'),
-            customBorder: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            onTap: isActive
-                ? null
-                : () {
-                    unawaited(HapticFeedback.selectionClick());
-                    setState(() {
-                      _pendingSelectedWindowIndex = window.index;
-                    });
-                    _startPendingSelectionTimer(window.index);
-                    unawaited(
-                      widget.onAction(
-                        window.isNativeAcp
-                            ? _openNativeWindowAction(window)
-                            : TmuxSwitchWindowAction(
-                                window.index,
-                                windowId: window.id,
-                              ),
-                      ),
-                    );
-                  },
-            child: Ink(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: isActive
-                    ? theme.colorScheme.primaryContainer
-                    : theme.colorScheme.surfaceContainerHigh,
-                border: window.hasAlert
-                    ? Border.all(color: theme.colorScheme.error, width: 2)
-                    : null,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: SizedBox.expand(
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  alignment: Alignment.center,
-                  children: [
-                    AgentToolIcon(
-                      tool: windowTool,
-                      color: isActive
-                          ? theme.colorScheme.onPrimaryContainer
-                          : identityColor,
-                      fallbackIcon: window.isNativeAcp
-                          ? Icons.smart_toy_outlined
-                          : Icons.terminal,
-                    ),
-                    if (window.isNativeAcp)
-                      Positioned(
-                        left: 2,
-                        top: 2,
-                        child: AcpNativeBadge(
-                          key: ValueKey(
-                            'monkeymux-sidebar-native-${window.index}',
-                          ),
-                          color: identityColor,
+    return _buildCollapsedSidebarTile(
+      theme,
+      inkWellKey: ValueKey('tmux-sidebar-window-${window.index}'),
+      tooltip: 'Switch to $title',
+      semanticsLabel: 'tmux window ${window.index}: $title',
+      isActive: isActive,
+      border: window.hasAlert
+          ? Border.all(color: theme.colorScheme.error, width: 2)
+          : null,
+      onTap: isActive
+          ? null
+          : () {
+              unawaited(HapticFeedback.selectionClick());
+              setState(() {
+                _pendingSelectedWindowIndex = window.index;
+              });
+              _startPendingSelectionTimer(window.index);
+              unawaited(
+                widget.onAction(
+                  window.isNativeAcp
+                      ? _openNativeWindowAction(window)
+                      : TmuxSwitchWindowAction(
+                          window.index,
+                          windowId: window.id,
                         ),
-                      ),
-                    Positioned(
-                      right: 3,
-                      bottom: 3,
-                      child: _buildCollapsedSidebarWindowIndex(
-                        theme,
-                        window,
-                        isActive: isActive,
-                      ),
-                    ),
-                    if (window.hasAlert)
-                      Positioned(
-                        right: 2,
-                        top: 2,
-                        child: Icon(
-                          Icons.notifications_active,
-                          size: 14,
-                          color: theme.colorScheme.error,
-                        ),
-                      ),
-                    if (progress != null)
-                      Positioned(
-                        left: 5,
-                        right: 19,
-                        bottom: 1,
-                        child: MuxWindowProgressIndicator(
-                          key: ValueKey(
-                            'monkeymux-sidebar-progress-${window.index}',
-                          ),
-                          progress: progress,
-                          semanticsWindowLabel: isActive
-                              ? null
-                              : 'MonkeyMux window ${window.index}: $title',
-                          compact: true,
-                        ),
-                      ),
-                  ],
                 ),
-              ),
-            ),
-          ),
-        ),
+              );
+            },
+      centerIcon: AgentToolIcon(
+        tool: windowTool,
+        color: isActive ? theme.colorScheme.onPrimaryContainer : identityColor,
+        fallbackIcon: window.isNativeAcp
+            ? Icons.smart_toy_outlined
+            : Icons.terminal,
       ),
+      topLeftBadge: window.isNativeAcp
+          ? AcpNativeBadge(
+              key: ValueKey('monkeymux-sidebar-native-${window.index}'),
+              color: identityColor,
+            )
+          : null,
+      indexBadge: _buildCollapsedSidebarWindowIndex(
+        theme,
+        window,
+        isActive: isActive,
+      ),
+      topRightBadge: window.hasAlert
+          ? Positioned(
+              right: 2,
+              top: 2,
+              child: Icon(
+                Icons.notifications_active,
+                size: 14,
+                color: theme.colorScheme.error,
+              ),
+            )
+          : null,
+      progress: progress,
+      progressKey: ValueKey('monkeymux-sidebar-progress-${window.index}'),
+      progressSemanticsLabel: isActive
+          ? null
+          : 'MonkeyMux window ${window.index}: $title',
     );
   }
 
@@ -2299,107 +2286,61 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
     final activityColor = acpStatusColor(theme.colorScheme, activity.tone);
     final progress = acpActivityTerminalProgress(activity);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      child: Tooltip(
-        message: 'Open ${acpSessionDisplayTitle(entry)}',
-        child: InkWell(
-          key: ValueKey('monkeymux-sidebar-acp-${key.value}'),
-          customBorder: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+    final displayTitle = acpSessionDisplayTitle(entry);
+    return _buildCollapsedSidebarTile(
+      theme,
+      inkWellKey: ValueKey('monkeymux-sidebar-acp-${key.value}'),
+      tooltip: 'Open $displayTitle',
+      isActive: isActive,
+      border: isActive ? Border.all(color: theme.colorScheme.primary) : null,
+      onTap: () {
+        unawaited(HapticFeedback.selectionClick());
+        unawaited(widget.onAction(TmuxOpenAcpSessionAction(key)));
+      },
+      centerIcon: AgentToolIcon(
+        tool: agentTool,
+        size: 22,
+        color: isActive ? theme.colorScheme.onPrimaryContainer : identityColor,
+      ),
+      topLeftBadge: AcpNativeBadge(
+        key: ValueKey('monkeymux-sidebar-acp-native-${key.value}'),
+        color: identityColor,
+      ),
+      indexBadge: DecoratedBox(
+        key: ValueKey('monkeymux-sidebar-acp-index-${key.value}'),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHigh,
+          border: Border.all(
+            color: theme.colorScheme.surfaceContainerHighest,
+            width: 1.5,
           ),
-          onTap: () {
-            unawaited(HapticFeedback.selectionClick());
-            unawaited(widget.onAction(TmuxOpenAcpSessionAction(key)));
-          },
-          child: Ink(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: isActive
-                  ? theme.colorScheme.primaryContainer
-                  : theme.colorScheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(12),
-              border: isActive
-                  ? Border.all(color: theme.colorScheme.primary)
-                  : null,
-            ),
-            child: Stack(
-              fit: StackFit.expand,
-              alignment: Alignment.center,
-              children: [
-                Center(
-                  child: AgentToolIcon(
-                    tool: agentTool,
-                    size: 22,
-                    color: isActive
-                        ? theme.colorScheme.onPrimaryContainer
-                        : identityColor,
-                  ),
-                ),
-                Positioned(
-                  left: 2,
-                  top: 2,
-                  child: AcpNativeBadge(
-                    key: ValueKey('monkeymux-sidebar-acp-native-${key.value}'),
-                    color: identityColor,
-                  ),
-                ),
-                Positioned(
-                  right: 3,
-                  bottom: 3,
-                  child: DecoratedBox(
-                    key: ValueKey('monkeymux-sidebar-acp-index-${key.value}'),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerHigh,
-                      border: Border.all(
-                        color: theme.colorScheme.surfaceContainerHighest,
-                        width: 1.5,
-                      ),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: SizedBox(
-                      width: 18,
-                      height: 15,
-                      child: Center(
-                        child: Text(
-                          '$windowIndex',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: identityColor,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                if (!activity.isReady)
-                  Positioned(
-                    right: 3,
-                    top: 3,
-                    child: Icon(activity.icon, size: 11, color: activityColor),
-                  ),
-                if (progress != null)
-                  Positioned(
-                    left: 5,
-                    right: 19,
-                    bottom: 1,
-                    child: MuxWindowProgressIndicator(
-                      key: ValueKey(
-                        'monkeymux-sidebar-acp-progress-${key.value}',
-                      ),
-                      progress: progress,
-                      semanticsWindowLabel:
-                          'Native agent window: ${acpSessionDisplayTitle(entry)}',
-                      compact: true,
-                    ),
-                  ),
-              ],
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: SizedBox(
+          width: 18,
+          height: 15,
+          child: Center(
+            child: Text(
+              '$windowIndex',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: identityColor,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ),
       ),
+      topRightBadge: activity.isReady
+          ? null
+          : Positioned(
+              right: 3,
+              top: 3,
+              child: Icon(activity.icon, size: 11, color: activityColor),
+            ),
+      progress: progress,
+      progressKey: ValueKey('monkeymux-sidebar-acp-progress-${key.value}'),
+      progressSemanticsLabel: 'Native agent window: $displayTitle',
     );
   }
 

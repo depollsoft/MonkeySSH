@@ -10,6 +10,7 @@ import '../../domain/services/iterm_color_scheme_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import 'brand_error_state.dart';
 import 'brand_list_skeleton.dart';
+import 'delete_confirmation_dialog.dart';
 import 'terminal_overlay_focus.dart';
 import 'theme_preview_card.dart';
 
@@ -497,31 +498,17 @@ class _TerminalThemePickerState extends ConsumerState<TerminalThemePicker> {
     );
   }
 
-  void _confirmDelete(TerminalThemeData theme) {
-    showDialog<void>(
-      context: context,
+  Future<void> _confirmDelete(TerminalThemeData theme) async {
+    final confirmed = await showDeleteConfirmationDialog(
+      context,
+      title: 'Delete theme?',
+      message: 'Are you sure you want to delete "${theme.name}"?',
       requestFocus: terminalOverlayRouteRequestFocus(context),
-      builder: (context) => AlertDialog(
-        title: const Text('Delete theme?'),
-        content: Text('Are you sure you want to delete "${theme.name}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await _deleteCustomTheme(theme);
-            },
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
     );
+    if (!confirmed || !mounted) {
+      return;
+    }
+    await _deleteCustomTheme(theme);
   }
 
   Future<void> _deleteCustomTheme(TerminalThemeData theme) async {
@@ -1015,9 +1002,18 @@ class _CurrentSelectionPreview extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    _colorDot(theme.green),
-                    _colorDot(theme.blue),
-                    _colorDot(theme.red),
+                    ThemeColorDot(
+                      color: theme.green,
+                      margin: const EdgeInsets.only(right: 2),
+                    ),
+                    ThemeColorDot(
+                      color: theme.blue,
+                      margin: const EdgeInsets.only(right: 2),
+                    ),
+                    ThemeColorDot(
+                      color: theme.red,
+                      margin: const EdgeInsets.only(right: 2),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 3),
@@ -1059,13 +1055,6 @@ class _CurrentSelectionPreview extends StatelessWidget {
       ),
     );
   }
-
-  Widget _colorDot(Color color) => Container(
-    width: 6,
-    height: 6,
-    margin: const EdgeInsets.only(right: 2),
-    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-  );
 }
 
 class _ThemeGridSection extends StatelessWidget {

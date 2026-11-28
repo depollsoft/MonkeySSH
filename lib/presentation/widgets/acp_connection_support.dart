@@ -10,15 +10,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../domain/models/acp_provider.dart';
+import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/command_names.dart';
+import '../../domain/services/acp_concurrency_policy.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
+import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/monkeymux_acp_bridge_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_exec_queue.dart';
 import '../../domain/services/ssh_service.dart';
 import '../../domain/services/windows_remote_powershell.dart';
+import 'acp_concurrency_choice.dart';
 import 'connection_attempt_dialog.dart';
 
 /// Reuses an active SSH session for [hostId], or connects through the standard
@@ -850,4 +854,47 @@ Future<bool> confirmAcpMonkeyMuxInstall(
     ),
   );
   return confirmed ?? false;
+}
+
+/// Formats a provider display label when a non-default launch [profile] should
+/// appear in the window/session title.
+String? formatAcpProfileProviderLabel(
+  String? providerLabel,
+  AcpLaunchProfile? profile,
+) {
+  if (profile == null || !profile.showInTitle) {
+    return null;
+  }
+  return '${providerLabel ?? 'Agent'} · ${profile.label}';
+}
+
+/// Runs [launch] and, when blocked by free-tier concurrency limits, resolves
+/// the block via [resolveAcpConcurrencyBlock] and relaunches once.
+///
+/// When [isCurrent] is supplied and returns `false` after the initial launch
+/// completes, the original result is returned without prompting.
+Future<AcpSessionLaunchResult?> runAcpLaunchWithConcurrencyResolution(
+  BuildContext context,
+  WidgetRef ref, {
+  required Future<AcpSessionLaunchResult?> Function(List<AcpSessionKey> replace)
+  launch,
+  bool Function(AcpConcurrencyRequiresChoice decision)? allowStopAndContinue,
+  bool Function()? isCurrent,
+  Future<void>? cancellation,
+}) async {
+  final result = await launch(const <AcpSessionKey>[]);
+  if (isCurrent != null && !isCurrent()) {
+    return result;
+  }
+  if (result is AcpSessionLaunchBlocked && context.mounted) {
+    return resolveAcpConcurrencyBlock(
+      context,
+      ref,
+      result.decision,
+      relaunch: launch,
+      allowStopAndContinue: allowStopAndContinue?.call(result.decision) ?? true,
+      cancellation: cancellation,
+    );
+  }
+  return result;
 }

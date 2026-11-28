@@ -15,6 +15,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
 import '../models/acp_transcript_markdown.dart';
+import 'acp_resource_chip.dart';
 
 /// Characters of the export shown in the preview. The shared document is
 /// always complete; laying out a multi-megabyte text field is not.
@@ -326,7 +327,7 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
                         '${_plural(export.prompts, 'prompt')} · '
                         '${_plural(export.replies, 'reply', 'replies')} · '
                         '${_plural(export.toolCalls, 'tool call')} · '
-                        '${_formatSize(_exportBytes)}',
+                        '${formatResourceSize(_exportBytes)}',
                         key: const ValueKey('acp-export-summary'),
                         style: FluttyTheme.monoStyle.copyWith(
                           fontSize: 12,
@@ -390,7 +391,7 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
                                 const SizedBox(height: FluttyTheme.spacingSm),
                                 Text(
                                   'Preview ends here. Copy or Share includes '
-                                  'all ${_formatSize(_exportBytes)}.',
+                                  'all ${formatResourceSize(_exportBytes)}.',
                                   key: const ValueKey(
                                     'acp-export-preview-truncated',
                                   ),
@@ -498,9 +499,3 @@ class _Notice extends StatelessWidget {
 
 String _plural(int value, String singular, [String? plural]) =>
     '$value ${value == 1 ? singular : (plural ?? '${singular}s')}';
-
-String _formatSize(int bytes) {
-  if (bytes < 1024) return '$bytes B';
-  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
-  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-}

@@ -4,7 +4,6 @@ import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -45,6 +44,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/system_vertical_bar.dart';
 import '../widgets/terminal_theme_picker.dart';
+import '../widgets/theme_preview_card.dart';
 import '../widgets/unsaved_changes_guard.dart';
 import 'host_edit_logic.dart';
 import 'transfer_screen.dart';
@@ -408,18 +408,11 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   );
 
   void _closeWithoutUnsavedPrompt(SnackBar snackBar) {
-    final messenger = ScaffoldMessenger.of(context);
     ref
         .read(hostEditViewModelProvider(widget.hostId).notifier)
         .markInitialDraft(_currentDraft());
     _updateDirtyState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      context.pop();
-      messenger.showSnackBar(snackBar);
-    });
+    schedulePopWithSnackBar(context, snackBar);
   }
 
   @override
@@ -2595,9 +2588,9 @@ class _ThemeSelectionTile extends StatelessWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    _colorDot(theme.red),
-                    _colorDot(theme.green),
-                    _colorDot(theme.blue),
+                    ThemeColorDot(color: theme.red),
+                    ThemeColorDot(color: theme.green),
+                    ThemeColorDot(color: theme.blue),
                   ],
                 ),
               )
@@ -2624,13 +2617,6 @@ class _ThemeSelectionTile extends StatelessWidget {
       onTap: onTap,
     );
   }
-
-  Widget _colorDot(Color color) => Container(
-    width: 6,
-    height: 6,
-    margin: const EdgeInsets.symmetric(horizontal: 1),
-    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-  );
 
   TerminalThemeData? _findTheme(Iterable<TerminalThemeData> themes, String id) {
     for (final theme in themes) {

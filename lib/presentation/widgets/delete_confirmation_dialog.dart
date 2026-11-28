@@ -8,9 +8,12 @@ Future<bool> showDeleteConfirmationDialog(
   BuildContext context, {
   required String title,
   required String message,
+  String confirmLabel = 'Delete',
+  bool? requestFocus,
 }) async {
   final confirmed = await showDialog<bool>(
     context: context,
+    requestFocus: requestFocus,
     builder: (context) {
       final colorScheme = Theme.of(context).colorScheme;
       return AlertDialog(
@@ -27,7 +30,7 @@ Future<bool> showDeleteConfirmationDialog(
               backgroundColor: colorScheme.error,
               foregroundColor: colorScheme.onError,
             ),
-            child: const Text('Delete'),
+            child: Text(confirmLabel),
           ),
         ],
       );

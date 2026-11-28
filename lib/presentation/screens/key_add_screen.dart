@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../domain/models/monetization.dart';
@@ -122,19 +121,12 @@ class _KeyAddScreenState extends ConsumerState<KeyAddScreen>
   }
 
   void _closeWithoutUnsavedPrompt(SnackBar snackBar) {
-    final messenger = ScaffoldMessenger.of(context);
     setState(() {
       _isLeavingWithoutPrompt = true;
       _generateHasUnsavedChanges = false;
       _importHasUnsavedChanges = false;
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      context.pop();
-      messenger.showSnackBar(snackBar);
-    });
+    schedulePopWithSnackBar(context, snackBar);
   }
 }
 

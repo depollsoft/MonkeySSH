@@ -142,19 +142,64 @@ class ThemePreviewCard extends StatelessWidget {
 
   Widget _buildColorSwatches() => Row(
     children: [
-      _colorDot(theme.red),
-      _colorDot(theme.green),
-      _colorDot(theme.yellow),
-      _colorDot(theme.blue),
-      _colorDot(theme.magenta),
-      _colorDot(theme.cyan),
+      ThemeColorDot(
+        color: theme.red,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
+      ThemeColorDot(
+        color: theme.green,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
+      ThemeColorDot(
+        color: theme.yellow,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
+      ThemeColorDot(
+        color: theme.blue,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
+      ThemeColorDot(
+        color: theme.magenta,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
+      ThemeColorDot(
+        color: theme.cyan,
+        size: 8,
+        margin: const EdgeInsets.only(right: 3),
+      ),
     ],
   );
+}
 
-  Widget _colorDot(Color color) => Container(
-    width: 8,
-    height: 8,
-    margin: const EdgeInsets.only(right: 3),
+/// Small circular color swatch dot used in terminal theme previews and pickers.
+class ThemeColorDot extends StatelessWidget {
+  /// Creates a circular swatch dot of [color].
+  const ThemeColorDot({
+    required this.color,
+    this.size = 6,
+    this.margin = const EdgeInsets.symmetric(horizontal: 1),
+    super.key,
+  });
+
+  /// Fill color of the dot.
+  final Color color;
+
+  /// Diameter of the dot in logical pixels.
+  final double size;
+
+  /// Outer margin around the dot.
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    margin: margin,
     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
   );
 }

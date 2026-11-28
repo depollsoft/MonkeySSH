@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -416,18 +415,11 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   }
 
   void _closeWithoutUnsavedPrompt(SnackBar snackBar) {
-    final messenger = ScaffoldMessenger.of(context);
     setState(() {
       _initialDraft = _currentDraft();
       _isLoading = false;
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      context.pop();
-      messenger.showSnackBar(snackBar);
-    });
+    schedulePopWithSnackBar(context, snackBar);
   }
 
   Widget _buildVariablePreview() {
