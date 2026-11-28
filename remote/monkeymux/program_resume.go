@@ -402,6 +402,11 @@ func (w *muxWindow) applyProgramResumePayloadLocked(body string) {
 			}
 		}
 		delete(w.programResume, oldest)
+		// The evicted owner's own report must not bring the command back.
+		if last, reported := w.programResumeTimes[oldest]; reported {
+			last.exclusive = true
+			w.programResumeTimes[oldest] = last
+		}
 	}
 }
 
@@ -475,7 +480,7 @@ func (w *muxWindow) programResumeCandidatesLocked() []programResumeCandidate {
 			identified: record.identified,
 			state: programResumeState{
 				Argv:        append([]string(nil), record.argv...),
-				Cwd:         firstNonEmptyString(record.cwd, record.ownerCwd),
+				Cwd:         programResumeDirectory(record),
 				ShellWindow: w.interactiveShell,
 			},
 		})
@@ -538,6 +543,15 @@ func (s *muxServer) identifyProgramResumeOwners() {
 		}
 		s.mu.Unlock()
 	}
+}
+
+// programResumeDirectory is the directory a record's command runs in: the
+// one it reported, exactly as reported, or else the one its owner was in.
+func programResumeDirectory(record programResumeRecord) string {
+	if record.cwd != "" {
+		return record.cwd
+	}
+	return record.ownerCwd
 }
 
 // programResumeOwnerDirectory returns the absolute working directory of a
@@ -671,7 +685,8 @@ func writeProgramResumeLaunch(launch programResumeLaunch) (string, error) {
 	if _, err := rand.Read(name); err != nil {
 		return "", err
 	}
-	path := filepath.Join(directory, "monkeymux-resume-"+hex.EncodeToString(name)+".json")
+	sweepProgramResumeLaunches(directory, time.Now())
+	path := filepath.Join(directory, programResumeLaunchPrefix+hex.EncodeToString(name)+".json")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", err
 	}
@@ -679,8 +694,30 @@ func writeProgramResumeLaunch(launch programResumeLaunch) (string, error) {
 	return path, nil
 }
 
-// programResumeLaunchLifetime is how long an unread launch file is kept.
-const programResumeLaunchLifetime = 5 * time.Minute
+const (
+	// programResumeLaunchLifetime is how long an unread launch file is kept.
+	programResumeLaunchLifetime = 5 * time.Minute
+	programResumeLaunchPrefix   = "monkeymux-resume-"
+)
+
+// sweepProgramResumeLaunches removes launch files that outlived a server
+// which exited before its own timer could.
+func sweepProgramResumeLaunches(directory string, now time.Time) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, programResumeLaunchPrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() &&
+			now.Sub(info.ModTime()) > programResumeLaunchLifetime {
+			_ = os.Remove(filepath.Join(directory, name))
+		}
+	}
+}
 
 // programResumeExecCommand is `monkeymux program-resume-exec <file>`, which
 // the restored window's shell runs once its startup files have been read. It
@@ -714,7 +751,15 @@ func programResumeExecCommand(args []string) {
 			fmt.Fprintf(os.Stderr, "monkeymux: not resuming %s: %v\n", launch.Argv[0], err)
 			os.Exit(1)
 		}
-		environment = append(environment, "PWD="+launch.Cwd)
+		// Replace PWD rather than add a second one: a program may read the
+		// first, which still names where the shell's startup left it.
+		kept := environment[:0]
+		for _, entry := range environment {
+			if !strings.HasPrefix(entry, "PWD=") {
+				kept = append(kept, entry)
+			}
+		}
+		environment = append(kept, "PWD="+launch.Cwd)
 	}
 	program := launch.Argv[0]
 	if !filepath.IsAbs(program) {
@@ -723,7 +768,14 @@ func programResumeExecCommand(args []string) {
 			os.Exit(127)
 		}
 	}
-	if report := programResumeReport(os.Getpid(), time.Now(), launch, os.Getenv(programResumeTokenEnv)); report != "" {
+	token := os.Getenv(programResumeTokenEnv)
+	report := programResumeReport(os.Getpid(), time.Now(), launch, token)
+	if report == "" {
+		// Too long with the directory: MonkeyMux reads this process's own
+		// directory, which is the same one, when a report names none.
+		report = programResumeReport(os.Getpid(), time.Now(), programResumeLaunch{Argv: launch.Argv}, token)
+	}
+	if report != "" {
 		_, _ = os.Stdout.WriteString(report)
 	}
 	if err := syscall.Exec(program, launch.Argv, environment); err != nil {

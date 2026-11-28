@@ -430,6 +430,34 @@ func TestProgramResumeReplayProtectionOutlivesTheRecord(t *testing.T) {
 		t.Fatalf("a cleared command came back from a replayed report: %+v", got)
 	}
 
+	// An owner evicted by the cap on commands cannot report its way back
+	// with the report that was evicted.
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	window = &muxWindow{programResumeToken: programResumeTestToken}
+	reportProgramResume(window, original)
+	for range programResumeMaxRecords {
+		standIn := exec.Command(executable)
+		standIn.Env = append(os.Environ(), "MONKEYMUX_TEST_STAND_IN=1")
+		if err := standIn.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = standIn.Process.Kill()
+			_ = standIn.Wait()
+		})
+		reportProgramResume(window, programResumeBodyAt(base, standIn.Process.Pid, 1, programResumeArgv("other")))
+	}
+	if _, kept := window.programResume[self]; kept || len(window.programResume) != programResumeMaxRecords {
+		t.Fatalf("the least recent of %d owners was not evicted", len(window.programResume))
+	}
+	reportProgramResume(window, original)
+	if _, back := window.programResume[self]; back {
+		t.Fatal("an evicted command came back from its own replayed report")
+	}
+
 	// Past the cap on remembered times, the oldest becomes a floor for all.
 	window = &muxWindow{programResumeToken: programResumeTestToken}
 	reportProgramResume(window, original)

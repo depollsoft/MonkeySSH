@@ -743,8 +743,16 @@ func programResumeCommand(
 		return nil, false, nil, err
 	}
 	if resume.ShellWindow {
-		line := " " + shellQuote(self) + " program-resume-exec " + shellQuote(launch) + "\n"
-		return shellCommand(shell), false, []byte(line), nil
+		line := " " + shellQuote(self) + " program-resume-exec " + shellQuote(launch)
+		for index := 0; index < len(line); index++ {
+			// The terminal's line editing reads control characters before
+			// the shell reads quotes, so a path holding one cannot be typed.
+			if line[index] < 0x20 || line[index] == 0x7f {
+				_ = os.Remove(launch)
+				return nil, false, nil, errors.New("monkeymux: path cannot be typed into a shell")
+			}
+		}
+		return shellCommand(shell), false, []byte(line + "\n"), nil
 	}
 	cmd = exec.Command(shell, "-i", "-c", `\exec "$0" program-resume-exec "$1"`, self, launch)
 	if base := filepath.Base(shell); base != "" {
